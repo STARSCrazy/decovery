@@ -1,0 +1,33 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/STARSCrazy/decovery"
+rust-version = "1.85"
+
+[workspace.dependencies]
+decovery-core = { path = "crates/decovery-core" }
+decovery-loaders = { path = "crates/decovery-loaders" }
+decovery-objects = { path = "crates/decovery-objects" }
+decovery-x86 = { path = "crates/decovery-x86" }
+iced-x86 = { version = "1.21", default-features = false, features = ["std", "decoder", "intel", "instr_info"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+thiserror = "2"
+blake3 = "1"
+tempfile = "3"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.test]
+debug = "line-tables-only"

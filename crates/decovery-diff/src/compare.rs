@@ -1,0 +1,562 @@
+//! Byte and reference comparison (port of Decomp's `vergleiche`) plus decovery's verdict.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use decovery_core::{Address, Program, RelocKind};
+use decovery_objects::{FunctionView, ObjReloc, RefTarget, functions};
+use decovery_x86::{DecodeOptions, decode_detailed, internal_calls, padding_positions};
+
+use crate::instructions::{self, Naming, Side};
+use crate::{
+    Blocker, CompareOptions, Comparison, Decoration, Metrics, NameAt, SymbolView, Verdict,
+};
+
+fn signed(bytes: &[u8]) -> i64 {
+    let raw = bytes
+        .iter()
+        .rev()
+        .fold(0u64, |a, &b| (a << 8) | u64::from(b));
+    let bits = 8 * bytes.len() as u32;
+    if bits > 0 && bits < 64 && raw >> (bits - 1) != 0 {
+        raw as i64 - (1i64 << bits)
+    } else {
+        raw as i64
+    }
+}
+
+/// Numeric value of an address inside its space (flat: linear; segmented: offset).
+fn base_of(at: Address) -> Option<u64> {
+    match at {
+        Address::Flat(a) => Some(u64::from(a)),
+        Address::Seg { off, .. } => Some(u64::from(off)),
+        _ => None,
+    }
+}
+
+/// The address `value` in the space of `at`, wrapped like the field (Decomp's `_ziel`).
+fn address_in_space(at: Address, value: i64) -> Option<Address> {
+    match at {
+        Address::Flat(_) => Some(Address::Flat(value as u32)),
+        Address::Seg { seg, .. } => Some(Address::Seg {
+            seg,
+            off: value as u16,
+        }),
+        _ => None,
+    }
+}
+
+fn same(a: Address, b: Address) -> bool {
+    a == b || (a.linear().is_some() && a.linear() == b.linear())
+}
+
+/// The rebuilt function in Decomp's terms.
+struct Rebuild<'a> {
+    f: &'a FunctionView<'a>,
+    /// Bytes as Decomp's reader produced them: own-section absolute fields it could name are zeroed.
+    bytes: Vec<u8>,
+    gaps: BTreeSet<u32>,
+    relative: BTreeSet<u32>,
+    refs: BTreeMap<u32, String>,
+    addends: BTreeMap<u32, i64>,
+    /// Section offset → name of the functions in the same section (a later name at one offset wins).
+    internal: BTreeMap<u32, String>,
+}
+
+impl<'a> Rebuild<'a> {
+    fn new(f: &'a FunctionView<'a>) -> Self {
+        let section = f.module.sections.get(f.section as usize);
+        let section_relocs: &[ObjReloc] = section.map_or(&[], |s| s.relocs.as_slice());
+        let section_data: &[u8] = section.map_or(&[], |s| s.data.as_slice());
+        let section_gaps: BTreeSet<u32> = section_relocs
+            .iter()
+            .flat_map(|r| r.offset..r.offset.saturating_add(u32::from(r.width)))
+            .collect();
+        let mut bytes = f.code().to_vec();
+        for r in section_relocs {
+            let RefTarget::Section { index, offset } = r.target else {
+                continue;
+            };
+            if index != f.section || r.kind == RelocKind::Relative {
+                continue;
+            }
+            let p = r.offset;
+            let w = if (p..p.saturating_add(4)).all(|q| section_gaps.contains(&q)) {
+                4
+            } else {
+                2
+            };
+            let field = section_data
+                .get(p as usize..)
+                .map_or(&[][..], |d| &d[..d.len().min(w as usize)]);
+            let target = i64::from(offset) + signed(field);
+            let named = f
+                .module
+                .symbols
+                .iter()
+                .any(|s| s.section == f.section && i64::from(s.offset) == target);
+            if named {
+                for q in p..p.saturating_add(w) {
+                    if q >= f.start
+                        && let Some(b) = bytes.get_mut((q - f.start) as usize)
+                    {
+                        *b = 0;
+                    }
+                }
+            }
+        }
+        let mut internal = BTreeMap::new();
+        for g in functions(f.module) {
+            if g.section == f.section {
+                internal.insert(g.start, g.name.to_string());
+            }
+        }
+        Rebuild {
+            f,
+            bytes,
+            gaps: f.gaps(),
+            relative: f.relative_offsets(),
+            refs: f
+                .references()
+                .into_iter()
+                .map(|(o, n)| (o, n.to_string()))
+                .collect(),
+            addends: f.addends().into_iter().collect(),
+            internal,
+        }
+    }
+
+    /// Fixup-less `E8`/`E9` whose target is exactly another function of the same section (Decomp's
+    /// `_interne_aufrufe`): field offset → name.
+    fn internal_calls(&self, width: u32) -> BTreeMap<u32, String> {
+        let bits = width * 8;
+        internal_calls(&self.bytes, bits, u64::from(self.f.start))
+            .into_iter()
+            .filter(|&(field, target)| {
+                let k = field - 1;
+                !(k..field + width).any(|p| self.gaps.contains(&p))
+                    && target != u64::from(self.f.start)
+            })
+            .filter_map(|(field, target)| {
+                let t = u32::try_from(target).ok()?;
+                self.internal.get(&t).map(|n| (field, n.clone()))
+            })
+            .collect()
+    }
+}
+
+/// Decomp's `_fuellung`: 1–3 zeros where the original has `90` everywhere, or the last zero run (up to 7).
+fn zero_padding(code: &[u8], original: &[u8], gaps: &BTreeSet<u32>) -> BTreeSet<u32> {
+    let mut out = BTreeSet::new();
+    let mut k = 0usize;
+    while k < code.len() {
+        if code[k] != 0 || gaps.contains(&(k as u32)) {
+            k += 1;
+            continue;
+        }
+        let mut end = k;
+        while end < code.len() && code[end] == 0 && !gaps.contains(&(end as u32)) {
+            end += 1;
+        }
+        let run = end - k;
+        if (end == code.len() && run <= 7)
+            || (run <= 3 && original[k..end].iter().all(|&b| b == 0x90))
+        {
+            out.extend(k as u32..end as u32);
+        }
+        k = end;
+    }
+    out
+}
+
+fn name_or_default(symbols: &dyn SymbolView, at: Address) -> NameAt {
+    symbols
+        .name_at(at)
+        .unwrap_or_else(|| NameAt::new(String::new(), true))
+}
+
+/// Decomp's `nb_name`: the C name, or the raw name when only that is known (Watcom `-4s`: `_dos_setvect`).
+fn rebuild_name(symbols: &dyn SymbolView, decoration: &Decoration, raw: &str) -> String {
+    let c = decoration.undecorate(raw);
+    if c != raw && symbols.address_of(c).is_none() && symbols.address_of(raw).is_some() {
+        raw.to_string()
+    } else {
+        c.to_string()
+    }
+}
+
+fn unchecked(bytes: u32, blocker: Option<Blocker>) -> Comparison {
+    Comparison {
+        verdict: Verdict::Unchecked,
+        blockers: blocker.into_iter().collect(),
+        metrics: Metrics {
+            bytes,
+            ..Metrics::default()
+        },
+    }
+}
+
+/// Compares the rebuilt function `f` with the original at `at`. See the crate documentation for the rules.
+pub fn compare(
+    f: &FunctionView,
+    at: Address,
+    program: &Program,
+    symbols: &dyn SymbolView,
+    decoration: &Decoration,
+    options: &CompareOptions,
+) -> Comparison {
+    let rebuild = Rebuild::new(f);
+    let n = rebuild.bytes.len();
+    let len = n as u32;
+    let bits = f
+        .module
+        .sections
+        .get(f.section as usize)
+        .map_or(0, |s| u32::from(s.bits));
+    if bits != 16 && bits != 32 {
+        return unchecked(len, None);
+    }
+    let Some(original) = program.read(at, n) else {
+        return unchecked(len, Some(Blocker::OriginalUnavailable));
+    };
+    let Some(base) = base_of(at) else {
+        return unchecked(len, Some(Blocker::OriginalUnavailable));
+    };
+    let width = bits / 8;
+    let code = &rebuild.bytes;
+
+    // --- Decomp's `vergleiche` ---
+    let mut refs = rebuild.refs.clone();
+    let mut relative = rebuild.relative.clone();
+    let mut gaps = rebuild.gaps.clone();
+    let inner = rebuild.internal_calls(width);
+    for (&field, name) in &inner {
+        refs.insert(field, name.clone());
+        relative.insert(field);
+        gaps.extend(field..field + width);
+    }
+    let mut padding = if options.padding {
+        zero_padding(code, original, &gaps)
+    } else {
+        BTreeSet::new()
+    };
+    let original_padding = padding_positions(original, bits);
+    padding.extend(
+        padding_positions(code, bits)
+            .into_iter()
+            .filter(|k| !gaps.contains(k))
+            .filter(|&k| {
+                original[k as usize] == 0
+                    || original_padding.contains(&k)
+                    || options.original_len.is_some_and(|l| k >= l)
+            }),
+    );
+    if let Some(original_len) = options.original_len
+        && len > original_len
+    {
+        // The following Watcom jump table is no code; only the structured decoder finds alignment
+        // instructions behind it at their real boundaries.
+        let decoded = decode_detailed(code, bits, 0, &DecodeOptions::new(gaps.clone(), false));
+        for d in decoded.iter().rev() {
+            if !d.is_padding() || d.offset < original_len {
+                break;
+            }
+            padding.extend(d.offset..d.offset + d.len);
+        }
+    }
+    let mut m = Metrics {
+        bytes: len,
+        ..Metrics::default()
+    };
+    for (k, (&a, &b)) in code.iter().zip(original).enumerate() {
+        let k = k as u32;
+        if gaps.contains(&k) {
+            m.gaps += 1;
+        } else if padding.contains(&k) && a != b {
+            m.padding += 1;
+        } else if a == b {
+            m.equal += 1;
+        } else {
+            m.differing += 1;
+            m.first_difference.get_or_insert(k);
+        }
+    }
+    for &field in &relative {
+        let Some(raw) = refs.get(&field).filter(|_| field + width <= len) else {
+            m.refs_unchecked += 1;
+            continue;
+        };
+        let mut wanted = decoration.undecorate(raw).to_string();
+        let value = signed(&original[field as usize..(field + width) as usize]);
+        let Some(target) = address_in_space(at, base as i64 + i64::from(field + width) + value)
+        else {
+            m.refs_unchecked += 1;
+            continue;
+        };
+        let found = name_or_default(symbols, target);
+        if found.name == *raw && found.name != wanted {
+            wanted = raw.clone();
+        }
+        let elsewhere = symbols.address_of(&wanted);
+        if found.name == wanted {
+            m.refs_ok += 1;
+        } else if found.is_default && elsewhere.is_none_or(|e| same(e, target)) {
+            // a default name in the original that the rebuild names: a naming hint, not an error
+        } else {
+            m.refs_wrong += 1;
+        }
+    }
+
+    // --- Decomp's `_befehlsvergleich` ---
+    let original_span = options
+        .original_len
+        .and_then(|l| program.read(at, l as usize))
+        .unwrap_or(original);
+    let names: BTreeMap<u32, String> = rebuild
+        .refs
+        .iter()
+        .map(|(&o, raw)| (o, rebuild_name(symbols, decoration, raw)))
+        .collect();
+    let section_start = u64::from(f.start);
+    let rebuild_target = |t: u64| -> Option<String> {
+        let t = u32::try_from(t).ok()?;
+        rebuild
+            .internal
+            .get(&t)
+            .map(|n| decoration.undecorate(n).to_string())
+    };
+    let original_name = |t: u64| -> Option<String> {
+        let mask = if matches!(at, Address::Flat(_)) {
+            0xFFFF_FFFF
+        } else {
+            0xFFFF
+        };
+        let target = address_in_space(at, (t & mask) as i64)?;
+        symbols
+            .name_at(target)
+            .filter(|n| !n.is_default)
+            .map(|n| n.name)
+    };
+    let data_names =
+        |t: u64| -> Vec<(String, i64)> { original_name(t).map(|n| (n, 0)).into_iter().collect() };
+    let flat = matches!(at, Address::Flat(_));
+    let no_names = BTreeMap::new();
+    let no_addends = BTreeMap::new();
+    let no_gaps = BTreeSet::new();
+    let rebuild_side = Side {
+        code,
+        base: section_start,
+        gaps: &rebuild.gaps,
+        naming: Naming {
+            names: &names,
+            addends: &rebuild.addends,
+            target_name: &rebuild_target,
+            data_names: None,
+        },
+    };
+    let original_side = Side {
+        code: original_span,
+        base,
+        gaps: &no_gaps,
+        naming: Naming {
+            names: &no_names,
+            addends: &no_addends,
+            target_name: &original_name,
+            data_names: if flat { Some(&data_names) } else { None },
+        },
+    };
+    let data_address = |name: &str| -> Option<u64> {
+        if flat {
+            symbols.address_of(name).and_then(|a| a.linear())
+        } else {
+            None
+        }
+    };
+    m.instructions_differing = instructions::differing(
+        &rebuild_side,
+        &original_side,
+        bits,
+        options.padding,
+        &data_address,
+    );
+
+    // --- decovery's verdict ---
+    let mut blockers = Vec::new();
+    if m.differing > 0 {
+        blockers.push(Blocker::BytesDiffer { count: m.differing });
+    }
+    // Fields inside padding behind the original's end (the following function's jump table) belong to the
+    // next function, as in Decomp's byte comparison.
+    let mut checks: Vec<(u32, Check)> = f
+        .relocs()
+        .map(|r| (r.offset - f.start, Check::Fixup(r)))
+        .filter(|(o, _)| !padding.contains(o))
+        .collect();
+    checks.extend(inner.iter().map(|(&o, n)| (o, Check::Internal(n))));
+    checks.sort_by_key(|&(o, _)| o);
+    for (offset, check) in checks {
+        if let Some(b) = check_reference(
+            offset, &check, &rebuild, at, base, original, program, symbols, decoration, width,
+        ) {
+            blockers.push(b);
+        }
+    }
+    if m.instructions_differing > 0 {
+        blockers.push(Blocker::InstructionsDiffer {
+            count: m.instructions_differing,
+        });
+    }
+    Comparison {
+        verdict: if blockers.is_empty() {
+            Verdict::Identical
+        } else {
+            Verdict::Differs
+        },
+        blockers,
+        metrics: m,
+    }
+}
+
+enum Check<'a> {
+    Fixup(&'a ObjReloc),
+    /// A fixup-less near call/jump to another function of the object.
+    Internal(&'a str),
+}
+
+/// decovery's rule for one relocated field at `offset` (relative to the function); `None` = matches.
+#[allow(clippy::too_many_arguments)]
+fn check_reference(
+    offset: u32,
+    check: &Check<'_>,
+    rebuild: &Rebuild<'_>,
+    at: Address,
+    base: u64,
+    original: &[u8],
+    program: &Program,
+    symbols: &dyn SymbolView,
+    decoration: &Decoration,
+    width: u32,
+) -> Option<Blocker> {
+    let f = rebuild.f;
+    let unchecked = Some(Blocker::UncheckedRef { at: offset });
+    let (kind, field_width) = match check {
+        Check::Fixup(r) => (r.kind, u32::from(r.width)),
+        Check::Internal(_) => (RelocKind::Relative, width),
+    };
+    let wrong = Some(match kind {
+        RelocKind::Relative => Blocker::WrongRelativeRef { at: offset },
+        _ => Blocker::WrongAbsoluteRef { at: offset },
+    });
+    let lookup = |raw: &str| -> Option<Address> {
+        let c = decoration.undecorate(raw);
+        symbols.address_of(c).or_else(|| symbols.address_of(raw))
+    };
+    let raw_field = f
+        .code()
+        .get(offset as usize..(offset + field_width) as usize)
+        .unwrap_or(&[]);
+    let expected = match check {
+        Check::Internal(name) => {
+            let Some(a) = lookup(name) else {
+                return unchecked;
+            };
+            a
+        }
+        Check::Fixup(r) => {
+            let content = signed(raw_field);
+            match &r.target {
+                RefTarget::Symbol(name) => {
+                    let Some(a) = lookup(name) else {
+                        return unchecked;
+                    };
+                    let Ok(a) = a.offset_by(content.wrapping_add(r.addend)) else {
+                        return wrong;
+                    };
+                    a
+                }
+                RefTarget::Section {
+                    index,
+                    offset: base_offset,
+                } if *index == f.section => {
+                    // A symbol start (static function) resolves through that symbol's address; a target behind
+                    // the function (entries of the following function's jump table) through the function
+                    // containing it; everything else, including the function's own jump table placed before
+                    // its start, through the function's own address.
+                    let target = i64::from(*base_offset) + content;
+                    let end = i64::from(f.start) + i64::from(f.len);
+                    let in_section = |s: &&decovery_objects::ObjSymbol| {
+                        s.section == f.section && s.offset != f.start
+                    };
+                    let owner = f
+                        .module
+                        .symbols
+                        .iter()
+                        .filter(in_section)
+                        .find(|s| i64::from(s.offset) == target)
+                        .or_else(|| {
+                            (target >= end)
+                                .then(|| {
+                                    f.module
+                                        .symbols
+                                        .iter()
+                                        .filter(in_section)
+                                        .filter(|s| i64::from(s.offset) <= target)
+                                        .max_by_key(|s| s.offset)
+                                })
+                                .flatten()
+                        });
+                    let resolved = match owner {
+                        Some(s) => lookup(&s.name)
+                            .and_then(|a| a.offset_by(target - i64::from(s.offset)).ok()),
+                        None => at.offset_by(target - i64::from(f.start)).ok(),
+                    };
+                    let Some(a) = resolved else {
+                        return unchecked;
+                    };
+                    a
+                }
+                RefTarget::Section {
+                    index,
+                    offset: base_offset,
+                } => {
+                    let target = i64::from(*base_offset) + content;
+                    let name = f
+                        .module
+                        .symbols
+                        .iter()
+                        .find(|s| s.section == *index && i64::from(s.offset) == target)
+                        .map(|s| s.name.as_str());
+                    let Some(a) = name.and_then(lookup) else {
+                        return unchecked;
+                    };
+                    a
+                }
+                _ => return unchecked,
+            }
+        }
+    };
+    let Ok(field_at) = at.offset_by(i64::from(offset)) else {
+        return wrong;
+    };
+    let relocation = program
+        .relocations_in(field_at, 1)
+        .iter()
+        .find(|r| same(r.at, field_at));
+    let ok = match (relocation, kind) {
+        (Some(r), _) => {
+            r.kind == kind
+                && u32::from(r.width) == field_width
+                && r.target
+                    .offset_by(r.addend)
+                    .is_ok_and(|t| same(t, expected))
+        }
+        (None, RelocKind::Relative) => {
+            let Some(field) = original.get(offset as usize..(offset + field_width) as usize) else {
+                return wrong;
+            };
+            let value = base as i64 + i64::from(offset + field_width) + signed(field);
+            address_in_space(at, value).is_some_and(|t| same(t, expected))
+        }
+        (None, _) => false,
+    };
+    if ok { None } else { wrong }
+}

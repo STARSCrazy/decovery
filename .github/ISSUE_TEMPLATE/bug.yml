@@ -1,0 +1,23 @@
+name: Bug report
+description: Something does not work as described
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: Command or MCP call, expected and actual result. Do not attach proprietary binaries.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: decovery version
+      placeholder: decovery --version
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, plugins and backends in use (Ghidra, dosbox-lab, compilers) with versions.

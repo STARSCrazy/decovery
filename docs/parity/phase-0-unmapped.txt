@@ -1,0 +1,11 @@
+# Decomp keys that `decovery migrate` reports as unmapped on the private phase-0 workspace.
+# One entry per line: dotted key or file, a tab, a short reason. Lines starting with # are comments.
+file:nachbau	rebuild sources and build output; moved by hand to src/ in a later phase
+file:spiel	game files of the target; stay outside the repo
+file:wissen/*.md	German working reports, not knowledge; stay in the Decomp workspace
+file:wissen/programmierstil.md	style guide; becomes knowledge/style.md by hand
+file:wissen/laufzeit	runtime recordings; runs schema comes with the runtime phase
+file:wissen/laufzeit.toml	runtime run records; runs schema comes with the runtime phase
+file:wissen/nachbau.toml	per-function build results; rebuild.toml schema comes with the rebuild phase
+file:wissen/nachbau-programm.toml	program-level build results; rebuild.toml schema comes with the rebuild phase
+file:wissen/verweise.toml	call and jump references; no decovery counterpart yet
