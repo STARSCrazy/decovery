@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "knowledge/rebuild.toml",
+  "type": "object",
+  "required": [
+    "schema"
+  ],
+  "properties": {
+    "schema": {
+      "const": 1
+    },
+    "function": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "address",
+          "name"
+        ],
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "file": {
+            "type": "string"
+          },
+          "compiler": {
+            "type": "string"
+          },
+          "flags": {
+            "type": "string"
+          },
+          "result": {
+            "type": "string",
+            "description": "identical, differs"
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "equal": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "gaps": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "differing": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "refs_ok": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "refs_wrong": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "refs_unchecked": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "instructions_differing": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "alignment": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "padding_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "date": {
+            "type": "string"
+          },
+          "first_difference": {
+            "type": "string"
+          },
+          "diagnoses": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "equivalence": {
+            "type": "object",
+            "properties": {
+              "verdict": {
+                "enum": [
+                  "unchecked",
+                  "equivalent_tested",
+                  "equivalent_proven"
+                ]
+              },
+              "static": {
+                "enum": [
+                  "different",
+                  "unclear",
+                  "registers_only"
+                ]
+              },
+              "static_reason": {
+                "type": "string"
+              },
+              "dynamic": {
+                "enum": [
+                  "no_case",
+                  "equal"
+                ]
+              },
+              "cases": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "genuine": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "reliable": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "reasons": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "code": {
+                "type": "string"
+              },
+              "date": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

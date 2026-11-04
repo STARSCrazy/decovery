@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "knowledge/rebuild-program.toml",
+  "type": "object",
+  "required": [
+    "schema"
+  ],
+  "properties": {
+    "schema": {
+      "const": 1
+    },
+    "program": {
+      "type": "object",
+      "properties": {
+        "result": {
+          "type": "string",
+          "description": "identical, differs"
+        },
+        "compiler": {
+          "type": "string"
+        },
+        "original_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rebuilt_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "differing": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "date": {
+          "type": "string"
+        },
+        "shares": {
+          "type": "object",
+          "properties": {
+            "c": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "library": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "assembly": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "other_functions": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "rest": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "used": {
+          "type": "object",
+          "properties": {
+            "functions": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "bytes": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    }
+  }
+}

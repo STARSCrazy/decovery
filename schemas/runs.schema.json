@@ -1,0 +1,205 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "knowledge/runs.toml",
+  "type": "object",
+  "required": [
+    "schema"
+  ],
+  "properties": {
+    "schema": {
+      "const": 1
+    },
+    "run": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "imported": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "instructions": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "outside_functions": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "states": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "pairs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "from": {
+                  "type": "string"
+                },
+                "to": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "count": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "files": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            }
+          },
+          "bases": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "sha256": {
+            "type": "object",
+            "properties": {
+              "coverage": {
+                "type": "string"
+              },
+              "calls": {
+                "type": "string"
+              },
+              "events": {
+                "type": "string"
+              },
+              "indirect": {
+                "type": "string"
+              }
+            }
+          },
+          "function": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "address"
+              ],
+              "properties": {
+                "address": {
+                  "type": "string"
+                },
+                "calls": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "omitted": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "parameters": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/values"
+                  }
+                },
+                "returns": {
+                  "$ref": "#/$defs/values"
+                },
+                "cases": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "inputs": {
+                        "type": "array"
+                      },
+                      "output": {
+                        "type": "string"
+                      },
+                      "output_pointer": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                },
+                "files": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "file": {
+                        "type": "string"
+                      },
+                      "mode": {
+                        "enum": [
+                          "read",
+                          "write"
+                        ]
+                      },
+                      "direct": {
+                        "type": "boolean"
+                      },
+                      "accesses": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "offset_min": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "offset_max": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_length": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "values": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "enum": [
+            "number",
+            "pointer",
+            "mixed"
+          ]
+        },
+        "values": {
+          "type": "array"
+        },
+        "min": {
+          "type": "integer"
+        },
+        "max": {
+          "type": "integer"
+        }
+      }
+    }
+  }
+}

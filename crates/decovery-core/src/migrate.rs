@@ -4,6 +4,9 @@
 //! silently. Free text (comments, evidence, notes) is copied unchanged and counted in
 //! [`MigrationReport::untranslated_texts`].
 
+mod knowledge;
+mod layout;
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -31,6 +34,8 @@ pub struct MigrationReport {
     pub unmapped: Vec<String>,
     /// Number of free-text fields copied unchanged (still in the source language).
     pub untranslated_texts: u32,
+    /// Decomp files and folders that were deliberately not migrated, each as `path: reason`.
+    pub skipped: Vec<String>,
 }
 
 /// Errors that stop a migration.
@@ -65,6 +70,7 @@ pub enum MigrateError {
 #[derive(Default)]
 struct Ctx {
     unmapped: BTreeSet<String>,
+    skipped: BTreeSet<String>,
     texts: u32,
 }
 
@@ -343,6 +349,10 @@ pub fn migrate_decomp(from: &Path, to: &Path) -> Result<MigrationReport, Migrate
         })?;
     let config = convert_config(table, &mut cx)?;
 
+    let mut copies = layout::Copies::default();
+    let mut config = config;
+    layout::plan_target(&mut config.target.file, from, &mut copies, &mut cx);
+
     let wissen = from.join("wissen");
     let mut symbols = Vec::new();
     let symbols_src = wissen.join("symbole.toml");
@@ -356,6 +366,28 @@ pub fn migrate_decomp(from: &Path, to: &Path) -> Result<MigrationReport, Migrate
     }
     let types = read_optional(&wissen.join("typen.h"))?;
     let notes = read_optional(&wissen.join("notizen.md"))?;
+
+    let mut extra: Vec<(String, String)> = Vec::new();
+    for (german, english) in knowledge::FILES {
+        let path = wissen.join(german);
+        if path.is_file() {
+            extra.push((
+                english.to_string(),
+                knowledge::convert_file(german, &path, &mut cx)?,
+            ));
+        }
+    }
+    if wissen.join("laufzeit").is_dir() {
+        copies.add(wissen.join("laufzeit"), "knowledge/runs");
+    }
+    for name in markdown_files(&wissen)? {
+        match name.as_str() {
+            "notizen.md" => {}
+            "programmierstil.md" => copies.add(wissen.join(&name), "knowledge/style.md"),
+            _ => copies.add(wissen.join(&name), format!("knowledge/reports/{name}")),
+        }
+    }
+    layout::plan_trees(from, &mut copies, &mut cx)?;
 
     report_leftover_files(from, &mut cx)?;
 
@@ -378,20 +410,49 @@ pub fn migrate_decomp(from: &Path, to: &Path) -> Result<MigrationReport, Migrate
         source: Box::new(source),
     })?;
     let mut converted = Vec::new();
-    for (rel, content) in [
-        (CONFIG_FILE, config_toml),
-        (SYMBOLS_FILE, symbols_toml),
-        ("knowledge/types.h", types),
-        ("knowledge/notes.md", notes),
-    ] {
-        write(&to.join(rel), &content)?;
+    let mut files = vec![
+        (CONFIG_FILE.to_string(), config_toml),
+        (SYMBOLS_FILE.to_string(), symbols_toml),
+        ("knowledge/types.h".to_string(), types),
+        ("knowledge/notes.md".to_string(), notes),
+        (
+            ".gitignore".to_string(),
+            "cache/
+"
+            .to_string(),
+        ),
+    ];
+    files.extend(extra);
+    for (rel, content) in files {
+        write(&to.join(&rel), &content)?;
+        converted.push(PathBuf::from(rel));
+    }
+    for (source, rel) in copies.items {
+        layout::copy_item(&source, &to.join(&rel))?;
         converted.push(PathBuf::from(rel));
     }
     Ok(MigrationReport {
         converted,
         unmapped: cx.unmapped.into_iter().collect(),
         untranslated_texts: cx.texts,
+        skipped: cx.skipped.into_iter().collect(),
     })
+}
+
+fn markdown_files(dir: &Path) -> Result<Vec<String>, MigrateError> {
+    let mut names = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(names);
+    };
+    for entry in entries {
+        let entry = entry.map_err(|e| io(dir, e))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.ends_with(".md") && entry.path().is_file() {
+            names.push(name);
+        }
+    }
+    names.sort();
+    Ok(names)
 }
 
 fn io(path: &Path, source: std::io::Error) -> MigrateError {
@@ -423,15 +484,26 @@ fn write(path: &Path, content: &str) -> Result<(), MigrateError> {
 
 /// Files and folders of the Decomp workspace that have no counterpart are listed, not ignored.
 fn report_leftover_files(from: &Path, cx: &mut Ctx) -> Result<(), MigrateError> {
-    const ROOT_KNOWN: [&str; 6] = [
+    const ROOT_KNOWN: [&str; 8] = [
         "decomp.toml",
         "wissen",
         "ausgabe",
         "cache",
+        "spiel",
+        "nachbau",
         ".gitignore",
         ".git",
     ];
-    const WISSEN_KNOWN: [&str; 3] = ["symbole.toml", "typen.h", "notizen.md"];
+    const WISSEN_KNOWN: [&str; 8] = [
+        "symbole.toml",
+        "typen.h",
+        "notizen.md",
+        "nachbau.toml",
+        "nachbau-programm.toml",
+        "laufzeit.toml",
+        "laufzeit",
+        "verweise.toml",
+    ];
     for (dir, known, prefix) in [
         (from.to_path_buf(), &ROOT_KNOWN[..], ""),
         (from.join("wissen"), &WISSEN_KNOWN[..], "wissen/"),
@@ -442,7 +514,8 @@ fn report_leftover_files(from: &Path, cx: &mut Ctx) -> Result<(), MigrateError> 
         for entry in entries {
             let entry = entry.map_err(|e| io(&dir, e))?;
             let name = entry.file_name().to_string_lossy().into_owned();
-            if !known.contains(&name.as_str()) {
+            let markdown = !prefix.is_empty() && name.ends_with(".md");
+            if !known.contains(&name.as_str()) && !markdown {
                 cx.unmapped.insert(format!("file:{prefix}{name}"));
             }
         }
@@ -733,7 +806,7 @@ mod tests {
 
     const MINIMAL: &str = r#"
 [ziel]
-datei = "bin/PROGRAM.EXE"
+datei = "spiel/PROGRAM.EXE"
 sha256 = "ab12"
 format = "le"
 prozessor = "x86:LE:32:default"
@@ -785,7 +858,7 @@ profil = "watcom-10.6"
         let ws = Workspace::open(to.path()).unwrap();
         let c = &ws.config;
         assert_eq!(c.schema, 1);
-        assert_eq!(c.target.file, "bin/PROGRAM.EXE");
+        assert_eq!(c.target.file, "target/PROGRAM.EXE");
         assert_eq!(c.target.format, TargetFormat::Le);
         let seg = &c.target.segments[0];
         assert_eq!(seg.start, Address::Flat(0x10000));
@@ -920,9 +993,88 @@ foo = 1
     #[test]
     fn leftover_files_are_reported() {
         let (from, to) = setup(MINIMAL, Some(""));
-        std::fs::write(from.path().join("wissen/verweise.toml"), "").unwrap();
+        std::fs::write(from.path().join("wissen/entwurf.txt"), "").unwrap();
+        std::fs::write(from.path().join("zusatz.txt"), "").unwrap();
         let report = migrate_decomp(from.path(), to.path()).unwrap();
-        assert_eq!(report.unmapped, ["file:wissen/verweise.toml"]);
+        assert_eq!(
+            report.unmapped,
+            ["file:wissen/entwurf.txt", "file:zusatz.txt"]
+        );
+    }
+
+    #[test]
+    fn copies_game_sources_and_knowledge_files() {
+        let (from, to) = setup(MINIMAL, Some(""));
+        let f = from.path();
+        std::fs::create_dir_all(f.join("spiel")).unwrap();
+        std::fs::write(f.join("spiel/PROGRAM.EXE"), b"MZ").unwrap();
+        std::fs::create_dir_all(f.join("nachbau")).unwrap();
+        std::fs::write(f.join("nachbau/main.c"), "int x;").unwrap();
+        std::fs::create_dir_all(f.join("wissen/laufzeit")).unwrap();
+        std::fs::write(f.join("wissen/laufzeit/start.abd"), [0u8, 1, 2]).unwrap();
+        std::fs::write(f.join("wissen/programmierstil.md"), "Stil").unwrap();
+        std::fs::write(f.join("wissen/runde1-ki.md"), "Bericht").unwrap();
+        std::fs::write(f.join("wissen/nachbau.toml"), "").unwrap();
+        std::fs::create_dir_all(f.join("cache/nachbau/obj")).unwrap();
+        std::fs::write(f.join("cache/nachbau/obj/ai.obj"), [9u8]).unwrap();
+        std::fs::write(f.join("cache/nachbau/obj/ai.json"), "{}").unwrap();
+        std::fs::write(f.join("cache/nachbau/versuche.jsonl"), "").unwrap();
+        std::fs::create_dir_all(f.join("cache/ghidra")).unwrap();
+        std::fs::create_dir_all(f.join("ausgabe")).unwrap();
+
+        let report = migrate_decomp(f, to.path()).unwrap();
+        assert!(report.unmapped.is_empty(), "{:?}", report.unmapped);
+        let t = to.path();
+        assert_eq!(std::fs::read(t.join("target/PROGRAM.EXE")).unwrap(), b"MZ");
+        assert_eq!(
+            std::fs::read_to_string(t.join("src/main.c")).unwrap(),
+            "int x;"
+        );
+        assert_eq!(
+            std::fs::read(t.join("knowledge/runs/start.abd")).unwrap(),
+            [0u8, 1, 2]
+        );
+        assert_eq!(
+            std::fs::read_to_string(t.join("knowledge/style.md")).unwrap(),
+            "Stil"
+        );
+        assert!(t.join("knowledge/reports/runde1-ki.md").is_file());
+        assert!(t.join("knowledge/rebuild.toml").is_file());
+        assert!(t.join("cache/rebuild/obj/ai.obj").is_file());
+        assert!(!t.join("cache/rebuild/obj/ai.json").exists());
+        assert_eq!(
+            std::fs::read_to_string(t.join(".gitignore")).unwrap(),
+            "cache/
+"
+        );
+        let names: Vec<_> = report
+            .skipped
+            .iter()
+            .map(|s| s.split_once(':').unwrap().0)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "ausgabe",
+                "cache/ghidra",
+                "cache/nachbau/obj/*.json",
+                "cache/nachbau/versuche.jsonl"
+            ]
+        );
+    }
+
+    #[test]
+    fn absolute_target_path_is_kept_and_spiel_is_skipped() {
+        let config = MINIMAL.replace("spiel/PROGRAM.EXE", "D:/games/PROGRAM.EXE");
+        let (from, to) = setup(&config, None);
+        std::fs::create_dir_all(from.path().join("spiel")).unwrap();
+        std::fs::write(from.path().join("spiel/PROGRAM.EXE"), b"MZ").unwrap();
+        let report = migrate_decomp(from.path(), to.path()).unwrap();
+        let ws = Workspace::open(to.path()).unwrap();
+        assert_eq!(ws.config.target.file, "D:/games/PROGRAM.EXE");
+        assert!(!to.path().join("target").exists());
+        assert_eq!(report.skipped.len(), 1);
+        assert!(report.skipped[0].starts_with("spiel: "));
     }
 
     #[test]

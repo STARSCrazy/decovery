@@ -46,6 +46,12 @@ fn main() -> ExitCode {
                         println!("  {}", path.display());
                     }
                     println!("Untranslated free texts: {}", report.untranslated_texts);
+                    if !report.skipped.is_empty() {
+                        println!("Skipped ({}):", report.skipped.len());
+                        for entry in &report.skipped {
+                            println!("  {entry}");
+                        }
+                    }
                     if report.unmapped.is_empty() {
                         println!("Unmapped: none");
                     } else {

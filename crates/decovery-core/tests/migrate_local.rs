@@ -39,6 +39,55 @@ fn migrates_without_loss() {
         .filter(|k| !allowlist.iter().any(|entry| matches(entry, k)))
         .collect();
     assert!(unexpected.is_empty(), "not in allowlist: {unexpected:?}");
+    assert!(to.path().join(".gitignore").is_file(), "missing .gitignore");
+    // Workspaces differ in what they contain: an output is required exactly when its source exists.
+    let wissen = from.join("wissen");
+    let has_reports = std::fs::read_dir(&wissen).unwrap().any(|e| {
+        let name = e.unwrap().file_name().to_string_lossy().into_owned();
+        name.ends_with(".md") && name != "notizen.md" && name != "programmierstil.md"
+    });
+    for (source_exists, rel) in [
+        (from.join("nachbau").is_dir(), "src"),
+        (
+            wissen.join("nachbau.toml").is_file(),
+            "knowledge/rebuild.toml",
+        ),
+        (
+            wissen.join("nachbau-programm.toml").is_file(),
+            "knowledge/rebuild-program.toml",
+        ),
+        (
+            wissen.join("laufzeit.toml").is_file(),
+            "knowledge/runs.toml",
+        ),
+        (
+            wissen.join("verweise.toml").is_file(),
+            "knowledge/references.toml",
+        ),
+        (
+            wissen.join("programmierstil.md").is_file(),
+            "knowledge/style.md",
+        ),
+        (has_reports, "knowledge/reports"),
+        (wissen.join("laufzeit").is_dir(), "knowledge/runs"),
+        (
+            from.join("cache").join("nachbau").join("obj").is_dir(),
+            "cache/rebuild/obj",
+        ),
+    ] {
+        assert_eq!(
+            to.path().join(rel).exists(),
+            source_exists,
+            "{rel}: source exists = {source_exists}"
+        );
+    }
+    if from.join("spiel").is_dir() {
+        assert!(ws.config.target.file.starts_with("target/"));
+        assert!(to.path().join(&ws.config.target.file).is_file());
+    }
+    if from.join("ausgabe").is_dir() || from.join("cache").is_dir() {
+        assert!(!report.skipped.is_empty());
+    }
     eprintln!(
         "symbols: {}, unmapped: {:?}",
         ws.symbols.len(),
