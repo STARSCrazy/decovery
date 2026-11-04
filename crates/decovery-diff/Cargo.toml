@@ -1,0 +1,20 @@
+[package]
+name = "decovery-diff"
+description = "Function comparison of decovery: rebuilt function against the original, verdict and metrics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+decovery-core.workspace = true
+decovery-objects.workspace = true
+decovery-x86.workspace = true
+
+[dev-dependencies]
+decovery-loaders.workspace = true
+toml.workspace = true
+
+[lints]
+workspace = true

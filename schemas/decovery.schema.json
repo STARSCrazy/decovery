@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "decovery.toml",
+  "type": "object",
+  "required": ["schema", "target"],
+  "properties": {
+    "schema": { "const": 1 },
+    "target": {
+      "type": "object",
+      "required": ["file", "sha256", "format", "processor"],
+      "properties": {
+        "file": { "type": "string" },
+        "sha256": { "type": "string" },
+        "format": { "enum": ["com", "mz", "le", "flat32"] },
+        "processor": { "type": "string" },
+        "segment": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "start", "length", "permissions"],
+            "properties": {
+              "name": { "type": "string" },
+              "start": { "type": "string", "pattern": "^(flat:[0-9A-Fa-f]{8}|seg:[0-9A-Fa-f]{4}:[0-9A-Fa-f]{4}|sel:[0-9A-Fa-f]{4}:[0-9A-Fa-f]{8})$" },
+              "length": { "type": "integer", "minimum": 0 },
+              "file_offset": { "type": "integer", "minimum": 0 },
+              "file_length": { "type": "integer", "minimum": 0 },
+              "permissions": { "type": "string", "pattern": "^[rwx]+$" }
+            }
+          }
+        }
+      }
+    },
+    "analysis": {
+      "type": "object",
+      "properties": {
+        "prologues": { "type": "array", "items": { "type": "string" } },
+        "calling_convention": { "type": "string" }
+      }
+    },
+    "output": {
+      "type": "object",
+      "properties": { "versioned": { "type": "boolean" } }
+    },
+    "rebuild": {
+      "type": "object",
+      "properties": {
+        "compiler": { "type": "string" },
+        "flags": { "type": "string" },
+        "link": {
+          "type": "object",
+          "properties": {
+            "profile": { "type": "string" },
+            "libraries": { "type": "array", "items": { "type": "string" } },
+            "flags": { "type": "string" },
+            "startup": { "type": "string" }
+          }
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "properties": {
+        "bases": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["segment", "linear_base"],
+            "properties": {
+              "segment": { "type": "string" },
+              "linear_base": { "type": "string", "pattern": "^0x[0-9A-Fa-f]+$" }
+            }
+          }
+        }
+      }
+    },
+    "unpacked": {
+      "type": "object",
+      "required": ["packer", "sha256", "entry"],
+      "properties": {
+        "packer": { "type": "string" },
+        "sha256": { "type": "string" },
+        "entry": { "type": "string" }
+      }
+    },
+    "detected": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kind", "confidence"],
+        "properties": {
+          "kind": { "type": "string" },
+          "value": { "type": "string" },
+          "confidence": { "enum": ["confirmed", "assumed", "refuted"] },
+          "evidence": { "type": "string" },
+          "source": { "type": "string" }
+        }
+      }
+    }
+  }
+}

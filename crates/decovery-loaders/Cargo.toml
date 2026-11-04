@@ -1,0 +1,20 @@
+[package]
+name = "decovery-loaders"
+description = "Executable format loaders of decovery (LE/LX; MZ and COM later)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+decovery-core.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+toml.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+
+[lints]
+workspace = true

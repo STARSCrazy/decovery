@@ -1,0 +1,138 @@
+import io
+import json
+import os
+import sys
+import threading
+import unittest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from decovery_plugin import Plugin, RpcError  # noqa: E402
+
+
+def run(plugin, *messages):
+    """Feed messages (dicts) to a plugin over in-memory streams; return the parsed output lines."""
+    stdin = io.StringIO("".join(json.dumps(m) + "\n" for m in messages))
+    stdout = io.StringIO()
+    plugin.serve(stdin, stdout)
+    return [json.loads(line) for line in stdout.getvalue().splitlines()]
+
+
+def req(id_, method, params=None):
+    return {"jsonrpc": "2.0", "id": id_, "method": method, "params": params or {}}
+
+
+def by_id(lines, id_):
+    return next(m for m in lines if m.get("id") == id_)
+
+
+class ServerTests(unittest.TestCase):
+    def make(self):
+        plugin = Plugin("demo", "1.2.3")
+
+        @plugin.method("echo/ping", capability_version=1)
+        def ping(params, ctx):
+            return params
+
+        @plugin.method("analyzer/functions", capability_version=2)
+        def functions(params, ctx):
+            return []
+
+        return plugin
+
+    def test_initialize_lists_versioned_capabilities(self):
+        out = run(self.make(), req(1, "initialize", {"protocol": "decovery-plugin/1", "host_version": "0"}))
+        self.assertEqual(
+            by_id(out, 1)["result"],
+            {
+                "name": "demo",
+                "version": "1.2.3",
+                "protocol": "decovery-plugin/1",
+                "capabilities": {"echo": {"version": 1}, "analyzer": {"version": 2}},
+            },
+        )
+
+    def test_dispatches_registered_method(self):
+        out = run(self.make(), req(1, "echo/ping", {"x": 1}))
+        self.assertEqual(by_id(out, 1)["result"], {"x": 1})
+
+    def test_unknown_capability_is_32001(self):
+        out = run(self.make(), req(1, "nope/thing"))
+        self.assertEqual(by_id(out, 1)["error"]["code"], -32001)
+
+    def test_unknown_method_is_32601(self):
+        out = run(self.make(), req(1, "echo/other"), req(2, "noslash"))
+        self.assertEqual(by_id(out, 1)["error"]["code"], -32601)
+        self.assertEqual(by_id(out, 2)["error"]["code"], -32601)
+
+    def test_handler_errors(self):
+        plugin = self.make()
+
+        @plugin.method("echo/boom", capability_version=1)
+        def boom(params, ctx):
+            raise RpcError(-32000, "custom", {"k": 1})
+
+        @plugin.method("echo/crash", capability_version=1)
+        def crash(params, ctx):
+            raise ValueError("bad")
+
+        out = run(plugin, req(1, "echo/boom"), req(2, "echo/crash"))
+        self.assertEqual(by_id(out, 1)["error"], {"code": -32000, "message": "custom", "data": {"k": 1}})
+        self.assertEqual(by_id(out, 2)["error"]["code"], -32603)
+
+    def test_progress_notifications_are_written(self):
+        plugin = Plugin("demo", "1")
+
+        @plugin.method("echo/work", capability_version=1)
+        def work(params, ctx):
+            ctx.progress(1, total=2, message="half")
+            ctx.progress(2)
+            return "done"
+
+        out = run(plugin, req(7, "echo/work"))
+        progress = [m for m in out if m.get("method") == "$/progress"]
+        self.assertEqual(
+            [m["params"] for m in progress],
+            [{"id": 7, "done": 1, "total": 2, "message": "half"}, {"id": 7, "done": 2}],
+        )
+        self.assertNotIn("id", progress[0])
+        self.assertEqual(by_id(out, 7)["result"], "done")
+
+    def test_cancel_marks_context(self):
+        plugin = Plugin("demo", "1")
+
+        @plugin.method("echo/wait", capability_version=1)
+        def wait(params, ctx):
+            return {"cancelled": ctx.wait_cancelled(5)}
+
+        out = run(plugin, req(3, "echo/wait"), {"jsonrpc": "2.0", "method": "$/cancel", "params": {"id": 3}})
+        self.assertEqual(by_id(out, 3)["result"], {"cancelled": True})
+
+    def test_check_cancelled_answers_32002(self):
+        plugin = Plugin("demo", "1")
+        started = threading.Event()
+
+        @plugin.method("echo/wait", capability_version=1)
+        def wait(params, ctx):
+            started.set()
+            ctx.wait_cancelled(5)
+            ctx.check_cancelled()
+            return "not reached"
+
+        out = run(plugin, req(3, "echo/wait"), {"jsonrpc": "2.0", "method": "$/cancel", "params": {"id": 3}})
+        self.assertEqual(by_id(out, 3)["error"]["code"], -32002)
+
+    def test_shutdown_ends_loop(self):
+        out = run(self.make(), req(1, "shutdown"), req(2, "echo/ping", {"x": 1}))
+        self.assertEqual(by_id(out, 1)["result"], None)
+        self.assertEqual([m for m in out if m.get("id") == 2], [])
+
+    def test_capability_version_conflict_is_rejected(self):
+        plugin = Plugin("demo", "1")
+        plugin.method("a/x", capability_version=1)(lambda p, c: 1)
+        with self.assertRaises(ValueError):
+            plugin.method("a/y", capability_version=2)(lambda p, c: 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

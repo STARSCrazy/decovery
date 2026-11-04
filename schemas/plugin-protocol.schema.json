@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://decovery.dev/schemas/plugin-protocol.schema.json",
+  "title": "decovery plugin protocol, decovery-plugin/1",
+  "description": "Every line on the plugin's stdin/stdout validates against #/$defs/message. Requests flow host to plugin only.",
+  "$ref": "#/$defs/message",
+  "$defs": {
+    "message": {
+      "oneOf": [
+        { "$ref": "#/$defs/request" },
+        { "$ref": "#/$defs/response" },
+        { "$ref": "#/$defs/cancelNotification" },
+        { "$ref": "#/$defs/progressNotification" }
+      ]
+    },
+    "id": { "type": "integer", "minimum": 0 },
+    "request": {
+      "description": "Host to plugin. Method is initialize, shutdown or <capability>/<op>.",
+      "type": "object",
+      "required": ["jsonrpc", "id", "method"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "method": { "type": "string", "pattern": "^(initialize|shutdown|[a-z][a-z0-9_-]*/[a-z][a-z0-9_-]*)$" },
+        "params": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "response": {
+      "description": "Plugin to host. Exactly one of result and error.",
+      "type": "object",
+      "required": ["jsonrpc", "id"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "oneOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] },
+        "result": {},
+        "error": { "$ref": "#/$defs/error" }
+      },
+      "oneOf": [{ "required": ["result"] }, { "required": ["error"] }],
+      "additionalProperties": false
+    },
+    "error": {
+      "type": "object",
+      "required": ["code", "message"],
+      "properties": {
+        "code": {
+          "type": "integer",
+          "description": "-32601 unknown method, -32001 capability not supported, -32002 cancelled, -32700 parse error, -32600 invalid request, -32603 internal error; other codes are plugin-defined."
+        },
+        "message": { "type": "string" },
+        "data": {}
+      },
+      "additionalProperties": false
+    },
+    "cancelNotification": {
+      "description": "Host to plugin.",
+      "type": "object",
+      "required": ["jsonrpc", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "method": { "const": "$/cancel" },
+        "params": {
+          "type": "object",
+          "required": ["id"],
+          "properties": { "id": { "$ref": "#/$defs/id" } },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "progressNotification": {
+      "description": "Plugin to host.",
+      "type": "object",
+      "required": ["jsonrpc", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "method": { "const": "$/progress" },
+        "params": {
+          "type": "object",
+          "required": ["id", "done"],
+          "properties": {
+            "id": { "$ref": "#/$defs/id" },
+            "done": { "type": "integer", "minimum": 0 },
+            "total": { "type": "integer", "minimum": 0 },
+            "message": { "type": "string" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "initializeParams": {
+      "description": "params of the initialize request.",
+      "type": "object",
+      "required": ["protocol", "host_version"],
+      "properties": {
+        "protocol": { "const": "decovery-plugin/1" },
+        "host_version": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "initializeResult": {
+      "description": "result of the initialize request.",
+      "type": "object",
+      "required": ["name", "version", "protocol", "capabilities"],
+      "properties": {
+        "name": { "type": "string" },
+        "version": { "type": "string" },
+        "protocol": { "const": "decovery-plugin/1" },
+        "capabilities": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[a-z][a-z0-9_-]*$" },
+          "additionalProperties": {
+            "type": "object",
+            "required": ["version"],
+            "properties": { "version": { "type": "integer", "minimum": 0, "maximum": 4294967295 } },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "blob": {
+      "description": "Binary payload: inline_base64 below 65536 bytes, otherwise a file with its blake3.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["inline_base64"],
+          "properties": {
+            "inline_base64": {
+              "type": "string",
+              "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$",
+              "maxLength": 87380,
+              "description": "Standard base64 with padding; decoded size below 65536 bytes."
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["blob"],
+          "properties": {
+            "blob": {
+              "type": "object",
+              "required": ["path", "blake3"],
+              "properties": {
+                "path": { "type": "string", "minLength": 1, "description": "Absolute path." },
+                "blake3": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

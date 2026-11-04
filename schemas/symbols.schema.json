@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "knowledge/symbols.toml",
+  "type": "object",
+  "required": ["schema"],
+  "properties": {
+    "schema": { "const": 1 },
+    "symbol": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["address", "kind", "name", "source", "confidence"],
+        "properties": {
+          "address": { "type": "string" },
+          "kind": { "enum": ["function", "global", "label", "other"] },
+          "name": { "type": "string" },
+          "signature": { "type": "string" },
+          "comment": { "type": "string" },
+          "source": { "enum": ["human", "signature", "runtime", "similarity", "analysis", "agent", "import"] },
+          "confidence": { "enum": ["confirmed", "assumed", "refuted"] },
+          "evidence": { "type": "string" },
+          "type": { "type": "string" },
+          "size": { "type": "integer", "minimum": 0 },
+          "library": { "type": "string" },
+          "refuted": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["name"],
+              "properties": {
+                "name": { "type": "string" },
+                "source": { "enum": ["human", "signature", "runtime", "similarity", "analysis", "agent", "import"] },
+                "confidence": { "enum": ["confirmed", "assumed", "refuted"] },
+                "evidence": { "type": "string" },
+                "date": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+                "note": { "type": "string" }
+              }
+            }
+          },
+          "locals": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["place", "name"],
+              "properties": {
+                "place": { "type": "string" },
+                "name": { "type": "string" },
+                "type": { "type": "string" }
+              }
+            }
+          },
+          "line_comments": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["address", "text", "source"],
+              "properties": {
+                "address": { "type": "string" },
+                "text": { "type": "string" },
+                "source": { "enum": ["human", "signature", "runtime", "similarity", "analysis", "agent", "import"] }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
