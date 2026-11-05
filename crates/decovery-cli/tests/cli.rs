@@ -254,3 +254,17 @@ fn annotate_names_and_rejects_bad_input() {
     assert_eq!(json["data"]["action"], "local");
     assert_eq!(json["data"]["changed"], true);
 }
+
+#[test]
+fn analyze_without_plugin_config_exits_2() {
+    let dir = workspace();
+    let out = run(&dir, &["analyze", "--plugin", "decovery-test-none"]);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("no analyzer configured for plugin decovery-test-none"),
+        "got {stderr:?}"
+    );
+    let out = run(&dir, &["analyze", "--plugin", "../x"]);
+    assert_eq!(out.status.code(), Some(2));
+}

@@ -847,7 +847,7 @@ fn add_type(session: &mut Session, definition: &str) -> Result<Applied, FacadeEr
 }
 
 /// Today's date (UTC) as `YYYY-MM-DD`.
-fn today() -> String {
+pub(crate) fn today() -> String {
     let days = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() / 86_400) as i64;

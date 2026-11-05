@@ -72,7 +72,7 @@ pub struct CallOptions<'a> {
     /// Optional cancellation token.
     pub cancel: Option<CancelToken>,
     /// Receives `$/progress` notifications of this call, on the calling thread.
-    pub on_progress: Option<&'a (dyn Fn(Progress) + Sync)>,
+    pub on_progress: Option<&'a dyn Fn(Progress)>,
 }
 
 enum Event {
@@ -110,6 +110,15 @@ const POLL: Duration = Duration::from_millis(10);
 impl PluginHost {
     /// Start `command` in `cwd` and perform the `initialize` handshake. Plugin stderr is inherited.
     pub fn spawn(command: &[OsString], cwd: &Path) -> Result<Self, PluginError> {
+        Self::spawn_with_env(command, cwd, &[])
+    }
+
+    /// Like [`PluginHost::spawn`], with `env` added to the inherited environment.
+    pub fn spawn_with_env(
+        command: &[OsString],
+        cwd: &Path,
+        env: &[(OsString, OsString)],
+    ) -> Result<Self, PluginError> {
         let (program, args) = command.split_first().ok_or_else(|| {
             PluginError::Spawn(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -118,6 +127,7 @@ impl PluginHost {
         })?;
         let mut child = Command::new(program)
             .args(args)
+            .envs(env.iter().map(|(k, v)| (k, v)))
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

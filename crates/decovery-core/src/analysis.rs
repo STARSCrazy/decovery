@@ -223,6 +223,38 @@ impl Analysis {
         write_atomic(&path, code.as_bytes()).map_err(|e| io_error(&path, e))
     }
 
+    /// Removes the stored pseudo-C of every function not in `keep`; returns how many files were removed.
+    /// Files whose name is no address are left alone.
+    pub fn remove_decompiled_except(
+        root: &Path,
+        keep: &std::collections::HashSet<Address>,
+        _lock: &WorkspaceLock,
+    ) -> Result<u32, WorkspaceError> {
+        let dir = root.join(DECOMPILED_DIR);
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(io_error(&dir, e)),
+        };
+        let mut removed = 0;
+        for entry in entries {
+            let path = entry.map_err(|e| io_error(&dir, e))?.path();
+            let start = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_suffix(".c"))
+                .and_then(|stem| stem.replace('_', ":").parse::<Address>().ok());
+            if let Some(start) = start
+                && !keep.contains(&start)
+                && path.is_file()
+            {
+                std::fs::remove_file(&path).map_err(|e| io_error(&path, e))?;
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
     /// Lookup tables over this analysis, built once.
     pub fn index(&self) -> AnalysisIndex<'_> {
         let mut functions: Vec<&AnalyzedFunction> = self.functions.iter().collect();
@@ -360,6 +392,7 @@ mod tests {
             runtime: None,
             unpacked: None,
             detected: Vec::new(),
+            plugins: Default::default(),
         };
         std::fs::write(dir.join(CONFIG_FILE), toml::to_string(&config).unwrap()).unwrap();
         Workspace {
@@ -507,6 +540,59 @@ mod tests {
                 .as_deref(),
             Some(code)
         );
+    }
+
+    #[test]
+    fn remove_decompiled_except_keeps_listed_and_foreign_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = workspace(dir.path(), Vec::new());
+        let lock = ws.lock(Duration::ZERO).unwrap();
+        let none = std::collections::HashSet::new();
+        assert_eq!(
+            Analysis::remove_decompiled_except(dir.path(), &none, &lock).unwrap(),
+            0
+        );
+        for a in [0x10010, 0x10100] {
+            Analysis::save_decompiled(
+                dir.path(),
+                flat(a),
+                "x
+",
+                &lock,
+            )
+            .unwrap();
+        }
+        let seg = Address::Seg {
+            seg: 0x1234,
+            off: 0x10,
+        };
+        Analysis::save_decompiled(
+            dir.path(),
+            seg,
+            "x
+",
+            &lock,
+        )
+        .unwrap();
+        let foreign = dir.path().join(DECOMPILED_DIR).join("notes.c");
+        std::fs::write(&foreign, "keep").unwrap();
+        let keep = [flat(0x10100)].into_iter().collect();
+        assert_eq!(
+            Analysis::remove_decompiled_except(dir.path(), &keep, &lock).unwrap(),
+            2
+        );
+        assert!(
+            Analysis::decompiled(dir.path(), flat(0x10010))
+                .unwrap()
+                .is_none()
+        );
+        assert!(Analysis::decompiled(dir.path(), seg).unwrap().is_none());
+        assert!(
+            Analysis::decompiled(dir.path(), flat(0x10100))
+                .unwrap()
+                .is_some()
+        );
+        assert!(foreign.is_file());
     }
 
     #[test]

@@ -46,6 +46,17 @@ pub struct Progress {
     pub message: Option<String>,
 }
 
+impl Progress {
+    /// A progress report, e.g. one a host forwards with its own stage message.
+    pub fn new(done: u64, total: Option<u64>, message: Option<String>) -> Self {
+        Progress {
+            done,
+            total,
+            message,
+        }
+    }
+}
+
 #[derive(Deserialize)]
 pub(crate) struct WireInfo {
     pub name: String,

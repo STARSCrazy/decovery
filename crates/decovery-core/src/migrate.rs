@@ -719,6 +719,7 @@ fn convert_config(table: toml::Table, cx: &mut Ctx) -> Result<WorkspaceConfig, M
         runtime,
         unpacked,
         detected,
+        plugins: Default::default(),
     })
 }
 
