@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "knowledge/analysis/analysis.json",
+  "type": "object",
+  "required": [
+    "schema",
+    "provider",
+    "target_sha256",
+    "knowledge_hash",
+    "created",
+    "functions",
+    "calls",
+    "strings",
+    "data_accesses"
+  ],
+  "properties": {
+    "schema": {
+      "const": 1
+    },
+    "provider": {
+      "type": "object",
+      "required": ["name", "version"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "ghidra, decomp-import"
+        },
+        "version": {
+          "type": "string"
+        }
+      }
+    },
+    "target_sha256": {
+      "type": "string",
+      "description": "must equal decovery.toml target.sha256"
+    },
+    "knowledge_hash": {
+      "type": "string",
+      "description": "blake3 (hex) of symbols.toml, types.h and references.toml at analysis time"
+    },
+    "created": {
+      "type": "string",
+      "description": "ISO date"
+    },
+    "functions": {
+      "type": "array",
+      "description": "sorted by start",
+      "items": {
+        "type": "object",
+        "required": ["start", "end", "body_size"],
+        "properties": {
+          "start": { "type": "string" },
+          "end": { "type": "string", "description": "inclusive" },
+          "body_size": { "type": "integer", "minimum": 0 },
+          "provider_name": { "type": "string" },
+          "decompile_error": { "type": "string" }
+        }
+      }
+    },
+    "calls": {
+      "type": "array",
+      "description": "sorted by site",
+      "items": {
+        "type": "object",
+        "required": ["site", "caller", "callee"],
+        "properties": {
+          "site": { "type": "string" },
+          "caller": { "type": "string" },
+          "callee": { "type": "string" }
+        }
+      }
+    },
+    "strings": {
+      "type": "array",
+      "description": "sorted by address",
+      "items": {
+        "type": "object",
+        "required": ["address", "text", "users"],
+        "properties": {
+          "address": { "type": "string" },
+          "text": { "type": "string" },
+          "users": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        }
+      }
+    },
+    "data_accesses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["function", "address", "kind"],
+        "properties": {
+          "function": { "type": "string" },
+          "address": { "type": "string" },
+          "kind": {
+            "type": "string",
+            "description": "read, write"
+          }
+        }
+      }
+    }
+  }
+}

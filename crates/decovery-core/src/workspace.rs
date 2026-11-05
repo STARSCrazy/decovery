@@ -37,6 +37,11 @@ pub enum WorkspaceError {
         path: PathBuf,
         source: Box<toml::de::Error>,
     },
+    #[error("{}: {source}", path.display())]
+    Json {
+        path: PathBuf,
+        source: Box<serde_json::Error>,
+    },
     #[error("{}: unsupported schema {found} (expected {SCHEMA})", path.display())]
     Schema { path: PathBuf, found: u32 },
     #[error("workspace is locked by pid {pid}")]
