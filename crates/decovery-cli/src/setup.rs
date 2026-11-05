@@ -470,14 +470,7 @@ fn write_marker(extern_dir: &Path, marker: &Value) -> Result<(), SetupError> {
 }
 
 fn write_atomic(path: &Path, text: &str) -> Result<(), SetupError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| io_err("cannot create", parent, e))?;
-    }
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = PathBuf::from(tmp);
-    std::fs::write(&tmp, text).map_err(|e| io_err("cannot write", &tmp, e))?;
-    std::fs::rename(&tmp, path).map_err(|e| io_err("cannot write", path, e))
+    decovery_core::write_atomic(path, text.as_bytes()).map_err(|e| io_err("cannot write", path, e))
 }
 
 /// Sets `[plugins.<name>]` in the user config, keeping everything else.

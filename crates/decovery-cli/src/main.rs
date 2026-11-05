@@ -5,6 +5,9 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
+/// How long `migrate` waits for the new workspace's lock.
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
 mod compare;
 mod setup;
 
@@ -30,7 +33,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Convert a Decomp workspace into a decovery workspace.
+    /// Convert a Decomp workspace into a decovery workspace; an imported analysis (`ausgabe/`) also gets
+    /// its output generated.
     Migrate {
         /// Decomp workspace (contains `decomp.toml`).
         from: PathBuf,
@@ -77,6 +81,10 @@ enum Command {
         limit: usize,
     },
     /// Record knowledge: a name, comment, signature, type, local, refutation or type definition.
+    ///
+    /// Ranks: human > confirmed > assumed. A claim ranked below the record it changes does not replace an
+    /// existing name, comment, line comment, signature, type or local (no change, a warning instead) unless
+    /// `--force` is given; filling an empty field is always allowed. A human line comment counts as human.
     #[command(group(clap::ArgGroup::new("action").required(true).args([
         "name", "comment", "signature", "data_type", "local", "refute", "add_type",
     ])))]
@@ -114,7 +122,7 @@ enum Command {
         /// What the claim rests on.
         #[arg(long)]
         evidence: Option<String>,
-        /// Replace a stronger claim.
+        /// Replace a value held under a stronger claim (name, comment, signature, type, local, refute).
         #[arg(long)]
         force: bool,
     },
@@ -210,44 +218,7 @@ enum Sort {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
-        Command::Migrate { from, to } => match decovery_core::migrate_decomp(&from, &to) {
-            Ok(report) => {
-                if cli.json {
-                    match serde_json::to_string_pretty(&report) {
-                        Ok(text) => println!("{text}"),
-                        Err(e) => {
-                            eprintln!("error: {e}");
-                            return ExitCode::FAILURE;
-                        }
-                    }
-                } else {
-                    println!("Converted {} files:", report.converted.len());
-                    for path in &report.converted {
-                        println!("  {}", path.display());
-                    }
-                    println!("Untranslated free texts: {}", report.untranslated_texts);
-                    if !report.skipped.is_empty() {
-                        println!("Skipped ({}):", report.skipped.len());
-                        for entry in &report.skipped {
-                            println!("  {entry}");
-                        }
-                    }
-                    if report.unmapped.is_empty() {
-                        println!("Unmapped: none");
-                    } else {
-                        println!("Unmapped ({}):", report.unmapped.len());
-                        for key in &report.unmapped {
-                            println!("  {key}");
-                        }
-                    }
-                }
-                ExitCode::SUCCESS
-            }
-            Err(e) => {
-                eprintln!("error: {e}");
-                ExitCode::FAILURE
-            }
-        },
+        Command::Migrate { from, to } => finish(migrate(&from, &to, cli.json)),
         Command::Compare {
             object,
             function,
@@ -416,6 +387,55 @@ fn finish(result: Result<(), FacadeError>) -> ExitCode {
     }
 }
 
+/// Converts the Decomp workspace and, when an analysis was imported, generates the full output (R35).
+fn migrate(from: &Path, to: &Path, json: bool) -> Result<(), FacadeError> {
+    let report =
+        decovery_core::migrate_decomp(from, to).map_err(|e| FacadeError::Invalid(e.to_string()))?;
+    let written = if decovery_core::Analysis::load(to)?.is_some() {
+        let lock = decovery_core::Workspace::open(to)?.lock(LOCK_WAIT)?;
+        let session = Session::open(to)?;
+        Some(decovery_facade::write_all(&session, &lock)?.written)
+    } else {
+        None
+    };
+    if json {
+        let mut value =
+            serde_json::to_value(&report).map_err(|e| FacadeError::Invalid(e.to_string()))?;
+        value["output_written"] = serde_json::json!(written.unwrap_or(0));
+        let text = serde_json::to_string_pretty(&value)
+            .map_err(|e| FacadeError::Invalid(e.to_string()))?;
+        println!("{text}");
+        return Ok(());
+    }
+    println!("Converted {} files:", report.converted.len());
+    for path in &report.converted {
+        println!("  {}", path.display());
+    }
+    println!("Untranslated free texts: {}", report.untranslated_texts);
+    if !report.skipped.is_empty() {
+        println!("Skipped ({}):", report.skipped.len());
+        for entry in &report.skipped {
+            println!("  {entry}");
+        }
+    }
+    if report.unmapped.is_empty() {
+        println!("Unmapped: none");
+    } else {
+        println!("Unmapped ({}):", report.unmapped.len());
+        for key in &report.unmapped {
+            println!("  {key}");
+        }
+    }
+    match written {
+        Some(n) => println!(
+            "Analysis imported ({} functions); output generated: {n} files written",
+            report.analysis_functions
+        ),
+        None => println!("No analysis imported; run `decovery analyze` to generate the output"),
+    }
+    Ok(())
+}
+
 fn setup_ghidra(
     extern_dir: Option<PathBuf>,
     ghidra_zip: Option<PathBuf>,
@@ -490,7 +510,7 @@ fn show(workspace: &Path, target: &str, json: bool) -> Result<(), FacadeError> {
         print!("{text}");
     }
     if response.data["analysis_stale"] == true {
-        eprintln!("note: analysis is older than the knowledge; run `decovery analyze`");
+        eprintln!("note: {}", decovery_facade::output::STALE_ANALYSIS);
     }
     Ok(())
 }
