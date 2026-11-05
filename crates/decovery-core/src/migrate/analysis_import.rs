@@ -60,6 +60,11 @@ struct RawEdge {
     ziel: String,
 }
 
+/// Reads a text file; decovery stores LF only, so CRLF (git autocrlf checkouts, Ghidra output) becomes LF.
+fn read_lf(path: &Path) -> Result<String, MigrateError> {
+    Ok(read(path)?.replace("\r\n", "\n"))
+}
+
 fn invalid(path: &Path, what: impl Into<String>) -> MigrateError {
     MigrateError::Invalid {
         key: path.display().to_string(),
@@ -330,7 +335,7 @@ pub(super) fn read_output(from: &Path, cx: &mut Ctx) -> Result<Option<Imported>,
             if file.extension().and_then(|e| e.to_str()) != Some("c") {
                 continue;
             }
-            let parsed = parse_function(&file, &read(&file)?)?;
+            let parsed = parse_function(&file, &read_lf(&file)?)?;
             let start = parsed.function.start;
             if let Some(first) = seen.insert(start, file.clone()) {
                 return Err(invalid(&file, format!("same start as {}", first.display())));
@@ -358,14 +363,14 @@ pub(super) fn read_output(from: &Path, cx: &mut Ctx) -> Result<Option<Imported>,
     }
     let strings_path = dir.join("strings.md");
     let strings = if strings_path.is_file() {
-        parse_strings(&strings_path, &read(&strings_path)?)?
+        parse_strings(&strings_path, &read_lf(&strings_path)?)?
     } else {
         Vec::new()
     };
     let globals_path = dir.join("globale.md");
     let mut accesses = Vec::new();
     if globals_path.is_file() {
-        let (found, unresolved) = parse_globals(&globals_path, &read(&globals_path)?, &names)?;
+        let (found, unresolved) = parse_globals(&globals_path, &read_lf(&globals_path)?, &names)?;
         accesses = found;
         if unresolved > 0 {
             cx.skipped.insert(format!(
@@ -408,7 +413,7 @@ impl Imported {
         let lock = ws.lock(std::time::Duration::from_secs(10))?;
         let hash = knowledge_hash(to)?;
         let mut analysis = Analysis::new(self.provider, target_sha256, hash, today());
-        let count = self.functions.len() as u32;
+        let count = u32::try_from(self.functions.len()).unwrap_or(u32::MAX);
         analysis.functions = self.functions;
         analysis.calls = self.calls;
         analysis.strings = self.strings;
@@ -639,7 +644,7 @@ segment = [
     }
 
     #[test]
-    fn crlf_checkout_keeps_body_exactly() {
+    fn crlf_checkout_is_normalized_to_lf() {
         let (from, to) = setup();
         let d = from.path().join("ausgabe/funktionen/obj1");
         std::fs::create_dir_all(&d).unwrap();
@@ -652,8 +657,81 @@ segment = [
             Analysis::decompiled(to.path(), flat(0x10010))
                 .unwrap()
                 .as_deref(),
-            Some("\r\nint x;\r\n")
+            Some("\nint x;\n")
         );
+    }
+
+    fn assert_rejected(from: &Path, to: &Path) {
+        let err = migrate_decomp(from, to).unwrap_err();
+        assert!(
+            matches!(err, crate::migrate::MigrateError::Invalid { .. }),
+            "{err:?}"
+        );
+        assert!(!to.join("knowledge/analysis").exists());
+    }
+
+    fn one_file(from: &Path, text: &str) {
+        let d = from.join("ausgabe/funktionen/obj1");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("va_00010010_f.c"), text).unwrap();
+    }
+
+    #[test]
+    fn truncated_header_is_rejected() {
+        let (from, to) = setup();
+        one_file(
+            from.path(),
+            "/* @adresse    va:00010010 .. va:0001001F (16 Byt",
+        );
+        assert_rejected(from.path(), to.path());
+    }
+
+    #[test]
+    fn header_without_terminator_is_rejected() {
+        let (from, to) = setup();
+        one_file(
+            from.path(),
+            "/* @adresse    va:00010010 .. va:0001001F (16 Bytes)
+ * @name f
+int x;
+",
+        );
+        assert_rejected(from.path(), to.path());
+    }
+
+    #[test]
+    fn bad_address_in_header_is_rejected() {
+        let (from, to) = setup();
+        one_file(
+            from.path(),
+            &header("va:ZZZZ .. va:0001001F (16 Bytes)", "f"),
+        );
+        assert_rejected(from.path(), to.path());
+    }
+
+    #[test]
+    fn short_string_row_is_rejected() {
+        let (from, to) = setup();
+        two_functions(from.path());
+        std::fs::write(
+            from.path().join("ausgabe/strings.md"),
+            "# Strings
+
+| Adresse | Text | Verwendet von |
+| --- | --- | --- |
+| va:00050004 | only two |
+",
+        )
+        .unwrap();
+        assert_rejected(from.path(), to.path());
+    }
+
+    #[test]
+    fn broken_calls_json_is_rejected() {
+        let (from, to) = setup();
+        two_functions(from.path());
+        std::fs::write(from.path().join("ausgabe/aufrufe.json"), "{\"kanten\": [").unwrap();
+        assert_rejected(from.path(), to.path());
     }
 
     #[test]

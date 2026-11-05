@@ -148,7 +148,8 @@ fn assert_analysis_matches(functions_dir: &Path, to: &Path, imported: u32) {
     assert_eq!(analysis.provider.name, "decomp-import");
     let mut with_error = 0;
     for file in &files {
-        let text = std::fs::read_to_string(file).unwrap();
+        // decovery stores LF only: compare against the Decomp file after CRLF -> LF.
+        let text = std::fs::read_to_string(file).unwrap().replace("\r\n", "\n");
         // Decomp's `kopf` ends with " */\n" (CRLF after a git autocrlf checkout); the pseudo-C follows directly.
         let end = text.find("\n */").expect("header end") + "\n */".len();
         let header_len = end
