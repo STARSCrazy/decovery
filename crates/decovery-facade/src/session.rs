@@ -17,6 +17,7 @@ pub struct Session {
 
 /// The name shown for an address.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DisplayName {
     pub name: String,
     /// `true` for the generated `fun_XXXXXXXX` name.

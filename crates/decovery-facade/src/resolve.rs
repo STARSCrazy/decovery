@@ -6,6 +6,7 @@ use crate::{FacadeError, Session};
 
 /// A resolved target: the function's start and the address that was asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Resolved {
     pub function: Address,
     pub requested: Address,
@@ -14,6 +15,9 @@ pub struct Resolved {
 /// Resolves `input` (`file:0x…`, canonical address, or a name) to the analyzed function containing it.
 pub fn resolve(session: &Session, input: &str) -> Result<Resolved, FacadeError> {
     let input = input.trim();
+    if input.is_empty() {
+        return Err(FacadeError::Invalid("empty target".into()));
+    }
     let requested = if input.contains(':') {
         match input
             .parse::<AddressInput>()
@@ -53,7 +57,7 @@ fn address_of_name(session: &Session, name: &str) -> Result<Address, FacadeError
         .workspace
         .symbols
         .iter()
-        .find(|s| s.confidence != Confidence::Refuted && s.name == name)
+        .find(|s| s.confidence != Confidence::Refuted && !s.name.is_empty() && s.name == name)
     {
         return Ok(s.address);
     }
@@ -130,4 +134,47 @@ fn nearest(session: &Session, at: Address) -> Option<(Address, String)> {
         })
         .min()
         .map(|(_, start)| (start, session.name_of(start).name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unnamed_symbol_is_not_found_by_empty_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("knowledge")).unwrap();
+        std::fs::write(
+            dir.path().join("decovery.toml"),
+            "schema = 1
+
+[target]
+file = \"t.exe\"
+sha256 = \"aa\"
+format = \"flat32\"
+processor = \"x86\"
+",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("knowledge/symbols.toml"),
+            "schema = 1
+
+[[symbol]]
+address = \"flat:00010010\"
+kind = \"label\"
+name = \"\"
+source = \"human\"
+confidence = \"assumed\"
+comment = \"only a comment\"
+",
+        )
+        .unwrap();
+        let session = Session::open_without_analysis(dir.path()).unwrap();
+        assert_eq!(session.workspace.symbols.len(), 1);
+        assert!(matches!(
+            address_of_name(&session, ""),
+            Err(FacadeError::NotFound(_))
+        ));
+    }
 }

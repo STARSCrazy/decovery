@@ -227,3 +227,25 @@ fn refuted_symbol_is_not_used_for_names() {
     assert_eq!(sym.kind, SymbolKind::Function);
     assert_ne!(sym.confidence, Confidence::Refuted);
 }
+
+#[test]
+fn empty_target_is_invalid() {
+    let (_d, s) = session();
+    for input in ["", "   "] {
+        match resolve(&s, input) {
+            Err(FacadeError::Invalid(m)) => assert_eq!(m, "empty target"),
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+#[test]
+fn odd_inputs_do_not_panic() {
+    let (_d, s) = session();
+    for input in ["file:0x", "file:0xFFFFFFFFFFFFFFFFFF", "flat:FFFFFFFFF"] {
+        assert!(
+            matches!(resolve(&s, input), Err(FacadeError::Invalid(_))),
+            "{input}"
+        );
+    }
+}
