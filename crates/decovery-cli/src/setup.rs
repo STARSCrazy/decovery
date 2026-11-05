@@ -308,6 +308,123 @@ pub fn run_setup(
     })
 }
 
+/// unicorn version on PyPI.
+pub const UNICORN: &str = "2.1.1";
+
+pub struct UnicornOptions {
+    pub extern_dir: PathBuf,
+    /// Directory holding `decovery-plugin-sdk` and `unicorn-dos`.
+    pub plugins_dir: PathBuf,
+    /// Python (>= 3.12) used to create the venv.
+    pub python: String,
+    pub config_path: PathBuf,
+    pub platform: Platform,
+}
+
+#[derive(Debug)]
+pub struct UnicornReport {
+    pub venv_python: PathBuf,
+    pub config_path: PathBuf,
+    pub venv_kept: bool,
+}
+
+/// Creates `<extern>/unicorn-venv`, installs the SDK, the `unicorn-dos` plugin and the pinned unicorn, and
+/// registers `[plugins.unicorn-dos]`. A venv in which the plugin already imports is kept as it is.
+pub fn run_unicorn_setup(
+    opts: &UnicornOptions,
+    runner: &dyn Runner,
+    log: &mut dyn FnMut(&str),
+) -> Result<UnicornReport, SetupError> {
+    let sdk = opts.plugins_dir.join("decovery-plugin-sdk");
+    let plugin = opts.plugins_dir.join("unicorn-dos");
+    for dir in [&sdk, &plugin] {
+        if !dir.is_dir() {
+            return fail(format!(
+                "plugin directory {} not found; pass --plugins-dir",
+                dir.display()
+            ));
+        }
+    }
+    std::fs::create_dir_all(&opts.extern_dir)
+        .map_err(|e| io_err("cannot create", &opts.extern_dir, e))?;
+    let venv = opts.extern_dir.join("unicorn-venv");
+    let venv_python = venv_python(&venv, opts.platform);
+
+    let kept = venv_python.is_file()
+        && runner
+            .run(
+                venv_python.as_os_str(),
+                &["-c".into(), "import decovery_unicorn_dos".into()],
+            )
+            .is_ok();
+    if kept {
+        log("step: venv exists and the plugin imports");
+    } else {
+        run(
+            runner,
+            OsStr::new(&opts.python),
+            &[
+                "-c".into(),
+                "import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)".into(),
+            ],
+        )
+        .map_err(|_| {
+            SetupError::Message(format!(
+                "{} is not Python 3.12 or newer; pass --python or set DECOVERY_PYTHON",
+                opts.python
+            ))
+        })?;
+        log(&format!("step: creating venv {}", venv.display()));
+        run(
+            runner,
+            OsStr::new(&opts.python),
+            &[
+                "-m".into(),
+                "venv".into(),
+                "--clear".into(),
+                venv.clone().into_os_string(),
+            ],
+        )?;
+        if !venv_python.is_file() {
+            return fail(format!(
+                "venv created but {} is missing",
+                venv_python.display()
+            ));
+        }
+        log(&format!(
+            "step: pip install unicorn=={UNICORN} and the local plugins"
+        ));
+        run(
+            runner,
+            venv_python.as_os_str(),
+            &[
+                "-m".into(),
+                "pip".into(),
+                "install".into(),
+                format!("unicorn=={UNICORN}").into(),
+                sdk.into_os_string(),
+                plugin.into_os_string(),
+            ],
+        )?;
+    }
+
+    log(&format!(
+        "step: writing [plugins.unicorn-dos] to {}",
+        opts.config_path.display()
+    ));
+    let command = vec![
+        path_str(&venv_python)?,
+        "-m".into(),
+        "decovery_unicorn_dos".into(),
+    ];
+    write_plugin_entry(&opts.config_path, "unicorn-dos", &command, &BTreeMap::new())?;
+    Ok(UnicornReport {
+        venv_python,
+        config_path: opts.config_path.clone(),
+        venv_kept: kept,
+    })
+}
+
 fn run(runner: &dyn Runner, program: &OsStr, args: &[OsString]) -> Result<(), SetupError> {
     runner.run(program, args).map_err(SetupError::Message)
 }
@@ -573,11 +690,14 @@ pub fn default_extern_dir(start: &Path, config_path: &Path) -> PathBuf {
 pub fn find_plugins_dir(start: &Path) -> Result<PathBuf, String> {
     for dir in start.ancestors() {
         let plugins = dir.join("plugins");
-        if plugins.join("decovery-plugin-sdk").is_dir() && plugins.join("ghidra").is_dir() {
+        if ["decovery-plugin-sdk", "ghidra", "unicorn-dos"]
+            .iter()
+            .all(|name| plugins.join(name).is_dir())
+        {
             return Ok(plugins);
         }
     }
-    Err("not inside the decovery repository; pass --plugins-dir <dir> (holding decovery-plugin-sdk and ghidra)".into())
+    Err("not inside the decovery repository; pass --plugins-dir <dir> (holding decovery-plugin-sdk, ghidra and unicorn-dos)".into())
 }
 
 fn sha256_file(path: &Path) -> Result<String, SetupError> {
@@ -643,6 +763,10 @@ mod tests {
         bad_download: bool,
         /// pip fails.
         pip_fails: bool,
+        /// `import decovery_unicorn_dos` fails.
+        import_fails: bool,
+        /// The Python version check fails.
+        old_python: bool,
     }
 
     impl FakeRunner {
@@ -671,6 +795,16 @@ mod tests {
                 "tar" => {
                     let dest = Path::new(&args[3]);
                     std::fs::create_dir_all(dest.join("top")).map_err(|e| e.to_string())
+                }
+                _ if args.first().is_some_and(|a| a == "-c") => {
+                    let code = args[1].to_string_lossy();
+                    if (self.import_fails && code.starts_with("import decovery"))
+                        || (self.old_python && code.contains("version_info"))
+                    {
+                        Err("failed".into())
+                    } else {
+                        Ok(())
+                    }
                 }
                 _ if args.len() >= 3 && args[1] == "venv" => {
                     let python = venv_python(Path::new(&args[args.len() - 1]), TEST_PLATFORM);
@@ -848,6 +982,7 @@ mod tests {
         let repo = dir.path().join("repo");
         std::fs::create_dir_all(repo.join("plugins/decovery-plugin-sdk")).unwrap();
         std::fs::create_dir_all(repo.join("plugins/ghidra")).unwrap();
+        std::fs::create_dir_all(repo.join("plugins/unicorn-dos")).unwrap();
         std::fs::create_dir_all(repo.join("a/b")).unwrap();
         assert_eq!(
             find_plugins_dir(&repo.join("a/b")).unwrap(),
@@ -903,5 +1038,102 @@ mod tests {
         assert!(err.to_string().contains("checksum mismatch"));
         let file = opts.extern_dir.join("downloads").join("ghidra_1.2.3.zip");
         assert!(!file.exists());
+    }
+
+    fn unicorn_options(root: &Path) -> UnicornOptions {
+        let plugins = root.join("plugins");
+        std::fs::create_dir_all(plugins.join("decovery-plugin-sdk")).unwrap();
+        std::fs::create_dir_all(plugins.join("unicorn-dos")).unwrap();
+        UnicornOptions {
+            extern_dir: root.join("extern dir"),
+            plugins_dir: plugins,
+            python: "py".into(),
+            config_path: root.join("cfg").join("config.toml"),
+            platform: TEST_PLATFORM,
+        }
+    }
+
+    #[test]
+    fn unicorn_plan_lists_venv_and_pip_steps() {
+        let dir = tempfile::tempdir().unwrap();
+        let opts = unicorn_options(dir.path());
+        let runner = FakeRunner::default();
+        let mut steps = Vec::new();
+        let report = run_unicorn_setup(&opts, &runner, &mut |l| steps.push(l.to_string())).unwrap();
+        assert!(!report.venv_kept);
+        assert!(steps.iter().any(|s| s.contains("creating venv")));
+        let calls = runner.calls.borrow();
+        let venv = calls
+            .iter()
+            .find(|c| c.contains(&"venv".to_string()))
+            .unwrap();
+        assert!(venv.last().unwrap().ends_with("unicorn-venv"));
+        let pip = calls
+            .iter()
+            .find(|c| c.contains(&"pip".to_string()))
+            .unwrap();
+        assert!(pip.contains(&"unicorn==2.1.1".to_string()));
+        assert!(pip.iter().any(|a| a.ends_with("decovery-plugin-sdk")));
+        assert!(pip.iter().any(|a| a.ends_with("unicorn-dos")));
+    }
+
+    #[test]
+    fn existing_unicorn_venv_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let opts = unicorn_options(dir.path());
+        run_unicorn_setup(&opts, &FakeRunner::default(), &mut |_| {}).unwrap();
+        let second = FakeRunner::default();
+        let report = run_unicorn_setup(&opts, &second, &mut |_| {}).unwrap();
+        assert!(report.venv_kept);
+        let calls = second.calls.borrow();
+        assert!(!calls.iter().any(|c| c.contains(&"venv".to_string())));
+        assert!(!calls.iter().any(|c| c.contains(&"pip".to_string())));
+
+        // A venv without the importable plugin is rebuilt.
+        let broken = FakeRunner {
+            import_fails: true,
+            ..Default::default()
+        };
+        let report = run_unicorn_setup(&opts, &broken, &mut |_| {}).unwrap();
+        assert!(!report.venv_kept);
+        assert!(
+            broken
+                .calls
+                .borrow()
+                .iter()
+                .any(|c| c.contains(&"pip".to_string()))
+        );
+    }
+
+    #[test]
+    fn old_python_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let opts = unicorn_options(dir.path());
+        let runner = FakeRunner {
+            old_python: true,
+            ..Default::default()
+        };
+        let err = run_unicorn_setup(&opts, &runner, &mut |_| {}).unwrap_err();
+        assert!(err.to_string().contains("3.12"), "{err}");
+        assert!(!opts.config_path.exists());
+    }
+
+    #[test]
+    fn user_config_gets_unicorn_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let opts = unicorn_options(dir.path());
+        std::fs::create_dir_all(opts.config_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &opts.config_path,
+            "schema = 1\n\n[plugins.other]\ncommand = [\"o\"]\n",
+        )
+        .unwrap();
+        let report = run_unicorn_setup(&opts, &FakeRunner::default(), &mut |_| {}).unwrap();
+        let plugins = read_plugins_file(&opts.config_path).unwrap();
+        assert_eq!(plugins["other"].command, ["o"]);
+        let entry = &plugins["unicorn-dos"];
+        assert_eq!(entry.command[0], report.venv_python.to_string_lossy());
+        assert_eq!(entry.command[1..], ["-m", "decovery_unicorn_dos"]);
+        assert!(entry.env.is_empty());
     }
 }
