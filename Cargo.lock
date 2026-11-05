@@ -361,7 +361,9 @@ version = "0.1.0"
 dependencies = [
  "decovery-core",
  "decovery-diff",
+ "decovery-plugin",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
  "toml",

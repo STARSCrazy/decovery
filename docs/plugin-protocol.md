@@ -151,3 +151,31 @@ functions.
 
 On `shutdown` or end of input the plugin closes the decompiler, the program and the Ghidra project (releasing its
 lock).
+
+## Capability `runner` v1
+
+Served by plugins that run the original DOS compilers: `unicorn-dos` (emulator) and `dosbox-lab`. The built-in
+`native` runner of `decovery-toolchain` needs no plugin. Drive `C:` is the build directory (writable), drive `D:`
+the tool directory (read-only).
+
+### `runner/run`
+
+Params: `{mounts: [{drive, path, writable}], current_drive: "C", timeout_s, jobs: [{commands: [string]}]}`.
+`path` is an absolute host directory, `timeout_s` applies to each job. Each job is a DOS session of its own: its
+command lines run one after another, a `SET NAME=value` line sets the environment for the following lines of the
+same job, and the job ends at the first line with a non-zero exit code. The host rejects command lines over 126
+characters before calling, so the plugin never sees them.
+
+Result: `{jobs: [{status: "done" | "timeout" | "failed", exit_code, stdout, message}]}`, one entry per job in
+request order. `done` carries the exit code of the last command that ran, `timeout` means the job did not end
+within `timeout_s` (the plugin stops it), `failed` carries a `message` (the emulator faulted, an unknown
+instruction, ...). `stdout` is the console output as text. The plugin does not report which files a job produced:
+the host snapshots drive `C:` before the call and derives that itself, and for a `timeout` it deletes the expected
+files that did not exist before.
+
+A plugin that cannot run some job's program (an unsupported CPU mode or DOS extender) answers error `-32020`
+before running any job; the host then tries the next runner of its list.
+
+| Code | Meaning |
+|---|---|
+| `-32020` | `RUNNER_UNSUPPORTED`: some job's program cannot be run by this plugin; nothing was run |

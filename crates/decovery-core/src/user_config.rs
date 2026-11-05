@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::workspace::{PluginConfig, SCHEMA, WorkspaceError};
+use crate::workspace::{PluginConfig, SCHEMA, Workspace, WorkspaceError};
 
 /// The user config; every table is optional.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -45,6 +45,20 @@ pub fn user_config_path() -> Option<PathBuf> {
 
 fn non_empty_var(name: &str) -> Option<std::ffi::OsString> {
     std::env::var_os(name).filter(|v| !v.is_empty())
+}
+
+/// The configuration of plugin `name`: the workspace entry, else the user entry.
+pub fn plugin_config(
+    workspace: &Workspace,
+    user: &BTreeMap<String, PluginConfig>,
+    name: &str,
+) -> Option<PluginConfig> {
+    workspace
+        .config
+        .plugins
+        .get(name)
+        .or_else(|| user.get(name))
+        .cloned()
 }
 
 /// The user config; the default when the file (or the config dir) does not exist.
