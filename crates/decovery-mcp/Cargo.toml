@@ -1,0 +1,19 @@
+[package]
+name = "decovery-mcp"
+description = "MCP server of decovery: the facade tools over stdio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+decovery-core.workspace = true
+decovery-facade.workspace = true
+rmcp.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

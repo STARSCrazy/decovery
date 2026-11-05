@@ -17,6 +17,7 @@ decovery-core.workspace = true
 decovery-diff.workspace = true
 decovery-facade.workspace = true
 decovery-loaders.workspace = true
+decovery-mcp.workspace = true
 decovery-objects.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
