@@ -521,3 +521,98 @@ fn without_analysis_knowledge_is_saved_and_output_skipped() {
     assert_eq!(symbol_at(dir.path(), 0x10100).name, "beta");
     assert!(!dir.path().join("output").exists());
 }
+
+#[test]
+fn agent_cannot_replace_human_signature_on_unnamed_record() {
+    let d = workspace();
+    let at = "flat:00010100";
+    annotate(
+        d.path(),
+        &agent(at, AnnotateAction::Comment("looks like a helper".into())),
+    )
+    .unwrap();
+    let r = annotate(
+        d.path(),
+        &request(at, AnnotateAction::Signature("int helper(int a)".into())),
+    )
+    .unwrap();
+    assert_eq!(r.data["changed"], true);
+    let s = symbol_at(d.path(), 0x10100);
+    assert_eq!(
+        (s.source, s.confidence),
+        (ClaimSource::Human, Confidence::Assumed)
+    );
+    let r = annotate(
+        d.path(),
+        &agent(at, AnnotateAction::Signature("void helper(void)".into())),
+    )
+    .unwrap();
+    assert_eq!(r.data["changed"], false);
+    assert_eq!(
+        symbol_at(d.path(), 0x10100).signature.as_deref(),
+        Some("int helper(int a)")
+    );
+}
+
+#[test]
+fn agent_local_keeps_agent_source() {
+    let d = workspace();
+    annotate(
+        d.path(),
+        &agent(
+            "flat:00010100",
+            AnnotateAction::Local {
+                place: "param:1".into(),
+                name: "count".into(),
+                data_type: None,
+            },
+        ),
+    )
+    .unwrap();
+    let s = symbol_at(d.path(), 0x10100);
+    assert_eq!(s.source, ClaimSource::Agent);
+    assert!(s.name.is_empty());
+}
+
+#[test]
+fn rejects_overlong_name() {
+    let d = workspace();
+    let before = symbols_bytes(d.path());
+    let m = invalid(annotate(
+        d.path(),
+        &request("flat:00010100", name(&"a".repeat(201))),
+    ));
+    assert!(m.contains("200"), "{m}");
+    assert_eq!(symbols_bytes(d.path()), before);
+    annotate(d.path(), &request("flat:00010100", name(&"a".repeat(200)))).unwrap();
+}
+
+#[test]
+fn output_failure_after_save_is_a_warning() {
+    let d = workspace();
+    let out = d.path().join("output");
+    std::fs::remove_dir_all(&out).unwrap();
+    std::fs::write(&out, "not a directory").unwrap();
+    let r = annotate(d.path(), &request("flat:00010100", name("beta"))).unwrap();
+    assert_eq!(r.data["changed"], true);
+    let w = r.data["warnings"][0].as_str().unwrap();
+    assert!(
+        w.starts_with("knowledge saved; output not regenerated: ")
+            && w.ends_with("(run `decovery analyze` or `decovery show`)"),
+        "{w}"
+    );
+    assert_eq!(symbol_at(d.path(), 0x10100).name, "beta");
+}
+
+#[test]
+fn comment_and_signature_reject_bad_text() {
+    let d = workspace();
+    let m = invalid(annotate(
+        d.path(),
+        &request(
+            "alpha",
+            AnnotateAction::Signature("int f(void)\nint g(void)".into()),
+        ),
+    ));
+    assert!(m.contains("C prototype"), "{m}");
+}
