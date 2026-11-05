@@ -13,8 +13,23 @@ programs (NE, PE), other compilers (Borland, Microsoft, GCC) and other languages
 
 ## Status
 
-Phase 0 — not usable yet. See [the design](docs/design/0001-decovery-design.md) and
-[the phase-0 plan](docs/plans/2026-11-04-phase-0.md).
+Phase 1 — the facade works on migrated Decomp workspaces: knowledge, generated output, `status`, `find`, `show`,
+`annotate`, `analyze` and an MCP server. The Ghidra path is not yet verified end to end. See
+[the design](docs/design/0001-decovery-design.md) and [the phase-1 plan](docs/plans/2026-11-05-phase-1.md).
+
+## Usage
+
+```sh
+decovery migrate <decomp-workspace> <dir>          # convert a Decomp workspace
+cd <dir>
+decovery status                                    # counts and the next thing to do
+decovery show <name|address>                       # header and pseudo-C of a function
+decovery annotate <name|address> --name <new>      # record a name, --comment, --signature, --refute …
+decovery analyze                                   # re-run the analyzer plugin (needs `decovery setup ghidra`)
+decovery mcp                                       # the same commands as MCP tools over stdio
+```
+
+Every command takes `--workspace <dir>` (default: the current directory) and `--json`.
 
 ## Building
 
