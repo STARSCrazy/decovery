@@ -132,6 +132,23 @@ class DosFsTest(unittest.TestCase):
         self.fs.close_all()
         self.assertEqual(sorted(self.fs.handles), [0, 1, 2, 3, 4])
 
+    def test_dup_shares_the_file_until_the_last_close(self):
+        (self.c / "IN.TXT").write_bytes(b"abcdef")
+        h = self.fs.open("IN.TXT", 0)
+        copy = self.fs.dup(h)
+        self.assertEqual(copy, 6)
+        self.assertEqual(self.fs.read(h, 2), b"ab")
+        self.assertEqual(self.fs.read(copy, 2), b"cd")  # shared position
+        self.fs.close(h)
+        self.assertEqual(self.fs.read(copy, 1), b"e")  # still open
+        self.fs.force_dup(1, copy)  # closes the file, handle 6 is the console now
+        self.assertEqual(self.fs.write(copy, b"x"), 1)
+        self.assertEqual(self.fs.output, b"x")
+        self.fs.close(copy)
+        self.assertEqual(self.fs.write(1, b"y"), 1)  # stdout itself stays
+        self.assertEqual(self.code(self.fs.dup, 9), 6)
+        self.assertEqual(self.code(self.fs.force_dup, 9, 1), 6)
+
 
 if __name__ == "__main__":
     unittest.main()

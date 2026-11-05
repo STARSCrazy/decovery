@@ -66,6 +66,15 @@ class PharLapTest(unittest.TestCase):
         self.assertIn("no end after 0.3 s", str(caught.exception))
         self.assertTrue(machine.spent)
 
+    def test_stop_without_exit_is_an_error(self):
+        emu = self.emu(asm.halt_program(), timeout_s=30)
+        machine = self.pharlap.Machine(emu.p3)
+        with self.assertRaises(EmulatorError) as caught:
+            emu.run(machine)
+        self.assertNotIsInstance(caught.exception, EmulatorTimeout)
+        self.assertRegex(str(caught.exception), r"^stopped without exit at 000C:00001001 \(EAX=")
+        self.assertTrue(machine.spent)
+
     def test_unknown_function_aborts_with_address(self):
         emu = self.emu(asm.call_program(0x99))
         machine = self.pharlap.Machine(emu.p3)

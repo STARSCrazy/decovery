@@ -204,11 +204,26 @@ class DosFs:
         return self._new_handle(OpenFile(f, path, writable=True))
 
     def close(self, h: int) -> None:
+        """Close handle `h`; the file itself is closed with its last handle (see `dup`)."""
         entry = self.handles.pop(h & 0xFFFF, None)
         if entry is None:
             raise DosError(INVALID_HANDLE)
-        if entry.file is not None:
+        if entry.file is not None and not any(other is entry for other in self.handles.values()):
             entry.file.close()
+
+    def dup(self, h: int) -> int:
+        """A new handle for the file of `h`; both share the file position, as in DOS."""
+        return self._new_handle(self._file(h))
+
+    def force_dup(self, h: int, new: int) -> None:
+        """Make handle `new` refer to the file of `h`, closing what `new` referred to."""
+        entry = self._file(h)
+        new &= 0xFFFF
+        if new == h & 0xFFFF:
+            return
+        if new in self.handles:
+            self.close(new)
+        self.handles[new] = entry
 
     def close_all(self) -> None:
         """DOS closes every open file when the program ends."""
@@ -325,6 +340,7 @@ class DosFs:
     def find_next(self, key: int) -> FindEntry:
         found = self.searches.get(key) or []
         if not found:
+            self.searches.pop(key, None)
             raise DosError(NO_MORE_FILES)
         p = found.pop(0)
         st = p.stat()

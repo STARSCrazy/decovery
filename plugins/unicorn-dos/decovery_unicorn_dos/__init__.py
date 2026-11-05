@@ -54,8 +54,9 @@ def _parse(params: Any) -> tuple[dict[str, Path], set[str], str, float, list[lis
 
 
 def build_plugin(machine_factory: Callable[[Any], Any] | None = None) -> Plugin:
-    """The unicorn-dos plugin. Jobs run in worker processes; with `machine_factory` (called with a `P3Image`,
-    returns a `pharlap.Machine`) they run in this process instead, one after another (tests)."""
+    """The unicorn-dos plugin. Jobs run in worker processes; with `machine_factory` (called with a `P3Image` or
+    the exe bytes of a real-mode program, see `pool.new_machine`) they run in this process instead, one after
+    another (tests)."""
     plugin = Plugin("unicorn-dos", __version__)
     pool = JobPool() if machine_factory is None else None
     machines = MachineCache(machine_factory) if machine_factory is not None else None
