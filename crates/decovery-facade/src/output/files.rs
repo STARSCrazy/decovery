@@ -27,6 +27,18 @@ pub fn function_path(session: &Session, start: Address) -> PathBuf {
     relative_path(session, start, &session.name_of(start).name)
 }
 
+/// Writes the file of the single function starting at `start` (and removes other files of that address).
+pub fn write_function(
+    session: &Session,
+    start: Address,
+    _lock: &WorkspaceLock,
+) -> Result<OutputReport, FacadeError> {
+    let cx = Context::new(session)?;
+    let mut report = OutputReport::default();
+    emit_function(&cx, start, &mut report)?;
+    Ok(report)
+}
+
 /// Regenerates every function file and the index files; removes files of addresses that are no functions.
 pub fn write_all(session: &Session, _lock: &WorkspaceLock) -> Result<OutputReport, FacadeError> {
     let cx = Context::new(session)?;
@@ -57,12 +69,12 @@ pub fn write_affected(
                 }
             }
             for start in affected(&cx, *at, true) {
-                write_function(&cx, start, &mut report)?;
+                emit_function(&cx, start, &mut report)?;
             }
         }
         Change::Symbol { at } => {
             for start in affected(&cx, *at, false) {
-                write_function(&cx, start, &mut report)?;
+                emit_function(&cx, start, &mut report)?;
             }
         }
     }
@@ -190,7 +202,7 @@ fn write_every_function(cx: &Context<'_>) -> Result<OutputReport, FacadeError> {
     let mut report = OutputReport::default();
     let mut keep = HashSet::new();
     for f in cx.functions() {
-        keep.insert(write_function(cx, f.start, &mut report)?);
+        keep.insert(emit_function(cx, f.start, &mut report)?);
     }
     let dir = functions_dir(&cx.session.workspace.root);
     for path in c_files(&dir)? {
@@ -202,7 +214,7 @@ fn write_every_function(cx: &Context<'_>) -> Result<OutputReport, FacadeError> {
 }
 
 /// Writes one function file if its content changed, then removes other files of the same address in its folder.
-fn write_function(
+fn emit_function(
     cx: &Context<'_>,
     start: Address,
     report: &mut OutputReport,

@@ -17,7 +17,7 @@ use decovery_core::{
 
 use crate::{FacadeError, Session};
 
-pub use files::{function_path, render_function, write_affected, write_all};
+pub use files::{function_path, render_function, write_affected, write_all, write_function};
 pub use indices::{StatusCounts, status_counts};
 
 /// Directory of all generated output, relative to the workspace root.
