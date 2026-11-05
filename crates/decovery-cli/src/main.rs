@@ -6,6 +6,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand, ValueEnum};
 
 mod compare;
+mod setup;
 
 use decovery_core::{ClaimSource, Confidence};
 use decovery_facade::{
@@ -137,6 +138,31 @@ enum Command {
         /// Number of characters to return.
         #[arg(long, default_value_t = 8000)]
         limit: usize,
+    },
+    /// Install tools into `extern/` and register them in the user config.
+    Setup {
+        #[command(subcommand)]
+        what: SetupCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum SetupCommand {
+    /// Install Ghidra, a JDK and a pyghidra venv (downloads about 500 MB) and write `[plugins.ghidra]`
+    /// into the user config. Progress goes to stderr.
+    Ghidra {
+        /// Install directory; default: `extern/` next to the repository, else beside the user config.
+        #[arg(long = "extern", value_name = "DIR")]
+        extern_dir: Option<PathBuf>,
+        /// Pre-downloaded Ghidra release zip (offline); its sha256 must match the pinned one.
+        #[arg(long)]
+        ghidra_zip: Option<PathBuf>,
+        /// Pre-downloaded JDK archive (offline); its sha256 must match the pinned one.
+        #[arg(long)]
+        jdk_zip: Option<PathBuf>,
+        /// Directory with `decovery-plugin-sdk` and `ghidra`; default: `plugins/` of the repository.
+        #[arg(long, value_name = "DIR")]
+        plugins_dir: Option<PathBuf>,
     },
 }
 
@@ -358,6 +384,21 @@ fn main() -> ExitCode {
             offset,
             limit,
         } => finish(detail(&cli.workspace, &handle, offset, limit, cli.json)),
+        Command::Setup {
+            what:
+                SetupCommand::Ghidra {
+                    extern_dir,
+                    ghidra_zip,
+                    jdk_zip,
+                    plugins_dir,
+                },
+        } => finish(setup_ghidra(
+            extern_dir,
+            ghidra_zip,
+            jdk_zip,
+            plugins_dir,
+            cli.json,
+        )),
     }
 }
 
@@ -370,6 +411,63 @@ fn finish(result: Result<(), FacadeError>) -> ExitCode {
             ExitCode::from(e.exit_code())
         }
     }
+}
+
+fn setup_ghidra(
+    extern_dir: Option<PathBuf>,
+    ghidra_zip: Option<PathBuf>,
+    jdk_zip: Option<PathBuf>,
+    plugins_dir: Option<PathBuf>,
+    json: bool,
+) -> Result<(), FacadeError> {
+    let invalid = |e: String| FacadeError::Invalid(e);
+    let platform = setup::Platform::current().map_err(invalid)?;
+    let config_path = decovery_facade::plugins::user_config_path().ok_or_else(|| {
+        invalid("cannot locate the user config dir (APPDATA / HOME unset)".into())
+    })?;
+    let cwd = std::env::current_dir().map_err(|e| invalid(e.to_string()))?;
+    let plugins_dir = match plugins_dir {
+        Some(dir) => dir,
+        None => setup::find_plugins_dir(&cwd).map_err(invalid)?,
+    };
+    let extern_dir = extern_dir.unwrap_or_else(|| setup::default_extern_dir(&cwd, &config_path));
+    let absolute = |p: PathBuf| std::path::absolute(&p).unwrap_or(p);
+    let options = setup::SetupOptions {
+        extern_dir: absolute(extern_dir),
+        ghidra_archive: ghidra_zip.map(absolute),
+        jdk_archive: jdk_zip.map(absolute),
+        plugins_dir: absolute(plugins_dir),
+        python: std::env::var("DECOVERY_PYTHON")
+            .ok()
+            .filter(|p| !p.is_empty())
+            .unwrap_or_else(|| "python".into()),
+        config_path,
+        platform,
+    };
+    let report = setup::run_setup(
+        &options,
+        &setup::plan(platform),
+        &setup::SystemRunner,
+        &mut |line| eprintln!("{line}"),
+    )
+    .map_err(|e| invalid(e.to_string()))?;
+    let summary = format!(
+        "Ghidra installed in {}; plugin `ghidra` registered in {}",
+        report.ghidra_dir.display(),
+        report.config_path.display()
+    );
+    let response = Response::new(
+        summary,
+        serde_json::json!({
+            "ghidra_dir": report.ghidra_dir,
+            "jdk_dir": report.jdk_dir,
+            "venv_python": report.venv_python,
+            "config": report.config_path,
+            "ghidra_kept": report.ghidra_kept,
+            "jdk_kept": report.jdk_kept,
+        }),
+    );
+    print_summary(&response, json)
 }
 
 fn print_json(response: &Response) -> Result<(), FacadeError> {

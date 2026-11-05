@@ -25,6 +25,15 @@ cargo test
 
 Rust stable (see `rust-toolchain.toml`). Python plugins live in `plugins/` and need Python 3.12 or newer.
 
+## Setting up Ghidra
+
+`decovery setup ghidra` installs Ghidra 12.1.4, a JDK 21 (Eclipse Temurin) and a pyghidra venv into `extern/`
+and registers the `ghidra` analyzer plugin in the user config, which `decovery analyze` reads. **It downloads
+about 500 MB** (checksums are pinned; windows-x64 and linux-x64 only). Run it inside the repository, or pass
+`--plugins-dir`. `--extern <dir>` picks the install directory; `--ghidra-zip` / `--jdk-zip` take files you
+downloaded yourself. `DECOVERY_PYTHON` selects the Python that creates the venv. A second run keeps what is
+installed.
+
 ## No proprietary material
 
 This repository must never contain game executables, commercial compilers or libraries, code decompiled from

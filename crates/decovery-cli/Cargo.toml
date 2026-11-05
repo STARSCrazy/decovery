@@ -19,10 +19,10 @@ decovery-facade.workspace = true
 decovery-loaders.workspace = true
 decovery-objects.workspace = true
 serde_json.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-toml.workspace = true
 
 [lints]
 workspace = true
