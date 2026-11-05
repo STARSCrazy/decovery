@@ -208,10 +208,10 @@ fn dissenting_field_is_wrong() {
     assert_eq!((a.base, a.votes, a.dissent), (0x2000, 2, 1));
 }
 
-/// `mov ax,[_g1]; mov ax,offset _DATA+0; mov dx,offset _DATA+6; ret`; the string fields are 0x40 and 0x46 in
-/// the original, `strings` sits at linear 0x2040.
+/// `mov ax,[_g1]; mov ax,offset _DATA+0; mov dx,offset _DATA+3; ret` (the strings `"ab"` and `"cdef"`); the
+/// string fields are 0x40 and 0x43 in the original, `strings` sits at linear 0x2040.
 fn strings_case(strings: &[u8], symbols: &Symbols) -> ModuleComparison {
-    let code: &[u8] = &[0xA1, 0, 0, 0xB8, 0, 0, 0xBA, 6, 0, 0xC3];
+    let code: &[u8] = &[0xA1, 0, 0, 0xB8, 0, 0, 0xBA, 3, 0, 0xC3];
     let m = module16(
         &[code],
         vec![
@@ -220,7 +220,7 @@ fn strings_case(strings: &[u8], symbols: &Symbols) -> ModuleComparison {
             off16(7, data_at(0)),
         ],
     );
-    let original: &[u8] = &[0xA1, 0x10, 0, 0xB8, 0x40, 0, 0xBA, 0x46, 0, 0xC3];
+    let original: &[u8] = &[0xA1, 0x10, 0, 0xB8, 0x40, 0, 0xBA, 0x43, 0, 0xC3];
     let p = program16(&[original], &[(0x2040, strings)], vec![]);
     run16(&m, &p, symbols, &ModuleOptions::default())
 }
@@ -241,13 +241,24 @@ fn string_section_anchor_and_bytes() {
 
 #[test]
 fn string_bytes_differ_mark_refs_wrong() {
-    let c = strings_case(b"ab\0cdeX\0", &known_globals());
+    // both strings differ
+    let c = strings_case(b"aX\0cdeX\0", &known_globals());
     assert_eq!(
         c.functions[0].blockers,
         vec![
             Blocker::WrongAbsoluteRef { at: 4 },
             Blocker::WrongAbsoluteRef { at: 7 }
         ]
+    );
+}
+
+#[test]
+fn unrelated_section_difference_does_not_mark_ref() {
+    // only the second string differs: the reference to the first stays matched
+    let c = strings_case(b"ab\0cdeX\0", &known_globals());
+    assert_eq!(
+        c.functions[0].blockers,
+        vec![Blocker::WrongAbsoluteRef { at: 7 }]
     );
 }
 
