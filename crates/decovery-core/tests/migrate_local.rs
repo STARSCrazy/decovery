@@ -1,9 +1,9 @@
 //! Local test against the private Decomp workspaces. Run with `cargo test -- --ignored`.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use decovery_core::{Workspace, migrate_decomp};
+use decovery_core::{Address, Analysis, Workspace, migrate_decomp};
 
 #[test]
 #[ignore = "local: private Decomp workspace"]
@@ -88,6 +88,13 @@ fn migrates_without_loss() {
     if from.join("ausgabe").is_dir() || from.join("cache").is_dir() {
         assert!(!report.skipped.is_empty());
     }
+    let functions_dir = from.join("ausgabe").join("funktionen");
+    if functions_dir.is_dir() {
+        assert_analysis_matches(&functions_dir, to.path(), report.analysis_functions);
+    } else {
+        assert_eq!(report.analysis_functions, 0);
+        assert!(Analysis::load(to.path()).unwrap().is_none());
+    }
     eprintln!(
         "symbols: {}, unmapped: {:?}",
         ws.symbols.len(),
@@ -105,4 +112,87 @@ fn matches(entry: &str, key: &str) -> bool {
         }
         None => entry == key,
     }
+}
+
+fn c_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            c_files(&path, out);
+        } else if path.extension().is_some_and(|e| e == "c") {
+            out.push(path);
+        }
+    }
+}
+
+fn flat_address(text: &str) -> Address {
+    match text.strip_prefix("va:") {
+        Some(hex) => Address::Flat(u32::from_str_radix(hex, 16).unwrap()),
+        None => {
+            let (seg, off) = text.strip_prefix("rel:").unwrap().split_once(':').unwrap();
+            Address::Seg {
+                seg: u16::from_str_radix(seg, 16).unwrap(),
+                off: u16::from_str_radix(off, 16).unwrap(),
+            }
+        }
+    }
+}
+
+/// The analysis has one function per `*.c` file and `header + stored body` reproduces every file byte for byte.
+fn assert_analysis_matches(functions_dir: &Path, to: &Path, imported: u32) {
+    let analysis = Analysis::load(to).unwrap().expect("analysis.json");
+    let mut files = Vec::new();
+    c_files(functions_dir, &mut files);
+    assert_eq!(analysis.functions.len(), files.len());
+    assert_eq!(imported as usize, files.len());
+    assert_eq!(analysis.provider.name, "decomp-import");
+    let mut with_error = 0;
+    for file in &files {
+        let text = std::fs::read_to_string(file).unwrap();
+        // Decomp's `kopf` ends with " */\n" (CRLF after a git autocrlf checkout); the pseudo-C follows directly.
+        let end = text.find("\n */").expect("header end") + "\n */".len();
+        let header_len = end
+            + if text[end..].starts_with("\r\n") {
+                2
+            } else {
+                1
+            };
+        assert!(text[end..header_len].ends_with('\n'));
+        let (header, body) = text.split_at(header_len);
+        let first = header.lines().next().unwrap();
+        let start_text = first
+            .strip_prefix("/* @adresse")
+            .unwrap()
+            .trim_start()
+            .split(' ')
+            .next()
+            .unwrap();
+        let start = flat_address(start_text);
+        let stored = Analysis::decompiled(to, start)
+            .unwrap()
+            .unwrap_or_else(|| panic!("no body for {}", file.display()));
+        assert_eq!(stored, body, "{}", file.display());
+        assert_eq!(format!("{header}{stored}"), text, "{}", file.display());
+        let function = analysis
+            .functions
+            .iter()
+            .find(|f| f.start == start)
+            .unwrap_or_else(|| panic!("no function for {}", file.display()));
+        assert_eq!(
+            function.decompile_error.is_some(),
+            body.starts_with("/* Dekompilieren fehlgeschlagen: ")
+        );
+        with_error += usize::from(function.decompile_error.is_some());
+    }
+    let bodies = std::fs::read_dir(to.join("knowledge/analysis/decompiled"))
+        .unwrap()
+        .count();
+    assert_eq!(bodies, files.len());
+    eprintln!(
+        "analysis: {} functions ({with_error} with decompile error), {} calls, {} strings, {} accesses",
+        analysis.functions.len(),
+        analysis.calls.len(),
+        analysis.strings.len(),
+        analysis.data_accesses.len()
+    );
 }
