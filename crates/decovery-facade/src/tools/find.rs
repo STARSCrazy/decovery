@@ -104,7 +104,17 @@ pub fn find(session: &Session, query: &FindQuery, budget: Budget) -> Result<Resp
                 return Err(FacadeError::Invalid("find code needs a pattern".into()));
             };
             match code(&session.workspace.root, &pattern) {
-                Some(rows) => finish(session, "code lines", rows, query, budget),
+                Some(hits) => {
+                    let mut response = finish(session, "code lines", hits.rows, query, budget)?;
+                    if !hits.unreadable.is_empty() {
+                        response.summary.push_str(&format!(
+                            "; {} files could not be read",
+                            hits.unreadable.len()
+                        ));
+                        response.data["unreadable"] = json!(hits.unreadable);
+                    }
+                    Ok(response)
+                }
                 None => Ok(Response::new(
                     OUTPUT_MISSING,
                     json!({ "total": 0, "items": [] }),
@@ -265,7 +275,7 @@ fn functions(session: &Session, query: &FindQuery, pattern: Option<Pattern>) -> 
         .collect()
 }
 
-fn distinct_callers(index: &AnalysisIndex<'_>, f: Address) -> usize {
+pub(crate) fn distinct_callers(index: &AnalysisIndex<'_>, f: Address) -> usize {
     let mut callers: Vec<Address> = index.callers(f).iter().map(|e| e.caller).collect();
     callers.sort();
     callers.dedup();
@@ -310,32 +320,33 @@ fn address_text_row(at: Address, text: String) -> Row {
     )
 }
 
-/// Matching lines of the generated function files; `None` when they were not generated.
-fn code(root: &Path, pattern: &Pattern) -> Option<Vec<Row>> {
+/// Result of a code search: rows and the files that could not be read.
+struct CodeHits {
+    rows: Vec<Row>,
+    unreadable: Vec<String>,
+}
+
+/// Matching lines of the generated function files; `None` when they were not generated. Files are read
+/// lossily (invalid UTF-8 becomes U+FFFD); symbolic links and junctions are not followed.
+fn code(root: &Path, pattern: &Pattern) -> Option<CodeHits> {
     let dir = root.join(OUTPUT_DIR).join(FUNCTIONS_DIR);
     if !dir.is_dir() {
         return None;
     }
     let mut files = Vec::new();
-    collect_c_files(&dir, &mut files);
-    let mut rel: Vec<(String, PathBuf)> = files
-        .into_iter()
-        .filter_map(|p| {
-            let r = p.strip_prefix(root).ok()?;
-            let text = r
-                .components()
-                .map(|c| c.as_os_str().to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
-                .join("/");
-            Some((text, p))
-        })
-        .collect();
-    rel.sort();
+    let mut unreadable = Vec::new();
+    collect_c_files(root, &dir, &mut files, &mut unreadable);
+    files.sort();
     let mut rows = Vec::new();
-    for (name, path) in rel {
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            continue;
+    for (name, path) in files {
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                unreadable.push(name);
+                continue;
+            }
         };
+        let content = String::from_utf8_lossy(&bytes);
         for (i, line) in content.lines().enumerate() {
             if pattern.is_match(line) {
                 let text: String = line.trim().chars().take(CODE_TEXT_CHARS).collect();
@@ -347,19 +358,50 @@ fn code(root: &Path, pattern: &Pattern) -> Option<Vec<Row>> {
             }
         }
     }
-    Some(rows)
+    unreadable.sort();
+    Some(CodeHits { rows, unreadable })
 }
 
-fn collect_c_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+/// Collects `(relative path with '/', path)` of the `.c` files below `dir`; directories and files that
+/// cannot be listed go to `unreadable`.
+fn collect_c_files(
+    root: &Path,
+    dir: &Path,
+    out: &mut Vec<(String, PathBuf)>,
+    unreadable: &mut Vec<String>,
+) {
+    let relative = |p: &Path| {
+        p.strip_prefix(root)
+            .unwrap_or(p)
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/")
     };
-    for entry in entries.flatten() {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => {
+            unreadable.push(relative(dir));
+            return;
+        }
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            unreadable.push(relative(dir));
+            continue;
+        };
         let path = entry.path();
-        if path.is_dir() {
-            collect_c_files(&path, out);
+        let Ok(kind) = entry.file_type() else {
+            unreadable.push(relative(&path));
+            continue;
+        };
+        if kind.is_symlink() {
+            continue;
+        }
+        if kind.is_dir() {
+            collect_c_files(root, &path, out, unreadable);
         } else if path.extension().is_some_and(|e| e == "c") {
-            out.push(path);
+            out.push((relative(&path), path));
         }
     }
 }
@@ -514,8 +556,8 @@ fn offset_in(start: Address, at: Address) -> u64 {
 
 // --- pattern -------------------------------------------------------------------------------------------
 
-/// Case-insensitive substring match where `*` stands for any run of characters. Without `*` the pattern may
-/// match anywhere; with `*` it must match the whole text (`*` at an end leaves that end open).
+/// Case-insensitive match where `*` stands for any run of characters. The pattern may match anywhere in the
+/// text, with or without `*` (Decomp's `search`).
 struct Pattern {
     parts: Vec<String>,
 }
@@ -533,20 +575,8 @@ impl Pattern {
 
     fn is_match(&self, text: &str) -> bool {
         let text = text.to_lowercase();
-        let Some((first, rest)) = self.parts.split_first() else {
-            return true;
-        };
-        let Some((last, middle)) = rest.split_last() else {
-            return text.contains(first.as_str());
-        };
-        if text.len() < first.len() + last.len()
-            || !text.starts_with(first.as_str())
-            || !text.ends_with(last.as_str())
-        {
-            return false;
-        }
-        let mut window = &text[first.len()..text.len() - last.len()];
-        for part in middle {
+        let mut window = text.as_str();
+        for part in &self.parts {
             match window.find(part.as_str()) {
                 Some(at) => window = &window[at + part.len()..],
                 None => return false,
@@ -572,13 +602,18 @@ mod tests {
     }
 
     #[test]
-    fn star_anchors_the_closed_ends() {
+    fn star_at_the_ends_is_redundant() {
         assert!(m("fun_*", "fun_0001"));
-        assert!(!m("fun_*", "a_fun_0001"));
-        assert!(m("*level", "game_LoadLevel"));
-        assert!(!m("*level", "game_LoadLevel2"));
+        assert!(m("*level", "game_LoadLevel2"));
         assert!(m("*", ""));
         assert!(m("*load*", "game_LoadLevel"));
+    }
+
+    #[test]
+    fn pattern_with_star_matches_inside_text() {
+        assert!(m("foo*bar", "x = foo(a) + bar;"));
+        assert!(m("fun_*", "a_fun_1"));
+        assert!(!m("foo*bar", "bar foo"));
     }
 
     #[test]
@@ -588,6 +623,7 @@ mod tests {
         assert!(!m("a*b*c", "a--c--b"));
         assert!(!m("ab*ba", "aba"));
         assert!(m("ab*ba", "abba"));
+        assert!(m("ab*ba", "xabbay"));
         assert!(m("a**c", "ac"));
     }
 

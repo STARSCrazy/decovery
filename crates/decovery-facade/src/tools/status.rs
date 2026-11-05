@@ -3,6 +3,7 @@
 use decovery_core::Address;
 use serde_json::json;
 
+use super::find::distinct_callers;
 use crate::output::{analysis_stale, status_counts};
 use crate::{FacadeError, Response, Session};
 
@@ -59,12 +60,7 @@ fn next_step(session: &Session) -> String {
     let best = functions
         .iter()
         .filter(|a| session.symbol_at(**a).is_none())
-        .map(|a| {
-            let mut callers: Vec<Address> = index.callers(*a).iter().map(|e| e.caller).collect();
-            callers.sort();
-            callers.dedup();
-            (*a, callers.len())
-        })
+        .map(|a| (*a, distinct_callers(&index, *a)))
         .fold(None::<(Address, usize)>, |best, cur| match best {
             Some(b) if b.1 >= cur.1 => Some(b),
             _ => Some(cur),
