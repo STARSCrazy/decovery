@@ -1,7 +1,7 @@
 //! Synthetic OMF objects built byte by byte.
 
 use decovery_core::RelocKind;
-use decovery_objects::{ObjectError, RefTarget, SectionKind, functions, read_omf};
+use decovery_objects::{Frame, ObjectError, RefTarget, SectionKind, functions, read_omf};
 
 fn rec(t: u8, body: &[u8]) -> Vec<u8> {
     let n = body.len() + 1;
@@ -69,6 +69,32 @@ fn ledata(seg: u8, off: u16, data: &[u8]) -> Vec<u8> {
     b.extend_from_slice(&off.to_le_bytes());
     b.extend_from_slice(data);
     rec(0xA0, &b)
+}
+
+/// GRPDEF: group name index, then the member segment indices (component type 0xFF).
+fn grpdef(name: u8, segs: &[u8]) -> Vec<u8> {
+    let mut b = vec![name];
+    for s in segs {
+        b.extend_from_slice(&[0xFF, *s]);
+    }
+    rec(0x9A, &b)
+}
+
+/// FIXUPP with one explicit fixup: segment-relative 16-bit offset (loc 1) at `dro`, frame method/datum
+/// `frame` (`None` = method >= 3, no datum), target method 0 (SEGDEF `seg`) with displacement `disp`.
+fn fixup_offset(dro: u16, frame: Option<(u8, u8)>, seg: u8, disp: u16) -> Vec<u8> {
+    let lo = 0xC400 | dro; // M=1 (segment-relative), loc 1
+    let mut b = lo.to_be_bytes().to_vec();
+    match frame {
+        Some((m, idx)) => {
+            b.push(m << 4);
+            b.push(idx);
+        }
+        None => b.push(5 << 4),
+    }
+    b.push(seg);
+    b.extend_from_slice(&disp.to_le_bytes());
+    rec(0x9C, &b)
 }
 
 fn modend() -> Vec<u8> {
@@ -312,4 +338,91 @@ fn bad_checksum_errors() {
 fn rejects_non_omf() {
     assert!(read_omf(&[], "x").is_err());
     assert!(read_omf(&[0x4D, 0x5A], "x").is_err());
+}
+
+/// Prologue plus `DGROUP` (LNAME 5) of `_DATA` (2), `_BSS` (3).
+fn grouped() -> Vec<Vec<u8>> {
+    vec![
+        theadr("T.C"),
+        lnames(&["_TEXT", "CODE", "_DATA", "DATA", "DGROUP", "_BSS", "BSS"]),
+        segdef16(CODE, 4, 1, 2),
+        segdef16(CODE, 8, 3, 4),
+        segdef16(CODE, 8, 6, 7),
+        grpdef(5, &[2, 3]),
+    ]
+}
+
+#[test]
+fn grpdef_lists_member_sections() {
+    let f = read_omf(&obj(&grouped()), "t.obj").unwrap();
+    let m = &f.modules[0];
+    assert_eq!(m.groups.len(), 1);
+    assert_eq!(m.groups[0].name, "DGROUP");
+    assert_eq!(m.groups[0].sections, [1, 2]);
+    assert_eq!(m.group_of(1).map(|g| g.name.as_str()), Some("DGROUP"));
+    assert_eq!(m.group_of(2).map(|g| g.name.as_str()), Some("DGROUP"));
+    assert!(m.group_of(0).is_none());
+}
+
+#[test]
+fn fixup_keeps_group_frame() {
+    let mut parts = grouped();
+    parts.push(ledata(1, 0, &[0xA1, 0, 0, 0xC3]));
+    parts.push(fixup_offset(1, Some((1, 1)), 2, 4));
+    let f = read_omf(&obj(&parts), "t.obj").unwrap();
+    let r = &f.modules[0].sections[0].relocs;
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0].width, 2);
+    assert_eq!(r[0].frame, Frame::Group("DGROUP".into()));
+    assert_eq!(
+        r[0].target,
+        RefTarget::Section {
+            index: 1,
+            offset: 4
+        }
+    );
+}
+
+#[test]
+fn segment_frame_is_section() {
+    let mut parts = grouped();
+    parts.push(ledata(1, 0, &[0xA1, 0, 0, 0xC3]));
+    parts.push(fixup_offset(1, Some((0, 2)), 2, 0));
+    let f = read_omf(&obj(&parts), "t.obj").unwrap();
+    assert_eq!(f.modules[0].sections[0].relocs[0].frame, Frame::Section(1));
+}
+
+#[test]
+fn frame_thread_is_applied() {
+    let mut parts = grouped();
+    parts.push(ledata(1, 0, &[0xA1, 0, 0, 0xC3]));
+    // frame thread 2 = method F1 (group 1); then a fixup (F=1, thread 2) with explicit target SEGDEF 2 + 4
+    let mut b = vec![0x40 | (1 << 2) | 2, 1];
+    b.extend_from_slice(&[0xC4, 0x01, 0x80 | (2 << 4), 2, 4, 0]);
+    parts.push(rec(0x9C, &b));
+    let f = read_omf(&obj(&parts), "t.obj").unwrap();
+    let r = &f.modules[0].sections[0].relocs;
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0].frame, Frame::Group("DGROUP".into()));
+}
+
+#[test]
+fn target_frame_is_target() {
+    let mut parts = grouped();
+    parts.push(ledata(1, 0, &[0xA1, 0, 0, 0xC3]));
+    parts.push(fixup_offset(1, None, 2, 4));
+    let f = read_omf(&obj(&parts), "t.obj").unwrap();
+    assert_eq!(f.modules[0].sections[0].relocs[0].frame, Frame::Target);
+}
+
+#[test]
+fn undefined_frame_thread_is_unknown() {
+    let bytes = obj(&[
+        prologue(4),
+        extdef(&["_ext"]),
+        ledata(1, 0, &[0xE8, 0xFD, 0xFF, 0xC3]),
+        rec(0x9C, &[0x08, 0x01, 0x84, 0x01, 0x8C]),
+    ]);
+    let f = read_omf(&bytes, "t.obj").unwrap();
+    assert_eq!(f.modules[0].sections[0].relocs[0].frame, Frame::Unknown);
 }
