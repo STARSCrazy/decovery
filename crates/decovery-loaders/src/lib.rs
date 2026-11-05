@@ -1,8 +1,10 @@
 //! Executable format loaders: turn file bytes into a [`decovery_core::Program`].
 
 pub mod le;
+pub mod mz;
 
 pub use le::{LeHeader, LeImage, RawFixup, load_le};
+pub use mz::{MzHeader, MzImage, load_com, load_mz, mz_image_range, parse_mz_header};
 
 /// Why a file could not be loaded. Offsets are byte offsets into the input.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

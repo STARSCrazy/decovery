@@ -1,6 +1,6 @@
 [package]
 name = "decovery-loaders"
-description = "Executable format loaders of decovery (LE/LX; MZ and COM later)"
+description = "Executable format loaders of decovery (LE/LX, MZ, COM)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
