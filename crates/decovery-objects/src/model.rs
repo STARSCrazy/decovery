@@ -20,6 +20,17 @@ pub struct ObjectModule {
     pub name: String,
     pub sections: Vec<Section>,
     pub symbols: Vec<ObjSymbol>,
+    /// Segment groups (OMF `GRPDEF`), e.g. `DGROUP`.
+    pub groups: Vec<Group>,
+}
+
+/// A segment group: the member sections share one frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Group {
+    pub name: String,
+    /// Indices into [`ObjectModule::sections`].
+    pub sections: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -65,6 +76,21 @@ pub struct ObjReloc {
     pub target: RefTarget,
     /// Displacement of the fixup record for symbol and unknown targets (the field content is separate).
     pub addend: i64,
+    /// The frame the fixup is relative to.
+    pub frame: Frame,
+}
+
+/// The frame of a fixup (what a 16-bit offset is relative to).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Frame {
+    /// Relative to a segment group (OMF frame method F1).
+    Group(String),
+    /// Relative to a section (F0); 0-based index like [`RefTarget::Section`].
+    Section(u32),
+    /// The frame of the target (F4, F5).
+    Target,
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,6 +122,21 @@ impl ObjectModule {
             name: name.into(),
             sections,
             symbols,
+            groups: Vec::new(),
+        }
+    }
+
+    /// The first group that contains `section`.
+    pub fn group_of(&self, section: u32) -> Option<&Group> {
+        self.groups.iter().find(|g| g.sections.contains(&section))
+    }
+}
+
+impl Group {
+    pub fn new(name: impl Into<String>, sections: Vec<u32>) -> Self {
+        Group {
+            name: name.into(),
+            sections,
         }
     }
 }
@@ -132,13 +173,21 @@ impl ObjSymbol {
 }
 
 impl ObjReloc {
-    pub fn new(offset: u32, width: u8, kind: RelocKind, target: RefTarget, addend: i64) -> Self {
+    pub fn new(
+        offset: u32,
+        width: u8,
+        kind: RelocKind,
+        target: RefTarget,
+        addend: i64,
+        frame: Frame,
+    ) -> Self {
         ObjReloc {
             offset,
             width,
             kind,
             target,
             addend,
+            frame,
         }
     }
 }

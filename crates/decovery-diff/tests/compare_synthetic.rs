@@ -9,7 +9,7 @@ use decovery_diff::{
     Blocker, CompareOptions, Comparison, Decoration, NameAt, SymbolView, Verdict, compare,
 };
 use decovery_objects::{
-    ObjReloc, ObjSymbol, ObjectModule, RefTarget, Section, SectionKind, functions,
+    Frame, ObjReloc, ObjSymbol, ObjectModule, RefTarget, Section, SectionKind, functions,
 };
 
 const AT: u32 = 0x10000;
@@ -97,6 +97,7 @@ fn rel(offset: u32, name: &str) -> ObjReloc {
         RelocKind::Relative,
         RefTarget::Symbol(name.to_string()),
         0,
+        Frame::Unknown,
     )
 }
 
@@ -107,6 +108,7 @@ fn abs(offset: u32, name: &str) -> ObjReloc {
         RelocKind::Absolute,
         RefTarget::Symbol(name.to_string()),
         0,
+        Frame::Unknown,
     )
 }
 
@@ -193,6 +195,7 @@ fn unnamed_ref_is_unchecked_blocker() {
             RelocKind::Relative,
             RefTarget::Unknown,
             0,
+            Frame::Unknown,
         )],
     );
     let p = program(&call_to(0x10100), vec![]);
@@ -245,7 +248,14 @@ fn metrics_match_decomp_fields() {
     let relocs = vec![
         rel(1, "g_"),
         abs(6, "_var"),
-        ObjReloc::new(0xB, 4, RelocKind::Relative, RefTarget::Unknown, 0),
+        ObjReloc::new(
+            0xB,
+            4,
+            RelocKind::Relative,
+            RefTarget::Unknown,
+            0,
+            Frame::Unknown,
+        ),
         rel(0x15, "h_"),
     ];
     let m = module(&rebuild, relocs);
@@ -313,6 +323,7 @@ fn own_section_jump_table_resolves_through_function_address() {
                 offset: 0,
             },
             0,
+            Frame::Unknown,
         )
     };
     let mut rebuild = vec![0xFF, 0x24, 0x85, 0x08, 0, 0, 0, 0x90, 0x0C, 0, 0, 0, 0xC3];

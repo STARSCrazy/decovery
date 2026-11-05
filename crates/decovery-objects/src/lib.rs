@@ -9,6 +9,7 @@ mod omf;
 
 pub use functions::{FunctionView, functions};
 pub use model::{
-    ObjReloc, ObjSymbol, ObjectError, ObjectFile, ObjectModule, RefTarget, Section, SectionKind,
+    Frame, Group, ObjReloc, ObjSymbol, ObjectError, ObjectFile, ObjectModule, RefTarget, Section,
+    SectionKind,
 };
 pub use omf::read_omf;

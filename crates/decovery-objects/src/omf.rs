@@ -9,7 +9,8 @@ use std::collections::BTreeMap;
 use decovery_core::RelocKind;
 
 use crate::model::{
-    ObjReloc, ObjSymbol, ObjectError, ObjectFile, ObjectModule, RefTarget, Section, SectionKind,
+    Frame, Group, ObjReloc, ObjSymbol, ObjectError, ObjectFile, ObjectModule, RefTarget, Section,
+    SectionKind,
 };
 
 /// Upper bound for the bytes of one section, so a corrupt offset cannot make the reader allocate gigabytes.
@@ -167,6 +168,8 @@ struct Pending {
     method: Option<u8>,
     index: u32,
     disp: u32,
+    /// Frame method and datum (index) as read; `None` when a thread was never defined.
+    frame: Option<(u8, u32)>,
 }
 
 fn fixup_width(loc: u8, easy: bool) -> Option<(u8, RelocKind)> {
@@ -194,6 +197,8 @@ struct State {
     exts: Vec<String>,
     symbols: Vec<ObjSymbol>,
     threads: [Option<(u8, u32)>; 4],
+    frame_threads: [Option<(u8, u32)>; 4],
+    groups: Vec<Group>,
     current: Current,
     pending: Vec<Pending>,
     easy: bool,
@@ -211,6 +216,8 @@ fn read_module(
         exts: vec![String::new()],
         symbols: Vec::new(),
         threads: [None; 4],
+        frame_threads: [None; 4],
+        groups: Vec::new(),
         current: Current::None,
         pending: Vec::new(),
         easy: false,
@@ -257,6 +264,7 @@ fn read_module(
                 }
             }
             0x98 | 0x99 => segdef(&mut st, &mut rd, gross)?,
+            0x9A => grpdef(&mut st, &mut rd)?,
             0x8C | 0xB4 => {
                 while !rd.at_end() {
                     st.exts.push(rd.name()?);
@@ -327,6 +335,37 @@ fn segdef(st: &mut State, rd: &mut Rd, gross: bool) -> Result<(), ObjectError> {
         data: Vec::new(),
         relocs: Vec::new(),
     });
+    Ok(())
+}
+
+fn grpdef(st: &mut State, rd: &mut Rd) -> Result<(), ObjectError> {
+    let name = rd.index()?;
+    let name = st
+        .lnames
+        .get(name as usize)
+        .cloned()
+        .ok_or_else(|| rd.err("group name index out of range"))?;
+    let mut sections = Vec::new();
+    while !rd.at_end() {
+        match rd.u8()? {
+            0xFF => {
+                let seg = rd.index()?;
+                sections.push(section_index(st, rd, seg)? as u32);
+            }
+            0xFE => {
+                rd.index()?; // external index
+            }
+            0xFD => {
+                for _ in 0..3 {
+                    rd.index()?; // segment name, class name, overlay name
+                }
+            }
+            0xFB => rd.skip(5)?, // load-time locatable: group component length and so on
+            0xFA => rd.skip(3)?, // absolute: frame number and offset
+            _ => return Err(rd.err("unknown group component type")),
+        }
+    }
+    st.groups.push(Group { name, sections });
     Ok(())
 }
 
@@ -418,9 +457,8 @@ fn fixupp(st: &mut State, rd: &mut Rd, gross: bool) -> Result<(), ObjectError> {
             let method = (x >> 2) & 7;
             let nr = usize::from(x & 3);
             if x & 0x40 != 0 {
-                if method < 3 {
-                    rd.index()?;
-                }
+                let idx = if method < 3 { rd.index()? } else { 0 };
+                st.frame_threads[nr] = Some((method, idx));
             } else {
                 let idx = rd.index()?;
                 st.threads[nr] = Some((method & 3, idx));
@@ -432,9 +470,13 @@ fn fixupp(st: &mut State, rd: &mut Rd, gross: bool) -> Result<(), ObjectError> {
         let loc = ((lo >> 10) & 0xF) as u8;
         let dro = u32::from(lo & 0x3FF);
         let fd = rd.u8()?;
-        if fd & 0x80 == 0 && (fd >> 4) & 7 < 3 {
-            rd.index()?; // frame datum
-        }
+        let frame = if fd & 0x80 != 0 {
+            st.frame_threads[usize::from((fd >> 4) & 3)]
+        } else {
+            let fm = (fd >> 4) & 7;
+            let idx = if fm < 3 { rd.index()? } else { 0 };
+            Some((fm, idx))
+        };
         let (method, index) = if fd & 0x08 != 0 {
             match st.threads[usize::from(fd & 3)] {
                 Some((m, i)) => (Some(m), i),
@@ -470,6 +512,7 @@ fn fixupp(st: &mut State, rd: &mut Rd, gross: bool) -> Result<(), ObjectError> {
             method,
             index,
             disp,
+            frame,
         });
     }
     Ok(())
@@ -492,12 +535,22 @@ fn finish(name: String, mut st: State) -> ObjectModule {
             RefTarget::Section { .. } => 0,
             _ => i64::from(p.disp),
         };
+        let frame = match p.frame {
+            Some((0, i)) if (1..=st.sections.len() as u32).contains(&i) => Frame::Section(i - 1),
+            Some((1, i)) => match st.groups.get((i as usize).wrapping_sub(1)) {
+                Some(g) => Frame::Group(g.name.clone()),
+                None => Frame::Unknown,
+            },
+            Some((4 | 5, _)) => Frame::Target,
+            _ => Frame::Unknown,
+        };
         st.sections[p.section].relocs.push(ObjReloc {
             offset: p.pos,
             width: p.width,
             kind: p.kind,
             target,
             addend,
+            frame,
         });
     }
     for s in &mut st.sections {
@@ -509,5 +562,6 @@ fn finish(name: String, mut st: State) -> ObjectModule {
         name,
         sections: st.sections,
         symbols: st.symbols,
+        groups: st.groups,
     }
 }
