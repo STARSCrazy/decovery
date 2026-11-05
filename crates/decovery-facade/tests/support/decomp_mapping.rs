@@ -11,7 +11,7 @@ use decovery_core::migrate::tables::{
     DIAGNOSES, EQUIVALENCE_DYNAMIC, EQUIVALENCE_STATIC, EQUIVALENCE_VERDICTS, SOURCES,
 };
 
-/// Header keys phase 1 does not generate: runtime results (runtime schemas arrive in phase 5).
+/// Header keys phase 1 does not generate: runtime results (runtime schemas arrive in phase 6).
 pub const EXCLUDED_KEYS: &[&str] = &["@laufzeit", "@beobachtet"];
 
 /// Fixed German phrases of the `@nachbau` line (Decomp `ergebnis.kopfzeile`) and their English form.

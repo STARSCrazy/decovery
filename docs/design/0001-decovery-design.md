@@ -1,6 +1,6 @@
 # decovery — design
 
-Status: draft for review · 2026-11-04
+Status: draft for review · 2026-11-04, revised 2026-11-05 (goals G8–G10, sections 5.12–5.13, phase order)
 
 ## 1. Intent
 
@@ -37,6 +37,14 @@ Goals
 - G6 Publishable: clean GitHub repository, permissive licence, CI, docs, contribution guide, no proprietary bits.
 - G7 Shareable pieces go upstream (OMF for objdiff, Watcom 9.5/LE for decomp.me, a rea provider / re-mcp
   backend).
+- G8 **Measured agent effectiveness.** "Optimised for agents" is a measured property, not a claim: a benchmark of
+  functions with hidden known solutions scores every change to tools, hints, output formats and strategies by
+  success rate, builds, tokens and wall time (section 5.12).
+- G9 **Throughput that scales.** One machine is used to its limits: every long computation is a schedulable job
+  whose units run on all cores (and later on several machines) without changing results (section 5.13).
+- G10 **Learning from what already matched.** Every identical function is an example for the next one: agents get
+  the most similar matched functions with their source, so compiler idioms are learned from the program itself
+  (section 5.12).
 
 Non-goals
 - Writing a new decompiler. Ghidra (and later IDA/Binary Ninja/rizin) do the decompiling.
@@ -388,11 +396,61 @@ Senior-judgment review of all interfaces before implementation; these override e
 9. **Facade:** `try` folds into `build {variants[]}`; `detail` fetches any handle including job results; `job`
    only polls and cancels.
 10. **Runtime roles** (`Debugger`, `Tracer`, `MemoryImage`, `TestEnvironment`, `OsState`) stay the target design;
-    their schemas (`MemoryImage`, `CallRecord`, …) are fixed in phase 5, not earlier. Until then agents reach
+    their schemas (`MemoryImage`, `CallRecord`, …) are fixed in phase 6, not earlier. Until then agents reach
     dosbox-lab's extra functions through its own MCP server and `provider_call`.
 11. **Type hygiene:** public enums/structs `#[non_exhaustive]`; serialized enum values are stable string ids
     (`"x86-32"`, `"absolute"`); relocation = kind (`absolute`, `relative`, `selector`, `far-pointer`) + width;
     enum variants are added together with the code that produces them.
+
+### 5.12 Agent effectiveness: benchmark, exemplars, function-level attempts
+
+decovery exists to raise the share of functions agents rebuild. Three mechanisms serve that goal directly; they are
+part of the core, not add-ons.
+
+1. **Benchmark (`decovery bench`, CLI only).** A *suite* is a list of functions whose solution is known (verdict
+   `identical`, source in `src/`). For each task the harness copies the workspace, replaces the function's source
+   with its starting point (the decompiler's pseudo-C, or a stub), removes it from the exemplar index and the
+   logbook, and hands an **agent driver** an MCP endpoint scoped to that copy plus a budget (builds, tool calls,
+   wall time, tokens). The driver is an external command (a headless agent CLI or any MCP client), configured like a
+   plugin; decovery never embeds a model. Per task it records: solved (decovery's verdict, never the agent's),
+   builds, tool calls, tokens and cost as reported by the driver, wall time, best intermediate distance. A run
+   stores `bench/<run-id>.json` with tool version, configuration hash, driver, model and seed; `bench compare`
+   reports differences between runs with confidence intervals. Private suites over proprietary targets stay local;
+   a public suite is built from project-compiled Open Watcom and Turbo C fixtures. Every change to tool output,
+   hints, diagnosis or search is judged by a bench run, not by impression.
+2. **Exemplars.** An index over all identical functions of a workspace (and, opt-in, over a user-level library of
+   the author's other workspaces with the same compiler profile). Features: shingles of normalised instruction
+   shapes, size class, call/global/string counts, prologue/epilogue form, diagnosis rule ids of the original's
+   neighbourhood. Similarity by MinHash with LSH buckets, so lookups stay sub-millisecond at 100 000 functions.
+   `show` lists the most similar matched functions; `find {what: "similar", target}` returns the top k with their
+   source text, flags and the reason for the match. The index is cache data, updated incrementally by `build`.
+3. **Function-level attempts.** An agent sends the source of one function, not of a file. decovery splices it into
+   its file, shrinks the file to that function, its callees and the declarations it needs (other bodies become
+   prototypes; line numbers are kept), proves once per file version by a double compile that shrinking does not
+   change the function's code, compiles and compares only that function. The cost of an attempt is then
+   independent of the file's size, in tokens and in compile time.
+
+### 5.13 Execution and scaling
+
+Long computations (building a program, analysing it, searching variants, benchmark runs, behavioural cases) must
+use the whole machine and later several machines, without changing any result.
+
+- **Units and cache.** Work is split into pure units (compile one source variant, compare one function, decompile a
+  batch, run one emulator case, evaluate one search candidate). A unit's key is the blake3 hash of its inputs plus
+  the fingerprint of the tool that runs it; results are stored content-addressed in `cache/`, so repeating work is
+  free and results do not depend on order or degree of parallelism (anti-goal: silent nondeterminism).
+- **One scheduler.** A core scheduler runs a DAG of units over resource classes: CPU work on a rayon pool; tool
+  runs through runner pools whose size each provider declares in `initialize` (`max_parallel`, memory per
+  instance) — the unicorn host scales with cores, DOSBox and Ghidra instances with memory. One global limit
+  (`--jobs`, default: logical cores) caps the total.
+- **Jobs.** Every long operation is a job with persistent state in `cache/jobs/<id>/` (specification, progress,
+  partial results). Jobs survive a crash or restart and resume from their cached units; MCP calls return a handle
+  at once; `job` polls and cancels, `detail` fetches results.
+- **Scale-out.** The unit protocol is the plugin protocol. A remote worker is a plugin host reached over TCP or SSH
+  that pulls inputs from and pushes results to the content-addressed store; no shared file system is assumed. It is
+  built when a single machine is the bottleneck, with its own ADR.
+- **Measured.** Every phase's parity document records throughput on the first target (wall time of a full build,
+  compiles per second, CPU utilisation). A regression is a finding like a wrong verdict.
 
 ## 6. Repository layout
 
@@ -414,7 +472,7 @@ decovery/
     decovery-plugin/      plugin protocol types + out-of-process host
     decovery-mcp/         agent facade (rmcp)
     decovery-cli/         binary `decovery`
-    decovery-family-watcom/  (phase 4) Rust port of the Watcom models
+    decovery-family-watcom/  (phase 5) Rust port of the Watcom models
   plugins/                out-of-process providers, each separately licensed/packaged
     unicorn-dos/          Python, GPL-2.0: unicorn tool host (Phar Lap, real-mode DOS); later Emulator, Win32 console
     decovery-plugin-sdk/  Python: framing + dispatch for Python plugins
@@ -443,11 +501,12 @@ Without a running Ghidra, `status/find/show/build` work from the analysis result
 |---|---|---|
 | 0 | Repo scaffold (all GitHub files, CI), this design + ADRs, core address/program model, LE + OMF readers, own instruction differ (objdiff-core as optional feature), plugin protocol + Python SDK + Ghidra plugin skeleton, `migrate` for `decomp.toml`/`symbols`; licence check unicorn vs. icicle-emu | `cargo test` green in CI; for 20 functions of the first target the diff of decovery equals Decomp's instruction diff; Ghidra plugin answers `initialize` + `functions` |
 | 1 | Workspace + knowledge/claims, analysis via Ghidra plugin, facade tools `status/find/show/annotate/analyze/detail`, output generation | `show` on the first target equals Decomp's `zeige` content (modulo English), knowledge round-trips |
-| 2 | Toolchain: profiles (watcom-9.5, watcom-10.6, turbo-c-2.0, gcc-djgpp), runners (unicorn-dos port of `emu_dos.py`, dosbox-lab, native), `build/try/link`, generic diagnosis; MZ loader + 16-bit path for the second target | `build` verdicts equal Decomp for all identical functions of the first target **and** for all identical functions of a second target (Turbo C 2.0, MZ, 16-bit real mode) using only its profile, no family extension. The second target's binary and Turbo C 2.0 live in `extern/` |
-| 3 | C frontend, mutators (permuter transforms ported), search strategies, logbook, jobs, `search/job/history` | night run via `search` jobs reproduces Decomp's decisions on a sample |
-| 4 | Watcom family: legacy Python plugin first, then hot paths (register prediction) ported to `decovery-family-watcom` | `diagnose` reports equal Decomp's `vergabe`/`plaetze` on the sample |
-| 5 | `verify` (unicorn cases + dosbox-lab `func_run`), `runtime` import | `verify` without Ghidra's emulator agrees with Decomp's `gleichwertig` |
-| 6 | Upstream contributions and adapters (objdiff OMF PR, decomp.me Watcom 9.5/LE, rea/re-mcp adapter) | PRs opened |
+| 2 | Toolchain: profiles (watcom-9.5, watcom-10.6, turbo-c-2.0), runners (unicorn-dos with Phar Lap and real-mode hosts, dosbox-lab, native), `build` with variants and function-level attempts (5.12 item 3), `link`, generic diagnosis; MZ loader + 16-bit path for the second target; parallel compile and compare over all cores | `build` verdicts equal Decomp for all identical functions of the first target **and** for all identical functions of a second target (Turbo C 2.0, MZ, 16-bit real mode) using only its profile, no family extension; full-build throughput recorded. The second target's binary and Turbo C 2.0 live in `extern/` |
+| 3 | Agent loop: benchmark harness `bench` with an agent-driver contract, exemplar index (`show`, `find similar`), logbook and attempt memory, scheduler with persistent jobs, `job/history` | a reference agent driver runs a private suite (≥ 50 functions of both targets) and reports success rate, builds and tokens; a repeated run reproduces the metrics within noise; exemplars appear in `show`; a full build keeps ≥ 90 % of the cores busy |
+| 4 | C frontend, mutators (permuter transforms ported), search strategies, `search` | night run via `search` jobs reproduces Decomp's decisions on a sample **and** `bench` shows a higher success rate with `search` than the phase-3 baseline |
+| 5 | Watcom family: legacy Python plugin first, then hot paths (register prediction) ported to `decovery-family-watcom`; data-driven `rules/<family>.toml` | `diagnose` reports equal Decomp's `vergabe`/`plaetze` on the sample; `bench` gain over phase 4 recorded |
+| 6 | `verify` (unicorn cases + dosbox-lab `func_run`), `runtime` import | `verify` without Ghidra's emulator agrees with Decomp's `gleichwertig` |
+| 7 | Upstream contributions and adapters (objdiff OMF PR, decomp.me Watcom 9.5/LE, rea/re-mcp adapter), further profiles on demand (gcc-djgpp with a COFF reader) | PRs opened |
 
 ## 8. Decided here vs. left to the builder
 

@@ -32,7 +32,7 @@ The acceptance target passes both tests. The 26 differences in the fourth target
 ## Excluded header keys
 
 `@laufzeit` (execution coverage) and `@beobachtet` (observed calls) are dropped from Decomp's header before the
-comparison. Both report runtime results; decovery's runtime schemas arrive in phase 5, so phase 1 does not
+comparison. Both report runtime results; decovery's runtime schemas arrive in phase 6, so phase 1 does not
 generate these lines.
 
 ## Deviation list
