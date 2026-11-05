@@ -110,37 +110,61 @@ fn address_at(linear: i64, flat: bool) -> Option<Address> {
     })
 }
 
-/// Whether the initialised bytes of `section` (without its own fixup fields) differ from the original at `linear`.
-fn bytes_differ(
+/// Whether the item of `section` at `rel` differs from the original, the section lying at linear `section_at`. The
+/// item reaches from `rel` to the next boundary: the next referenced offset (`referenced`), the next symbol of the
+/// section, or the end of its initialised bytes. Fixup fields of the section are not compared.
+fn item_differs(
     module: &ObjectModule,
     section: u32,
-    linear: i64,
+    rel: i64,
+    referenced: &BTreeSet<i64>,
+    section_at: i64,
     flat: bool,
     program: &Program,
 ) -> bool {
     let Some(s) = module.sections.get(section as usize) else {
         return true;
     };
+    let len = s.data.len() as i64;
+    if rel < 0 || rel >= len {
+        return false;
+    }
+    let end = referenced
+        .range(rel + 1..)
+        .next()
+        .copied()
+        .into_iter()
+        .chain(
+            module
+                .symbols
+                .iter()
+                .filter(|y| y.section == section && i64::from(y.offset) > rel)
+                .map(|y| i64::from(y.offset)),
+        )
+        .fold(len, i64::min);
+    let (start, end) = (rel as usize, end as usize);
     let gaps: BTreeSet<usize> = s
         .relocs
         .iter()
         .flat_map(|r| r.offset as usize..r.offset as usize + usize::from(r.width))
         .collect();
-    let Some(original) = address_at(linear, flat).and_then(|a| program.read(a, s.data.len()))
+    let Some(original) =
+        address_at(section_at + rel, flat).and_then(|a| program.read(a, end - start))
     else {
         return true;
     };
-    s.data
+    s.data[start..end]
         .iter()
         .zip(original)
         .enumerate()
-        .any(|(i, (a, b))| a != b && !gaps.contains(&i))
+        .any(|(i, (a, b))| a != b && !gaps.contains(&(start + i)))
 }
 
 #[derive(Debug)]
 struct SectionAnchor {
     tally: Tally,
-    bytes_differ: bool,
+    /// Referenced offsets (`rel`) whose item differs from the original.
+    differing: BTreeSet<i64>,
 }
 
 /// All anchors of one module comparison.
@@ -161,7 +185,17 @@ impl Anchors {
     ) -> Anchors {
         let mut frame_votes: BTreeMap<String, BTreeSet<(i64, i64)>> = BTreeMap::new();
         let mut section_votes: BTreeMap<SectionKey, BTreeSet<(i64, i64)>> = BTreeMap::new();
+        // Referenced offsets per (module, section), over all frames: the item boundaries.
+        let mut referenced: BTreeMap<(usize, u32), BTreeSet<i64>> = BTreeMap::new();
+        let mut section_rels: BTreeMap<SectionKey, BTreeSet<i64>> = BTreeMap::new();
         for condition in conditions {
+            if let Condition::Section { key, rel, .. } = condition {
+                referenced
+                    .entry((key.module, key.section))
+                    .or_default()
+                    .insert(*rel);
+                section_rels.entry(key.clone()).or_default().insert(*rel);
+            }
             match condition {
                 Condition::Frame {
                     frame,
@@ -220,10 +254,27 @@ impl Anchors {
             } else {
                 anchors.frames.get(&key.frame).map(|f| f.base)
             };
-            let differ = match (checked, frame_base) {
-                (false, _) => false,
+            let rels = section_rels.remove(&key).unwrap_or_default();
+            let differing = match (checked, frame_base) {
+                (false, _) => BTreeSet::new(),
                 (true, Some(frame)) => {
-                    bytes_differ(module, key.section, frame + t.base, key.flat, program)
+                    let bounds = referenced
+                        .get(&(key.module, key.section))
+                        .cloned()
+                        .unwrap_or_default();
+                    rels.into_iter()
+                        .filter(|&rel| {
+                            item_differs(
+                                module,
+                                key.section,
+                                rel,
+                                &bounds,
+                                frame + t.base,
+                                key.flat,
+                                program,
+                            )
+                        })
+                        .collect()
                 }
                 (true, None) => {
                     let section = &module.sections[key.section as usize].name;
@@ -231,14 +282,14 @@ impl Anchors {
                         "{}: section {section} is not compared with the original: frame {} has no anchor",
                         module.name, key.frame
                     ));
-                    false
+                    BTreeSet::new()
                 }
             };
             anchors.sections.insert(
                 key,
                 SectionAnchor {
                     tally: t,
-                    bytes_differ: differ,
+                    differing,
                 },
             );
         }
@@ -257,10 +308,14 @@ impl Anchors {
                 Condition::Frame {
                     frame, candidate, ..
                 } => self.frames.get(frame).is_some_and(|f| f.base == *candidate),
-                Condition::Section { key, candidate, .. } => self
+                Condition::Section {
+                    key,
+                    rel,
+                    candidate,
+                } => self
                     .sections
                     .get(key)
-                    .is_some_and(|s| s.tally.base == *candidate && !s.bytes_differ),
+                    .is_some_and(|s| s.tally.base == *candidate && !s.differing.contains(rel)),
                 Condition::Segment { frame, base } => match self.frames.get(frame) {
                     Some(f) => f.base == *base,
                     None => {

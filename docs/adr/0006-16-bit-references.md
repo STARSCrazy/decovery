@@ -38,10 +38,13 @@ functions it compares (`compare_module`: first pass collects, second pass checks
    does not outvote a hundred variables referenced once. The value with most votes is the anchor; a tie goes to
    the lowest value. Fields proposing the anchor match; all others are `WrongAbsoluteRef`. Each anchor reports its
    votes, its dissent (votes for other values) and its source (configuration or consensus).
-5. **Section bytes.** When the frame anchor is known, the initialised bytes of an anchored data section (without
-   the section's own fixup fields) must equal the original at `frame + section anchor`; otherwise every field into
-   that section is `WrongAbsoluteRef`. Without a frame anchor the byte check is skipped and the comparison carries
-   a warning naming the section and the frame.
+5. **Item bytes.** When the frame anchor is known, the bytes of each referenced item of an anchored data section
+   must equal the original at `frame + section anchor + item offset`. An item reaches from its referenced offset to
+   the next boundary: the next distinct referenced offset into the same section (over all compared functions of
+   the module), the next symbol of the section, or the end of the section's initialised bytes, whichever comes
+   first; the section's own fixup fields inside it are not compared. A field is `WrongAbsoluteRef` only if its own
+   item differs, so a difference elsewhere in the section (another function's string) does not mark it. Without a
+   frame anchor the byte check is skipped and the comparison carries a warning naming the section and the frame.
 6. **Selector fields** need the original's MZ relocation at the same place; its segment value times 16 must equal
    the frame anchor's base. Without a frame anchor a selector field is an `UncheckedRef`. Selector fields do not
    vote.
