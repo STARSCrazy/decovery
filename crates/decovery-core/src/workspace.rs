@@ -41,6 +41,8 @@ pub enum WorkspaceError {
     Schema { path: PathBuf, found: u32 },
     #[error("workspace is locked by pid {pid}")]
     Locked { pid: u32 },
+    #[error("{}: cannot write unknown value: {detail}", file.display())]
+    UnknownValue { file: PathBuf, detail: String },
 }
 
 impl Workspace {

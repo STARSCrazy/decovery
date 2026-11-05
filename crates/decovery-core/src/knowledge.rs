@@ -27,6 +27,8 @@ pub enum ClaimSource {
     Agent,
     Import,
     /// A value this version does not know; kept so the record is not lost.
+    ///
+    /// Not written back; writers refuse it.
     #[serde(other)]
     Other,
 }

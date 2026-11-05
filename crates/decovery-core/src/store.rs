@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crate::knowledge::{Symbol, SymbolsFile};
+use crate::knowledge::{ClaimSource, Symbol, SymbolsFile};
 use crate::workspace::{SCHEMA, SYMBOLS_FILE, Workspace, WorkspaceError};
 
 /// Path of the types header relative to the workspace root.
@@ -96,6 +96,25 @@ impl Workspace {
     /// Writes `knowledge/symbols.toml` from `self.symbols`, sorted by address, then kind.
     pub fn save_symbols(&self, _lock: &WorkspaceLock) -> Result<(), WorkspaceError> {
         let path = self.root.join(SYMBOLS_FILE);
+        for s in &self.symbols {
+            let unknown = [
+                (s.source == ClaimSource::Other).then_some("source"),
+                s.refuted
+                    .iter()
+                    .any(|r| r.source == Some(ClaimSource::Other))
+                    .then_some("refuted source"),
+                s.line_comments
+                    .iter()
+                    .any(|c| c.source == ClaimSource::Other)
+                    .then_some("line comment source"),
+            ];
+            if let Some(field) = unknown.into_iter().flatten().next() {
+                return Err(WorkspaceError::UnknownValue {
+                    file: path,
+                    detail: format!("symbol at {} has an unknown {field}", s.address),
+                });
+            }
+        }
         let text = SymbolsFile::new(self.symbols.clone())
             .to_toml()
             .map_err(|e| io_error(&path, std::io::Error::other(e)))?;
@@ -214,6 +233,31 @@ mod tests {
         let second = std::fs::read(dir.path().join(SYMBOLS_FILE)).unwrap();
         assert_eq!(first, second);
         assert!(!first.contains(&b'\r'));
+    }
+
+    #[test]
+    fn save_refuses_unknown_source_and_keeps_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = workspace(dir.path(), Vec::new());
+        let path = dir.path().join(SYMBOLS_FILE);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let text = "schema = 1
+
+[[symbol]]
+address = \"flat:00010010\"
+kind = \"function\"
+name = \"f\"
+source = \"oracle\"
+confidence = \"assumed\"
+";
+        std::fs::write(&path, text).unwrap();
+        let ws = Workspace::open(&ws.root).unwrap();
+        assert_eq!(ws.symbols[0].source, ClaimSource::Other);
+        let lock = ws.lock(Duration::from_secs(1)).unwrap();
+        let err = ws.save_symbols(&lock).unwrap_err();
+        assert!(matches!(err, WorkspaceError::UnknownValue { .. }), "{err}");
+        assert!(err.to_string().contains("flat:00010010"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
     }
 
     #[test]
