@@ -5,7 +5,8 @@ use std::path::Path;
 use decovery_core::{
     Address, Analysis, AnalyzedFunction, Confidence, Provider, SymbolKind, Workspace,
 };
-use decovery_facade::{FacadeError, Session, resolve};
+use decovery_diff::{NameAt, SymbolView};
+use decovery_facade::{FacadeError, KnowledgeView, Session, resolve};
 
 const SHA: &str = "aa";
 
@@ -308,4 +309,48 @@ permissions = "rx"
         resolve(&s, "fun_0000_016"),
         Err(FacadeError::NotFound(_))
     ));
+}
+
+#[test]
+fn symbol_view_names_and_default_names() {
+    let (_d, s) = session();
+    let v = s.symbol_view();
+    assert_eq!(v.name_at(flat(0x10010)), Some(NameAt::new("choose", false)));
+    assert_eq!(v.address_of("choose"), Some(flat(0x10010)));
+    // refuted names are not names
+    assert_eq!(v.address_of("old_name"), None);
+    assert_eq!(
+        v.name_at(flat(0x10200)),
+        Some(NameAt::new("fun_00010200", true))
+    );
+    assert_eq!(
+        v.name_at(Address::Seg {
+            seg: 0x12,
+            off: 0x34
+        }),
+        Some(NameAt::new("fun_0012_0034", true))
+    );
+    // default names resolve to analysed function starts only
+    assert_eq!(v.address_of("fun_00010200"), Some(flat(0x10200)));
+    assert_eq!(v.address_of("fun_00010204"), None);
+    // as in Decomp, a named function is also reachable by its default name
+    assert_eq!(v.address_of("fun_00010010"), Some(flat(0x10010)));
+}
+
+#[test]
+fn knowledge_view_without_analysis() {
+    let dir = tempfile::tempdir().unwrap();
+    write_workspace(dir.path(), SYMBOLS);
+    let ws = Workspace::open(dir.path()).unwrap();
+    let v = KnowledgeView::new(&ws, None);
+    assert_eq!(v.address_of("choose"), Some(flat(0x10010)));
+    assert_eq!(v.address_of("fun_0000002A"), Some(flat(0x2A)));
+    assert_eq!(
+        v.address_of("fun_1234_0010"),
+        Some(Address::Seg {
+            seg: 0x1234,
+            off: 0x10
+        })
+    );
+    assert_eq!(v.name_at(Address::Sel { segment: 1, off: 0 }), None);
 }

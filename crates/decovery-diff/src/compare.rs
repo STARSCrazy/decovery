@@ -2,13 +2,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use decovery_core::{Address, Program, RelocKind};
-use decovery_objects::{FunctionView, ObjReloc, RefTarget, functions};
+use decovery_core::{Address, Program, RelocKind, Relocation};
+use decovery_objects::{FunctionView, ObjReloc, ObjectModule, RefTarget, functions};
 use decovery_x86::{DecodeOptions, decode_detailed, internal_calls, padding_positions};
 
+use crate::anchors::{Anchors, Condition, FLAT, Outcome, SectionKey, frame_name};
 use crate::instructions::{self, Naming, Side};
 use crate::{
-    Blocker, CompareOptions, Comparison, Decoration, Metrics, NameAt, SymbolView, Verdict,
+    Blocker, CompareOptions, Comparison, Decoration, Metrics, ModuleComparison, ModuleOptions,
+    NameAt, Placement, SymbolView, Verdict,
 };
 
 fn signed(bytes: &[u8]) -> i64 {
@@ -184,6 +186,15 @@ fn rebuild_name(symbols: &dyn SymbolView, decoration: &Decoration, raw: &str) ->
     }
 }
 
+/// Decomp's `bekannt`: where the knowledge itself names `name`; a default name resolved by the view does not count.
+fn known_address(symbols: &dyn SymbolView, name: &str) -> Option<Address> {
+    symbols.address_of(name).filter(|&a| {
+        symbols
+            .name_at(a)
+            .is_some_and(|n| !n.is_default && n.name == name)
+    })
+}
+
 fn unchecked(bytes: u32, blocker: Option<Blocker>) -> Comparison {
     Comparison {
         verdict: Verdict::Unchecked,
@@ -195,7 +206,7 @@ fn unchecked(bytes: u32, blocker: Option<Blocker>) -> Comparison {
     }
 }
 
-/// Compares the rebuilt function `f` with the original at `at`. See the crate documentation for the rules.
+/// Compares the rebuilt function `f` with the original at `at`: [`compare_module`] with this one placement.
 pub fn compare(
     f: &FunctionView,
     at: Address,
@@ -204,6 +215,128 @@ pub fn compare(
     decoration: &Decoration,
     options: &CompareOptions,
 ) -> Comparison {
+    let placement = Placement::new(f.clone(), at, options.original_len);
+    let module_options = ModuleOptions::new(options.padding, BTreeMap::new());
+    let len = u32::try_from(f.code().len()).unwrap_or(u32::MAX);
+    compare_module(
+        std::slice::from_ref(&placement),
+        program,
+        symbols,
+        decoration,
+        &module_options,
+    )
+    .functions
+    .pop()
+    .unwrap_or_else(|| unchecked(len, None))
+}
+
+/// Compares every placement with its original. Anchors (ADR 0006) are established over all placements first,
+/// then each function is judged. See the crate documentation for the rules.
+pub fn compare_module(
+    placements: &[Placement<'_>],
+    program: &Program,
+    symbols: &dyn SymbolView,
+    decoration: &Decoration,
+    options: &ModuleOptions,
+) -> ModuleComparison {
+    let mut modules: Vec<&ObjectModule> = Vec::new();
+    let prepared: Vec<Prepared> = placements
+        .iter()
+        .map(|p| {
+            let module = match modules
+                .iter()
+                .position(|m| std::ptr::eq(*m, p.function.module))
+            {
+                Some(i) => i,
+                None => {
+                    modules.push(p.function.module);
+                    modules.len() - 1
+                }
+            };
+            prepare(p, module, program, symbols, decoration, options.padding)
+        })
+        .collect();
+    let conditions = prepared
+        .iter()
+        .filter_map(|p| match p {
+            Prepared::Pending { fields, .. } => Some(fields),
+            Prepared::Done(_) => None,
+        })
+        .flatten()
+        .filter_map(|field| match &field.outcome {
+            Outcome::Anchored(c) => Some(c),
+            Outcome::Decided(_) => None,
+        })
+        .flatten();
+    let anchors = Anchors::collect(conditions, &modules, &options.frames, program);
+    let functions = prepared.into_iter().map(|p| p.finish(&anchors)).collect();
+    ModuleComparison {
+        functions,
+        anchors: anchors.list(&modules),
+        warnings: anchors.warnings.clone(),
+    }
+}
+
+/// A relocated field of a function, classified in the first pass.
+struct Field {
+    outcome: Outcome,
+    wrong: Blocker,
+    unchecked: Blocker,
+}
+
+/// A function after the first pass: its metrics and fields, waiting for the anchors.
+enum Prepared {
+    Done(Comparison),
+    Pending {
+        metrics: Metrics,
+        fields: Vec<Field>,
+    },
+}
+
+impl Prepared {
+    fn finish(self, anchors: &Anchors) -> Comparison {
+        let (m, fields) = match self {
+            Prepared::Done(c) => return c,
+            Prepared::Pending { metrics, fields } => (metrics, fields),
+        };
+        let mut blockers = Vec::new();
+        if m.differing > 0 {
+            blockers.push(Blocker::BytesDiffer { count: m.differing });
+        }
+        blockers.extend(
+            fields
+                .iter()
+                .filter_map(|f| anchors.judge(&f.outcome, f.wrong, f.unchecked)),
+        );
+        if m.instructions_differing > 0 {
+            blockers.push(Blocker::InstructionsDiffer {
+                count: m.instructions_differing,
+            });
+        }
+        Comparison {
+            verdict: if blockers.is_empty() {
+                Verdict::Identical
+            } else {
+                Verdict::Differs
+            },
+            blockers,
+            metrics: m,
+        }
+    }
+}
+
+/// First pass for one placement: Decomp's metrics and the classified fields. `module` indexes the modules of
+/// the comparison.
+fn prepare(
+    placement: &Placement<'_>,
+    module: usize,
+    program: &Program,
+    symbols: &dyn SymbolView,
+    decoration: &Decoration,
+    padding_option: bool,
+) -> Prepared {
+    let f = &placement.function;
+    let at = placement.at;
     let rebuild = Rebuild::new(f);
     let n = rebuild.bytes.len();
     let len = n as u32;
@@ -213,13 +346,13 @@ pub fn compare(
         .get(f.section as usize)
         .map_or(0, |s| u32::from(s.bits));
     if bits != 16 && bits != 32 {
-        return unchecked(len, None);
+        return Prepared::Done(unchecked(len, None));
     }
     let Some(original) = program.read(at, n) else {
-        return unchecked(len, Some(Blocker::OriginalUnavailable));
+        return Prepared::Done(unchecked(len, Some(Blocker::OriginalUnavailable)));
     };
     let Some(base) = base_of(at) else {
-        return unchecked(len, Some(Blocker::OriginalUnavailable));
+        return Prepared::Done(unchecked(len, Some(Blocker::OriginalUnavailable)));
     };
     let width = bits / 8;
     let code = &rebuild.bytes;
@@ -234,7 +367,7 @@ pub fn compare(
         relative.insert(field);
         gaps.extend(field..field + width);
     }
-    let mut padding = if options.padding {
+    let mut padding = if padding_option {
         zero_padding(code, original, &gaps)
     } else {
         BTreeSet::new()
@@ -247,10 +380,10 @@ pub fn compare(
             .filter(|&k| {
                 original[k as usize] == 0
                     || original_padding.contains(&k)
-                    || options.original_len.is_some_and(|l| k >= l)
+                    || placement.original_len.is_some_and(|l| k >= l)
             }),
     );
-    if let Some(original_len) = options.original_len
+    if let Some(original_len) = placement.original_len
         && len > original_len
     {
         // The following Watcom jump table is no code; only the structured decoder finds alignment
@@ -296,7 +429,7 @@ pub fn compare(
         if found.name == *raw && found.name != wanted {
             wanted = raw.clone();
         }
-        let elsewhere = symbols.address_of(&wanted);
+        let elsewhere = known_address(symbols, &wanted);
         if found.name == wanted {
             m.refs_ok += 1;
         } else if found.is_default && elsewhere.is_none_or(|e| same(e, target)) {
@@ -307,7 +440,7 @@ pub fn compare(
     }
 
     // --- Decomp's `_befehlsvergleich` ---
-    let original_span = options
+    let original_span = placement
         .original_len
         .and_then(|l| program.read(at, l as usize))
         .unwrap_or(original);
@@ -366,7 +499,7 @@ pub fn compare(
     };
     let data_address = |name: &str| -> Option<u64> {
         if flat {
-            symbols.address_of(name).and_then(|a| a.linear())
+            known_address(symbols, name).and_then(|a| a.linear())
         } else {
             None
         }
@@ -375,15 +508,11 @@ pub fn compare(
         &rebuild_side,
         &original_side,
         bits,
-        options.padding,
+        padding_option,
         &data_address,
     );
 
-    // --- decovery's verdict ---
-    let mut blockers = Vec::new();
-    if m.differing > 0 {
-        blockers.push(Blocker::BytesDiffer { count: m.differing });
-    }
+    // --- decovery's fields ---
     // Fields inside padding behind the original's end (the following function's jump table) belong to the
     // next function, as in Decomp's byte comparison.
     let mut checks: Vec<(u32, Check)> = f
@@ -393,27 +522,23 @@ pub fn compare(
         .collect();
     checks.extend(inner.iter().map(|(&o, n)| (o, Check::Internal(n))));
     checks.sort_by_key(|&(o, _)| o);
-    for (offset, check) in checks {
-        if let Some(b) = check_reference(
-            offset, &check, &rebuild, at, base, original, program, symbols, decoration, width,
-        ) {
-            blockers.push(b);
-        }
-    }
-    if m.instructions_differing > 0 {
-        blockers.push(Blocker::InstructionsDiffer {
-            count: m.instructions_differing,
-        });
-    }
-    Comparison {
-        verdict: if blockers.is_empty() {
-            Verdict::Identical
-        } else {
-            Verdict::Differs
-        },
-        blockers,
-        metrics: m,
-    }
+    let site = Site {
+        rebuild: &rebuild,
+        at,
+        base,
+        original,
+        program,
+        symbols,
+        decoration,
+        width,
+        bits,
+        module,
+    };
+    let fields = checks
+        .iter()
+        .map(|(offset, check)| site.classify(*offset, check))
+        .collect();
+    Prepared::Pending { metrics: m, fields }
 }
 
 enum Check<'a> {
@@ -422,141 +547,354 @@ enum Check<'a> {
     Internal(&'a str),
 }
 
-/// decovery's rule for one relocated field at `offset` (relative to the function); `None` = matches.
-#[allow(clippy::too_many_arguments)]
-fn check_reference(
-    offset: u32,
-    check: &Check<'_>,
-    rebuild: &Rebuild<'_>,
+/// What a field's target resolves to in the original.
+enum Target {
+    Known(Address),
+    /// An unnamed position `rel` (section offset + addend + content) in another section of the module.
+    Unnamed {
+        section: u32,
+        rel: i64,
+    },
+    /// No address can be determined (unknown symbol, group target).
+    Unresolved,
+    /// The target address overflows its space.
+    Invalid,
+}
+
+/// The original's relocation whose field starts exactly at `at`.
+fn relocation_at(program: &Program, at: Address) -> Option<&Relocation> {
+    program
+        .relocations_in(at, 1)
+        .iter()
+        .find(|r| same(r.at, at))
+}
+
+/// Everything about one placement that classifying its fields needs.
+struct Site<'s> {
+    rebuild: &'s Rebuild<'s>,
     at: Address,
     base: u64,
-    original: &[u8],
-    program: &Program,
-    symbols: &dyn SymbolView,
-    decoration: &Decoration,
+    original: &'s [u8],
+    program: &'s Program,
+    symbols: &'s dyn SymbolView,
+    decoration: &'s Decoration,
     width: u32,
-) -> Option<Blocker> {
-    let f = rebuild.f;
-    let unchecked = Some(Blocker::UncheckedRef { at: offset });
-    let (kind, field_width) = match check {
-        Check::Fixup(r) => (r.kind, u32::from(r.width)),
-        Check::Internal(_) => (RelocKind::Relative, width),
-    };
-    let wrong = Some(match kind {
-        RelocKind::Relative => Blocker::WrongRelativeRef { at: offset },
-        _ => Blocker::WrongAbsoluteRef { at: offset },
-    });
-    let lookup = |raw: &str| -> Option<Address> {
-        let c = decoration.undecorate(raw);
-        symbols.address_of(c).or_else(|| symbols.address_of(raw))
-    };
-    let raw_field = f
-        .code()
-        .get(offset as usize..(offset + field_width) as usize)
-        .unwrap_or(&[]);
-    let expected = match check {
-        Check::Internal(name) => {
-            let Some(a) = lookup(name) else {
-                return unchecked;
-            };
-            a
-        }
-        Check::Fixup(r) => {
-            let content = signed(raw_field);
-            match &r.target {
-                RefTarget::Symbol(name) => {
-                    let Some(a) = lookup(name) else {
-                        return unchecked;
-                    };
-                    let Ok(a) = a.offset_by(content.wrapping_add(r.addend)) else {
-                        return wrong;
-                    };
-                    a
-                }
-                RefTarget::Section {
-                    index,
-                    offset: base_offset,
-                } if *index == f.section => {
-                    // A symbol start (static function) resolves through that symbol's address; a target behind
-                    // the function (entries of the following function's jump table) through the function
-                    // containing it; everything else, including the function's own jump table placed before
-                    // its start, through the function's own address.
-                    let target = i64::from(*base_offset) + content;
-                    let end = i64::from(f.start) + i64::from(f.len);
-                    let in_section = |s: &&decovery_objects::ObjSymbol| {
-                        s.section == f.section && s.offset != f.start
-                    };
-                    let owner = f
-                        .module
-                        .symbols
-                        .iter()
-                        .filter(in_section)
-                        .find(|s| i64::from(s.offset) == target)
-                        .or_else(|| {
-                            (target >= end)
-                                .then(|| {
-                                    f.module
-                                        .symbols
-                                        .iter()
-                                        .filter(in_section)
-                                        .filter(|s| i64::from(s.offset) <= target)
-                                        .max_by_key(|s| s.offset)
-                                })
-                                .flatten()
-                        });
-                    let resolved = match owner {
-                        Some(s) => lookup(&s.name)
-                            .and_then(|a| a.offset_by(target - i64::from(s.offset)).ok()),
-                        None => at.offset_by(target - i64::from(f.start)).ok(),
-                    };
-                    let Some(a) = resolved else {
-                        return unchecked;
-                    };
-                    a
-                }
-                RefTarget::Section {
-                    index,
-                    offset: base_offset,
-                } => {
-                    let target = i64::from(*base_offset) + content;
-                    let name = f
-                        .module
-                        .symbols
-                        .iter()
-                        .find(|s| s.section == *index && i64::from(s.offset) == target)
-                        .map(|s| s.name.as_str());
-                    let Some(a) = name.and_then(lookup) else {
-                        return unchecked;
-                    };
-                    a
-                }
-                _ => return unchecked,
+    bits: u32,
+    module: usize,
+}
+
+impl Site<'_> {
+    fn lookup(&self, raw: &str) -> Option<Address> {
+        let c = self.decoration.undecorate(raw);
+        self.symbols
+            .address_of(c)
+            .or_else(|| self.symbols.address_of(raw))
+    }
+
+    /// The target the rebuild means, in the original's address space.
+    fn expected(&self, check: &Check<'_>, raw_field: &[u8]) -> Target {
+        let f = self.rebuild.f;
+        let r = match check {
+            Check::Internal(name) => {
+                return self.lookup(name).map_or(Target::Unresolved, Target::Known);
             }
+            Check::Fixup(r) => r,
+        };
+        let content = signed(raw_field);
+        match &r.target {
+            RefTarget::Symbol(name) => {
+                let Some(a) = self.lookup(name) else {
+                    return Target::Unresolved;
+                };
+                a.offset_by(content.wrapping_add(r.addend))
+                    .map_or(Target::Invalid, Target::Known)
+            }
+            RefTarget::Section {
+                index,
+                offset: base_offset,
+            } if *index == f.section => {
+                // A symbol start (static function) resolves through that symbol's address; a target behind
+                // the function (entries of the following function's jump table) through the function
+                // containing it; everything else, including the function's own jump table placed before
+                // its start, through the function's own address.
+                let target = i64::from(*base_offset) + content;
+                let end = i64::from(f.start) + i64::from(f.len);
+                let in_section = |s: &&decovery_objects::ObjSymbol| {
+                    s.section == f.section && s.offset != f.start
+                };
+                let owner = f
+                    .module
+                    .symbols
+                    .iter()
+                    .filter(in_section)
+                    .find(|s| i64::from(s.offset) == target)
+                    .or_else(|| {
+                        (target >= end)
+                            .then(|| {
+                                f.module
+                                    .symbols
+                                    .iter()
+                                    .filter(in_section)
+                                    .filter(|s| i64::from(s.offset) <= target)
+                                    .max_by_key(|s| s.offset)
+                            })
+                            .flatten()
+                    });
+                let resolved = match owner {
+                    Some(s) => self
+                        .lookup(&s.name)
+                        .and_then(|a| a.offset_by(target - i64::from(s.offset)).ok()),
+                    None => self.at.offset_by(target - i64::from(f.start)).ok(),
+                };
+                resolved.map_or(Target::Unresolved, Target::Known)
+            }
+            RefTarget::Section {
+                index,
+                offset: base_offset,
+            } => {
+                let target = i64::from(*base_offset) + content;
+                let name = f
+                    .module
+                    .symbols
+                    .iter()
+                    .find(|s| s.section == *index && i64::from(s.offset) == target)
+                    .map(|s| s.name.as_str());
+                match name {
+                    Some(name) => self.lookup(name).map_or(Target::Unresolved, Target::Known),
+                    None => Target::Unnamed {
+                        section: *index,
+                        rel: target + r.addend,
+                    },
+                }
+            }
+            _ => Target::Unresolved,
         }
-    };
-    let Ok(field_at) = at.offset_by(i64::from(offset)) else {
-        return wrong;
-    };
-    let relocation = program
-        .relocations_in(field_at, 1)
-        .iter()
-        .find(|r| same(r.at, field_at));
-    let ok = match (relocation, kind) {
-        (Some(r), _) => {
-            r.kind == kind
-                && u32::from(r.width) == field_width
-                && r.target
-                    .offset_by(r.addend)
-                    .is_ok_and(|t| same(t, expected))
+    }
+
+    /// decovery's rule for one relocated field at `offset` (relative to the function).
+    fn classify(&self, offset: u32, check: &Check<'_>) -> Field {
+        let (kind, field_width) = match check {
+            Check::Fixup(r) => (r.kind, u32::from(r.width)),
+            Check::Internal(_) => (RelocKind::Relative, self.width),
+        };
+        let wrong = match kind {
+            RelocKind::Relative => Blocker::WrongRelativeRef { at: offset },
+            _ => Blocker::WrongAbsoluteRef { at: offset },
+        };
+        let unchecked = Blocker::UncheckedRef { at: offset };
+        Field {
+            outcome: self.outcome(
+                offset,
+                check,
+                kind,
+                field_width,
+                Outcome::Decided(Some(wrong)),
+                Outcome::Decided(Some(unchecked)),
+            ),
+            wrong,
+            unchecked,
         }
-        (None, RelocKind::Relative) => {
-            let Some(field) = original.get(offset as usize..(offset + field_width) as usize) else {
+    }
+
+    fn outcome(
+        &self,
+        offset: u32,
+        check: &Check<'_>,
+        kind: RelocKind,
+        field_width: u32,
+        wrong: Outcome,
+        unchecked: Outcome,
+    ) -> Outcome {
+        let f = self.rebuild.f;
+        let fixup = match check {
+            Check::Fixup(r) => Some(*r),
+            Check::Internal(_) => None,
+        };
+        let sixteen = self.bits == 16;
+
+        // 16-bit selector: the original's MZ relocation against the frame anchor (ADR 0006 item 6).
+        if let Some(r) = fixup
+            && sixteen
+            && kind == RelocKind::Selector
+        {
+            let Ok(field_at) = self.at.offset_by(i64::from(offset)) else {
                 return wrong;
             };
-            let value = base as i64 + i64::from(offset + field_width) + signed(field);
-            address_in_space(at, value).is_some_and(|t| same(t, expected))
+            let Some(reloc) = relocation_at(self.program, field_at)
+                .filter(|s| s.kind == RelocKind::Selector && s.width == 2)
+            else {
+                return wrong;
+            };
+            let Some(frame) = frame_name(f.module, r) else {
+                return unchecked;
+            };
+            let Some(base) = reloc.target.linear() else {
+                return wrong;
+            };
+            return Outcome::Anchored(vec![Condition::Segment {
+                frame,
+                base: base as i64,
+            }]);
         }
-        (None, _) => false,
-    };
-    if ok { None } else { wrong }
+
+        let raw_field = f
+            .code()
+            .get(offset as usize..(offset + field_width) as usize)
+            .unwrap_or(&[]);
+        let target = match self.expected(check, raw_field) {
+            Target::Invalid => return wrong,
+            Target::Unresolved => return unchecked,
+            t => t,
+        };
+        let Ok(field_at) = self.at.offset_by(i64::from(offset)) else {
+            return wrong;
+        };
+        let relocation = relocation_at(self.program, field_at);
+
+        // 16-bit offset without a relocation in the original (MZ): anchors (ADR 0006 items 1-5).
+        if let Some(r) = fixup
+            && sixteen
+            && relocation.is_none()
+        {
+            let far = kind == RelocKind::FarPointer && field_width == 4;
+            if far || (kind == RelocKind::Absolute && field_width == 2) {
+                return self.anchored_offset(offset, field_at, r, far, &target, wrong, unchecked);
+            }
+        }
+
+        match target {
+            Target::Known(expected) => {
+                let ok = match (relocation, kind) {
+                    (Some(r), _) => {
+                        r.kind == kind
+                            && u32::from(r.width) == field_width
+                            && r.target
+                                .offset_by(r.addend)
+                                .is_ok_and(|t| same(t, expected))
+                    }
+                    (None, RelocKind::Relative) => {
+                        let Some(value) = self.relative_target(offset, field_width) else {
+                            return wrong;
+                        };
+                        address_in_space(self.at, value).is_some_and(|t| same(t, expected))
+                    }
+                    (None, _) => false,
+                };
+                if ok { Outcome::Decided(None) } else { wrong }
+            }
+            Target::Unnamed { section, rel } if self.bits == 32 => {
+                // 32-bit: the section's linear position from the original's relocation (ADR 0006 item 7).
+                let observed = match (relocation, kind) {
+                    (Some(r), _) => {
+                        if r.kind != kind || u32::from(r.width) != field_width {
+                            return wrong;
+                        }
+                        r.target.offset_by(r.addend).ok().and_then(|t| t.linear())
+                    }
+                    (None, RelocKind::Relative) => self
+                        .relative_target(offset, field_width)
+                        .and_then(|v| address_in_space(self.at, v))
+                        .and_then(|t| t.linear()),
+                    (None, _) => None,
+                };
+                let Some(observed) = observed else {
+                    return wrong;
+                };
+                Outcome::Anchored(vec![Condition::Section {
+                    key: SectionKey {
+                        frame: FLAT.to_string(),
+                        module: self.module,
+                        section,
+                        flat: true,
+                    },
+                    rel,
+                    candidate: observed as i64 - rel,
+                }])
+            }
+            _ => unchecked,
+        }
+    }
+
+    /// The original's target of a self-relative field read from its bytes, as a value in the address space.
+    fn relative_target(&self, offset: u32, field_width: u32) -> Option<i64> {
+        let field = self
+            .original
+            .get(offset as usize..(offset + field_width) as usize)?;
+        Some(self.base as i64 + i64::from(offset + field_width) + signed(field))
+    }
+
+    /// A 16-bit offset (or the offset word of a 16:16 far pointer) without a relocation in the original.
+    #[allow(clippy::too_many_arguments)]
+    fn anchored_offset(
+        &self,
+        offset: u32,
+        field_at: Address,
+        r: &ObjReloc,
+        far: bool,
+        target: &Target,
+        wrong: Outcome,
+        unchecked: Outcome,
+    ) -> Outcome {
+        let Some(word) = self.original.get(offset as usize..offset as usize + 2) else {
+            return wrong;
+        };
+        let observed = u16::from_le_bytes([word[0], word[1]]);
+        let frame = frame_name(self.rebuild.f.module, r);
+        let mut conditions = Vec::new();
+        if far {
+            let Some(segment) = field_at
+                .offset_by(2)
+                .ok()
+                .and_then(|a| relocation_at(self.program, a))
+                .filter(|s| s.kind == RelocKind::Selector && s.width == 2)
+                .and_then(|s| s.target.linear())
+            else {
+                return wrong;
+            };
+            match &frame {
+                Some(frame) => conditions.push(Condition::Segment {
+                    frame: frame.clone(),
+                    base: segment as i64,
+                }),
+                // No frame name: segment and offset give the linear address directly.
+                None => {
+                    return match target {
+                        Target::Known(a) => match a.linear() {
+                            Some(t) if t == segment + u64::from(observed) => Outcome::Decided(None),
+                            Some(_) => wrong,
+                            None => unchecked,
+                        },
+                        _ => unchecked,
+                    };
+                }
+            }
+        }
+        let Some(frame) = frame else {
+            return unchecked;
+        };
+        match *target {
+            Target::Known(a) => {
+                let Some(t) = a.linear() else {
+                    return unchecked;
+                };
+                conditions.push(Condition::Frame {
+                    frame,
+                    target: t as i64,
+                    candidate: t as i64 - i64::from(observed),
+                });
+            }
+            Target::Unnamed { section, rel } => conditions.push(Condition::Section {
+                key: SectionKey {
+                    frame,
+                    module: self.module,
+                    section,
+                    flat: false,
+                },
+                rel,
+                candidate: i64::from(observed.wrapping_sub(rel as u16)),
+            }),
+            _ => return unchecked,
+        }
+        Outcome::Anchored(conditions)
+    }
 }

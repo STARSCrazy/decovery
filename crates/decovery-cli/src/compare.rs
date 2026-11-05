@@ -1,12 +1,10 @@
 //! `decovery compare`: one rebuilt function of an object file against the original in a decovery workspace.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use decovery_core::{Address, Confidence, SymbolKind, Workspace};
-use decovery_diff::{
-    Blocker, CompareOptions, Comparison, Decoration, NameAt, SymbolView, Verdict, compare,
-};
+use decovery_core::{Address, Analysis, Confidence, SymbolKind, Workspace};
+use decovery_diff::{Blocker, CompareOptions, Comparison, Decoration, Verdict, compare};
+use decovery_facade::KnowledgeView;
 use decovery_objects::{functions, read_omf};
 use serde_json::{Value, json};
 
@@ -27,42 +25,6 @@ pub struct Outcome {
     pub comparison: Comparison,
 }
 
-/// Active (not refuted) names of the workspace's knowledge, by address.
-pub struct Knowledge {
-    by_address: BTreeMap<Address, String>,
-}
-
-impl Knowledge {
-    pub fn from_workspace(ws: &Workspace) -> Self {
-        let by_address = ws
-            .symbols
-            .iter()
-            .filter(|s| s.confidence != Confidence::Refuted && !s.name.is_empty())
-            .map(|s| (s.address, s.name.clone()))
-            .collect();
-        Knowledge { by_address }
-    }
-}
-
-impl SymbolView for Knowledge {
-    fn name_at(&self, at: Address) -> Option<NameAt> {
-        match self.by_address.get(&at) {
-            Some(n) => Some(NameAt::new(n.clone(), false)),
-            None => match at {
-                Address::Flat(a) => Some(NameAt::new(format!("fun_{a:08X}"), true)),
-                _ => None,
-            },
-        }
-    }
-
-    fn address_of(&self, name: &str) -> Option<Address> {
-        self.by_address
-            .iter()
-            .find(|(_, n)| n.as_str() == name)
-            .map(|(&a, _)| a)
-    }
-}
-
 /// `path` as given when it exists, otherwise relative to the workspace root.
 fn resolve(path: &Path, root: &Path) -> PathBuf {
     if path.is_absolute() || path.exists() {
@@ -76,7 +38,9 @@ fn resolve(path: &Path, root: &Path) -> PathBuf {
 pub fn run(request: &Request) -> Result<Outcome, String> {
     let ws = Workspace::open(&request.workspace)
         .map_err(|e| format!("cannot open workspace {}: {e}", request.workspace.display()))?;
-    let knowledge = Knowledge::from_workspace(&ws);
+    let analysis = Analysis::load(&ws.root)
+        .map_err(|e| format!("cannot read the analysis of {}: {e}", ws.root.display()))?;
+    let knowledge = KnowledgeView::new(&ws, analysis.as_ref());
     let symbol = ws
         .symbols
         .iter()
@@ -227,35 +191,6 @@ impl Outcome {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn knowledge(entries: &[(u32, &str)]) -> Knowledge {
-        Knowledge {
-            by_address: entries
-                .iter()
-                .map(|&(a, n)| (Address::Flat(a), n.to_string()))
-                .collect(),
-        }
-    }
-
-    #[test]
-    fn known_address_has_its_name() {
-        let k = knowledge(&[(0x10010, "main_")]);
-        assert_eq!(
-            k.name_at(Address::Flat(0x10010)),
-            Some(NameAt::new("main_", false))
-        );
-        assert_eq!(k.address_of("main_"), Some(Address::Flat(0x10010)));
-    }
-
-    #[test]
-    fn unknown_flat_address_gets_default_name() {
-        let k = knowledge(&[]);
-        assert_eq!(
-            k.name_at(Address::Flat(0x2A)),
-            Some(NameAt::new("fun_0000002A", true))
-        );
-        assert_eq!(k.address_of("fun_0000002A"), None);
-    }
 
     #[test]
     fn missing_relative_path_falls_back_to_workspace_root() {
