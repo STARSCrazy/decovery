@@ -365,6 +365,138 @@ fn selector_with_wrong_segment_is_wrong() {
     );
 }
 
+/// `call far _g1; ret` (16:16 pointer at +1) with `frame`; the original's pointer is `offset:segment`, with an MZ
+/// relocation of its segment word when `relocated`.
+fn far_case(frame: Frame, offset: u16, segment: u16, relocated: bool) -> ModuleComparison {
+    let code: &[u8] = &[0x9A, 0, 0, 0, 0, 0xC3];
+    let far = ObjReloc::new(1, 4, RelocKind::FarPointer, sym("_g1"), 0, frame);
+    let m = module16(&[code], vec![far]);
+    let [o0, o1] = offset.to_le_bytes();
+    let [s0, s1] = segment.to_le_bytes();
+    let original: &[u8] = &[0x9A, o0, o1, s0, s1, 0xC3];
+    let relocations = if relocated {
+        vec![Relocation::new(
+            seg(0, 3),
+            RelocKind::Selector,
+            2,
+            seg(segment, 0),
+            0,
+        )]
+    } else {
+        vec![]
+    };
+    let p = program16(&[original], &[], relocations);
+    run16(&m, &p, &known_globals(), &ModuleOptions::default())
+}
+
+#[test]
+fn far_pointer_offset_and_segment_match() {
+    let group = || Frame::Group("DGROUP".to_string());
+    let c = far_case(group(), 0x10, 0x200, true);
+    assert_eq!(
+        c.functions[0].verdict,
+        Verdict::Identical,
+        "{:?}",
+        c.functions[0].blockers
+    );
+    let a = anchor(&c, "DGROUP", None);
+    assert_eq!((a.base, a.votes), (0x2000, 1));
+
+    // the segment word disagrees with the frame anchor the offset word proposes
+    let c = far_case(group(), 0x10, 0x1F0, true);
+    assert_eq!(
+        c.functions[0].blockers,
+        vec![Blocker::WrongAbsoluteRef { at: 1 }]
+    );
+}
+
+#[test]
+fn far_pointer_without_frame_uses_linear() {
+    // an external symbol with a target frame: no frame name, 01F0:0110 is linear 0x2010 = `g1`
+    let c = far_case(Frame::Target, 0x110, 0x1F0, true);
+    assert_eq!(
+        c.functions[0].verdict,
+        Verdict::Identical,
+        "{:?}",
+        c.functions[0].blockers
+    );
+    assert!(c.anchors.is_empty(), "{:?}", c.anchors);
+
+    let c = far_case(Frame::Target, 0x114, 0x1F0, true);
+    assert_eq!(
+        c.functions[0].blockers,
+        vec![Blocker::WrongAbsoluteRef { at: 1 }]
+    );
+}
+
+#[test]
+fn far_pointer_missing_selector_relocation_is_wrong() {
+    for frame in [Frame::Group("DGROUP".to_string()), Frame::Target] {
+        let c = far_case(frame, 0x10, 0x200, false);
+        assert_eq!(
+            c.functions[0].blockers,
+            vec![Blocker::WrongAbsoluteRef { at: 1 }]
+        );
+    }
+}
+
+/// `mov ax,[_g1]` (frame `DGROUP`) and `mov ax,offset _DATA+0; mov dx,offset _DATA+3` with `frame`; the original's
+/// string fields are `string0` and `string0 + 3`, the strings at linear 0x2040.
+fn framed_strings_case(frame: Frame, string0: u16, options: &ModuleOptions) -> ModuleComparison {
+    let code: &[u8] = &[0xA1, 0, 0, 0xB8, 0, 0, 0xBA, 3, 0, 0xC3];
+    let data =
+        |offset: u32| ObjReloc::new(offset, 2, RelocKind::Absolute, data_at(0), 0, frame.clone());
+    let m = module16(&[code], vec![off16(1, sym("_g1")), data(4), data(7)]);
+    let [a0, a1] = string0.to_le_bytes();
+    let [b0, b1] = (string0 + 3).to_le_bytes();
+    let original: &[u8] = &[0xA1, 0x10, 0, 0xB8, a0, a1, 0xBA, b0, b1, 0xC3];
+    let p = program16(&[original], &[(0x2040, b"ab\0cdeX\0")], vec![]);
+    run16(&m, &p, &known_globals(), options)
+}
+
+#[test]
+fn target_frame_resolves_to_group() {
+    // `_DATA` is a member of DGROUP: target and unknown frames are DGROUP, so the DGROUP anchor from `_g1` enables
+    // the item check (the second string differs).
+    for frame in [Frame::Target, Frame::Unknown] {
+        let c = framed_strings_case(frame, 0x40, &ModuleOptions::default());
+        let a = anchor(&c, "DGROUP", Some("_DATA"));
+        assert_eq!((a.base, a.votes), (0x40, 2));
+        assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+        assert_eq!(
+            c.functions[0].blockers,
+            vec![Blocker::WrongAbsoluteRef { at: 7 }]
+        );
+    }
+}
+
+#[test]
+fn section_frame_is_the_section_itself() {
+    // Frame `_DATA` (F0), although `_DATA` is in DGROUP: offsets are relative to `_DATA`, a frame of its own.
+    let section = || Frame::Section(1);
+    let c = framed_strings_case(section(), 0, &ModuleOptions::default());
+    let a = anchor(&c, "_DATA", Some("_DATA"));
+    assert_eq!((a.base, a.votes), (0, 2));
+    assert!(
+        c.anchors
+            .iter()
+            .all(|a| a.frame != "_DATA" || a.section.is_some())
+    );
+    assert_eq!(c.warnings.len(), 1, "{:?}", c.warnings);
+    assert!(c.warnings[0].contains("frame _DATA"), "{:?}", c.warnings);
+    assert_eq!(c.functions[0].verdict, Verdict::Identical);
+
+    // with the `_DATA` frame configured at linear 0x2040 the items are compared
+    let mut options = ModuleOptions::default();
+    options.frames.insert("_DATA".to_string(), seg(0x204, 0));
+    let c = framed_strings_case(section(), 0, &options);
+    assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+    assert_eq!(
+        c.functions[0].blockers,
+        vec![Blocker::WrongAbsoluteRef { at: 7 }]
+    );
+}
+
 // --- 32-bit ---
 
 const AT: u32 = 0x10000;
