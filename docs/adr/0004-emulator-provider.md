@@ -28,7 +28,7 @@ decovery is licensed `Apache-2.0 OR MIT` (ADR 0003): linking GPL code into the b
    for DOS/extender programs) and `FunctionExec` contracts over the plugin protocol. It is introduced in phase 2
    by porting `emu_dos.py`.
 2. Calls are coarse (one per compile, one per batch of cases), so the process boundary is not a bottleneck.
-3. icicle-emu is re-evaluated by a spike when phase 5 (`verify`) starts: if it runs x86 16-bit real mode and the
+3. icicle-emu is re-evaluated by a spike when phase 6 (`verify`) starts: if it runs x86 16-bit real mode and the
    Watcom host at acceptable speed, an in-process permissive provider may replace or complement unicorn (new ADR).
 
 Amendment (phase 2, 2026-11-05): the provider is a **Python plugin**, `plugins/unicorn-dos` (package
@@ -36,7 +36,7 @@ Amendment (phase 2, 2026-11-05): the provider is a **Python plugin**, `plugins/u
 Rust binary. No C toolchain is available to build the `unicorn-engine` crate, while the Python wheel ships a
 prebuilt library. unicorn is pinned to 2.1.1 because 2.1.4 writes guest memory about 20x slower (measured in
 Decomp, Werkzeug 52). The process boundary, the licence separation and the `runner` / `FunctionExec` contracts are
-unchanged; Rust never imports the plugin. The icicle-emu re-evaluation in phase 5 stays.
+unchanged; Rust never imports the plugin. The icicle-emu re-evaluation in phase 6 stays.
 
 ## Consequences
 
