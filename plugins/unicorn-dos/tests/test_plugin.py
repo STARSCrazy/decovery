@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -19,7 +20,8 @@ except ImportError:
     unicorn = None
 
 from decovery_unicorn_dos import build_plugin  # noqa: E402
-from decovery_unicorn_dos.pool import JobPool  # noqa: E402
+from decovery_unicorn_dos.batch import plan  # noqa: E402
+from decovery_unicorn_dos.pool import JobPool, execute_job  # noqa: E402
 
 PRELUDE = ["SET PATH=D:\\BINW"]
 
@@ -46,6 +48,19 @@ def die(job):
     os._exit(3)
 
 
+def answer_or_die(job):
+    """Worker that dies for a job with `die`, or with `die_once` (a marker file) on the first attempt only, and
+    answers every other job with exit code `n` after `sleep` seconds."""
+    marker = job.get("die_once")
+    if marker and not os.path.exists(marker):
+        Path(marker).touch()
+        os._exit(3)
+    if job.get("die"):
+        os._exit(3)
+    time.sleep(job.get("sleep", 0))
+    return {"status": "done", "exit_code": job["n"], "stdout": "", "message": None}
+
+
 class Workspace:
     def __init__(self, test):
         tmp = tempfile.TemporaryDirectory()
@@ -58,7 +73,8 @@ class Workspace:
         (self.d / "BINW" / "WRITER.EXE").write_bytes(asm.write_file_program())
         (self.d / "BINW" / "LOOP.EXE").write_bytes(asm.loop_program())
         (self.d / "BINW" / "BAD.EXE").write_bytes(asm.call_program(0x99))
-        (self.d / "BINW" / "REAL.EXE").write_bytes(asm.plain_mz())
+        (self.d / "BINW" / "REAL.EXE").write_bytes(asm.write_file_program16(b"REAL.TXT", b"16", 0))
+        (self.d / "BINW" / "LE.EXE").write_bytes(asm.le_exe())
 
     def params(self, *jobs, timeout_s=10.0):
         return {
@@ -81,7 +97,7 @@ class PluginProtocolTest(unittest.TestCase):
 
     def test_unsupported_program_is_refused_before_any_job(self):
         ws = Workspace(self)
-        params = ws.params(PRELUDE + ["WRITER"], PRELUDE + ["REAL"])
+        params = ws.params(PRELUDE + ["WRITER"], PRELUDE + ["LE"])
         answers = run(build_plugin(), request(1, "runner/run", params))
         self.assertEqual(answers[1]["error"]["code"], -32020)
         self.assertFalse((ws.c / "OUT.TXT").exists())
@@ -96,10 +112,10 @@ class PluginRunTest(unittest.TestCase):
     def setUp(self):
         self.machines = []
 
-        def factory(p3):
-            from decovery_unicorn_dos.pharlap import Machine
+        def factory(image):
+            from decovery_unicorn_dos.pool import new_machine
 
-            machine = Machine(p3)
+            machine = new_machine(image)
             self.machines.append(machine)
             return machine
 
@@ -110,6 +126,7 @@ class PluginRunTest(unittest.TestCase):
         params = ws.params(
             PRELUDE + ["WRITER -x A.C"],
             ["SET PATH=D:\\BINW", "@ECHO OFF", "ECHO before", "BAD"],
+            ["@SET PATH=D:\\BINW", "@REAL"],
         )
         plugin = build_plugin()
         answers = run(plugin, request(1, "runner/run", params))
@@ -123,6 +140,8 @@ class PluginRunTest(unittest.TestCase):
         self.assertIsNone(jobs[1]["exit_code"])
         self.assertTrue(jobs[1]["message"].startswith("unsupported INT 21h AH=99h at 000C:00001002"))
         self.assertEqual(jobs[1]["stdout"], "C:\\>SET PATH=D:\\BINW\r\nbefore\r\n")
+        self.assertEqual(jobs[2], {"status": "done", "exit_code": 0, "stdout": "16", "message": None})
+        self.assertEqual((ws.c / "REAL.TXT").read_bytes(), b"16")
 
     def test_machine_is_reused_between_jobs(self):
         ws = Workspace(self)
@@ -150,12 +169,59 @@ class PluginRunTest(unittest.TestCase):
         self.assertEqual(job["status"], "failed")
         self.assertIn("NOPE", job["message"])
 
+    def test_real_mode_and_phar_lap_machines_side_by_side(self):
+        ws = Workspace(self)
+        params = ws.params(PRELUDE + ["REAL", "WRITER"], PRELUDE + ["REAL"])
+        answers = run(build_plugin(self.factory), request(1, "runner/run", params))
+        jobs = answers[1]["result"]["jobs"]
+        self.assertEqual([j["exit_code"] for j in jobs], [3, 0])
+        self.assertEqual(len(self.machines), 2)  # one per program, reused
+        self.assertEqual(sorted(m.runs for m in self.machines), [1, 2])
+
+
+class JobPoolTest(unittest.TestCase):
+    """Pool behaviour with stand-in workers (no emulator needed)."""
+
     def test_broken_worker_fails_the_job(self):
         pool = JobPool(workers=1, worker=die)
         self.addCleanup(pool.close)
         outcomes = pool.run([{"steps": []}])
         self.assertEqual(outcomes[0]["status"], "failed")
         self.assertIn("worker process", outcomes[0]["message"])
+
+    def test_crashed_worker_fails_only_its_own_job(self):
+        pool = JobPool(workers=2, worker=answer_or_die)
+        self.addCleanup(pool.close)
+        outcomes = pool.run([{"n": 1, "sleep": 1}, {"die": True}, {"n": 3, "sleep": 1}, {"n": 4, "sleep": 1}])
+        self.assertEqual([o["status"] for o in outcomes], ["done", "failed", "done", "done"])
+        self.assertEqual([o["exit_code"] for o in outcomes], [1, None, 3, 4])
+        self.assertIn("worker process ended unexpectedly", outcomes[1]["message"])
+        self.assertEqual(pool.run([{"n": 5}])[0]["exit_code"], 5)  # a fresh pool for the next call
+
+    def test_job_that_crashes_once_is_run_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = JobPool(workers=1, worker=answer_or_die)
+            self.addCleanup(pool.close)
+            outcomes = pool.run([{"n": 7, "die_once": str(Path(tmp) / "marker")}])
+        self.assertEqual(outcomes[0]["status"], "done")
+        self.assertEqual(outcomes[0]["exit_code"], 7)
+
+    def test_unexpected_exception_is_an_emulation_error(self):
+        ws = Workspace(self)
+        job = {
+            "drives": {"C": str(ws.c), "D": str(ws.d)},
+            "read_only": ["D"],
+            "current": "C",
+            "timeout_s": 5.0,
+            "steps": plan(PRELUDE + ["WRITER"], {"C": ws.c, "D": ws.d}),
+        }
+
+        def broken(program, image):
+            raise RuntimeError("boom")
+
+        outcome = execute_job(job, broken)
+        self.assertEqual(outcome["status"], "failed")
+        self.assertEqual(outcome["message"], "emulation error: RuntimeError: boom")
 
 
 if __name__ == "__main__":

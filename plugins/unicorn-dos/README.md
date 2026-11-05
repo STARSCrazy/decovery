@@ -22,15 +22,17 @@ Hosts:
 | Host | Programs | Status |
 |---|---|---|
 | `pharlap` | bound Phar Lap 386\|DOS-Extender programs with a flat P3 image (Watcom WCC386 9.5) | phase 2 |
-| `realmode` | real-mode MZ and COM programs (Turbo C) | planned |
+| `realmode` | real-mode MZ and COM programs (Turbo C 2.0 TCC and TLINK) | phase 2 |
 
 Before running anything, every program of every job is checked; one that no host runs (an LE/DOS4GW program, a
 P3 image with relocations, ...) answers `-32020` (`RUNNER_UNSUPPORTED`), so decovery tries its next runner. A DOS
 or extender call the emulation does not provide ends the job with status `failed` and a message such as
-`unsupported INT 21h AH=45h at 000C:0001A2B3 (EAX=...)`; it never continues silently.
+`unsupported INT 21h AH=4Bh at 000C:0001A2B3 (EAX=...)`; it never continues silently.
 
 Jobs run in parallel in spawned worker processes (`DECOVERY_UNICORN_PARALLEL`, default 8); each worker keeps one
-emulated machine per program and resets it between runs by rewriting only the changed 4 KiB pages.
+emulated machine per program and resets it between runs by rewriting only the changed 4 KiB pages. A worker
+that dies takes the pending jobs of its pool with it; those run once more, each in a fresh process, so only a
+job that crashes again fails.
 
 ## Layout
 
@@ -39,11 +41,13 @@ emulated machine per program and resets it between runs by rewriting only the ch
 | `dosfs.py` | drives on host folders, 8.3 names, handles, DOS error codes |
 | `services.py` | INT 21h services shared by the hosts, over a register/memory adapter |
 | `pharlap.py` | P3 loader, reusable machine (GDT/LDT, selectors, heap), Phar Lap services |
+| `realmode.py` | MZ/COM loader, reusable 16-bit machine (IVT, PSP, MCB chain), BIOS and 16-bit DOS services |
 | `batch.py` | command lines to steps, program lookup, host choice |
 | `pool.py` | job execution, worker processes, machine reuse |
 
 ## Tests
 
 `python -m unittest discover -s tests`. Tests that need unicorn skip without it ("unicorn not installed");
-`tests/test_local_tools.py` compiles with the real Watcom 9.5 and runs only when `DECOVERY_TOOLCHAIN_WATCOM95`
-points to its directory. The test programs are assembled from bytes in `tests/asm.py`.
+`tests/test_local_tools.py` compiles with the real Watcom 9.5 and Turbo C 2.0 and runs only when
+`DECOVERY_TOOLCHAIN_WATCOM95` / `DECOVERY_TOOLCHAIN_TC20` point to their directories. The test programs are
+assembled from bytes in `tests/asm.py`.

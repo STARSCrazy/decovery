@@ -22,7 +22,7 @@ from decovery_plugin import RpcError
 from .dosfs import DosFs
 from .errors import RUNNER_UNSUPPORTED, DosError
 
-HOSTS = frozenset({"pharlap"})  # hosts this plugin provides
+HOSTS = frozenset({"pharlap", "realmode"})  # hosts this plugin provides
 INITIAL_ENV = (("COMSPEC", "Z:\\COMMAND.COM"), ("PATH", "Z:\\"))
 MAX_BATCH_DEPTH = 8
 P3_HEADER = 0x180

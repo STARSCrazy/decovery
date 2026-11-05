@@ -47,6 +47,9 @@ BASES = {
 }
 PHAR = 0x50484152  # EBX = 'PHAR' asks AH=30h for the extender
 MAX_COMMAND_TAIL = 126
+# A run that stops without an exit before this share of its time limit stopped for another reason (`hlt`, an
+# emulator stop) and is an emulation error, not a timeout.
+STOP_MARGIN = 0.9
 
 
 @dataclass(frozen=True)
@@ -136,6 +139,7 @@ class Machine:
         from unicorn import x86_const as r
 
         self.p3 = p3
+        self.image = p3  # identity for the machine cache
         self.active: PharLapEmu | None = None
         self.spent = False
         self.runs = 0
@@ -329,11 +333,14 @@ class PharLapEmu:
             self.execute(self.p3.eip, int(self.timeout_s * 1_000_000))
         finally:
             self.finish()
+        elapsed = time.perf_counter() - started
         if self.error is not None:
             raise self.error
         if self.services.exit_code is None:
+            if elapsed < self.timeout_s * STOP_MARGIN:
+                raise EmulatorError(f"stopped without exit at {self._location()} ({self._registers()})")
             raise EmulatorTimeout(f"no end after {self.timeout_s:g} s (EIP={self.regs.get('EIP'):#x})")
-        return Result(self.services.exit_code, bytes(self.fs.output), time.perf_counter() - started, dict(self.calls))
+        return Result(self.services.exit_code, bytes(self.fs.output), elapsed, dict(self.calls))
 
     # --- helpers -------------------------------------------------------------------------------------------------
     def _registers(self) -> str:

@@ -7,12 +7,15 @@ interrupt vectors, the DTA address as a far pointer, the extender's own calls) s
 
 from __future__ import annotations
 
+import struct
 import time
 
 from .dosfs import DosFs
 from .errors import DosError, Unsupported
 
 CARRY = 0x0001
+ZERO = 0x0040
+SEARCH_KEY = 0x0D  # DTA offset of the search number (DOS keeps its search state in bytes 0-20)
 
 
 class Regs:
@@ -79,6 +82,8 @@ class DosServices:
         self.fs = fs
         self.regs = regs
         self.dta = 0  # linear address of the disk transfer area
+        self.dta_far = (0, 0)  # the DTA as set: (segment or selector, offset)
+        self.searches = 0  # number of the last find-first search
         self.exit_code: int | None = None
 
     def call(self, ah: int, al: int) -> bool:
@@ -106,6 +111,43 @@ class DosServices:
         self.regs.set("EAX", h)
         self.ok()
 
+    # 02h: character DL to the console
+    def _ah_02(self, al: int) -> None:
+        self.fs.write(1, bytes([self.regs.get("EDX") & 0xFF]))
+        self.regs.set_low("EAX", self.regs.get("EDX") & 0xFF)
+
+    # 06h: direct console I/O: DL = FFh reads (no key: ZF set, AL = 0), any other DL is written
+    def _ah_06(self, al: int) -> None:
+        r = self.regs
+        dl = r.get("EDX") & 0xFF
+        if dl == 0xFF:
+            r.set_low("EAX", 0)
+            r.set("EFLAGS", r.get("EFLAGS") | ZERO)
+        else:
+            self.fs.write(1, bytes([dl]))
+            r.set_low("EAX", dl)
+
+    # 09h: "$"-terminated string at DS:DX to the console
+    def _ah_09(self, al: int) -> None:
+        r = self.regs
+        address = r.linear(r.get("DS"), r.arg("DX"))
+        text = bytearray()
+        while len(text) < 0x10000:
+            chunk = r.read_linear(address + len(text), 64)
+            end = chunk.find(b"$")
+            if end >= 0:
+                text += chunk[:end]
+                break
+            text += chunk
+        else:
+            raise Unsupported("INT 21h AH=09h: no '$' within 64 KiB")
+        self.fs.write(1, bytes(text))
+        r.set_low("EAX", ord("$"))
+
+    # 0Bh: console input status: no key waiting (AL = 0); C runtimes poll it for Ctrl-Break
+    def _ah_0b(self, al: int) -> None:
+        self.regs.set_low("EAX", 0)
+
     # 0Eh: select drive (DL); AL = number of drives
     def _ah_0e(self, al: int) -> None:
         self.fs.select_drive(self.regs.get("EDX") & 0xFF)
@@ -117,7 +159,86 @@ class DosServices:
 
     # 1Ah: set DTA (DS:DX)
     def _ah_1a(self, al: int) -> None:
-        self.dta = self.regs.linear(self.regs.get("DS"), self.regs.arg("DX"))
+        self.dta_far = (self.regs.get("DS") & 0xFFFF, self.regs.arg("DX"))
+        self.dta = self.regs.linear(*self.dta_far)
+
+    # 29h: parse a file name at DS:SI into the FCB at ES:DI. AL bit 0: skip leading separators; bits 1-3: keep
+    # drive, name, extension of the FCB when the text has none. AL = 0 (no wildcards), 1 (wildcards), FFh (bad
+    # drive); SI points after the name.
+    def _ah_29(self, al: int) -> None:
+        r = self.regs
+        si, di = r.arg("SI"), r.arg("DI")
+        text = r.read(r.get("DS"), si, 128) + b"\0"
+        fcb = bytearray(r.read(r.get("ES"), di, 12))
+        i = 0
+        while text[i] in b" \t":
+            i += 1
+        if al & 1 and text[i] in b":.;,=+":
+            i += 1
+            while text[i] in b" \t":
+                i += 1
+        result = 0
+        if text[i + 1] == ord(":") and chr(text[i]).isalpha():
+            drive = chr(text[i]).upper()
+            fcb[0] = ord(drive) - ord("A") + 1
+            if drive not in self.fs.drives:
+                result = 0xFF
+            i += 2
+        elif not al & 2:
+            fcb[0] = 0
+
+        def field(width: int) -> bytes | None:
+            nonlocal i
+            out = bytearray()
+            while text[i] > 0x20 and text[i] not in b'."/\\[]:|<>+=;,':
+                c = text[i]
+                if c == ord("*"):
+                    out += b"?" * (width - len(out))
+                elif len(out) < width:
+                    out.append(ord(chr(c).upper()) if c < 0x80 else c)
+                i += 1
+            return bytes(out.ljust(width, b" ")[:width]) if out else None
+
+        name = field(8)
+        if name is not None:
+            fcb[1:9] = name
+        elif not al & 4:
+            fcb[1:9] = b" " * 8
+        ext = None
+        if text[i] == ord("."):
+            i += 1
+            ext = field(3)
+        if ext is not None:
+            fcb[9:12] = ext
+        elif not al & 8:
+            fcb[9:12] = b" " * 3
+        if result == 0 and b"?" in fcb[1:12]:
+            result = 1
+        r.write(r.get("ES"), di, bytes(fcb))
+        end = si + i
+        if not r.wide:
+            end = (r.get("ESI") & 0xFFFF0000) | (end & 0xFFFF)
+        r.set("ESI", end)
+        r.set_low("EAX", result)
+
+    # 30h: DOS version 5.0
+    def _ah_30(self, al: int) -> None:
+        r = self.regs
+        r.set("EAX", (r.get("EAX") & 0xFFFF0000) | 0x0005)
+        r.set("EBX", r.get("EBX") & 0xFFFF0000)
+        r.set("ECX", r.get("ECX") & 0xFFFF0000)
+
+    # 36h: free disk space of drive DL (0 = current): AX sectors per cluster, BX free clusters, CX bytes per
+    # sector, DX clusters; AX = FFFFh for a drive that does not exist. Always about 1 GiB free.
+    def _ah_36(self, al: int) -> None:
+        r = self.regs
+        number = r.get("EDX") & 0xFF
+        drive = self.fs.current if number == 0 else chr(ord("A") + number - 1)
+        if drive not in self.fs.drives:
+            r.set("EAX", (r.get("EAX") & 0xFFFF0000) | 0xFFFF)
+            return
+        for name, value in (("EAX", 64), ("EBX", 0x7FFF), ("ECX", 512), ("EDX", 0xFFF0)):
+            r.set(name, (r.get(name) & 0xFFFF0000) | value)
 
     # 2Ah: date
     def _ah_2a(self, al: int) -> None:
@@ -211,6 +332,15 @@ class DosServices:
         r.set("EAX", (r.get("EAX") & 0xFFFF0000) | info)
         self.ok()
 
+    # 45h: duplicate handle BX -> AX (both share the file position)
+    def _ah_45(self, al: int) -> None:
+        self._handle(self.fs.dup(self.regs.get("EBX")))
+
+    # 46h: make handle CX refer to the file of BX (CX is closed first if open)
+    def _ah_46(self, al: int) -> None:
+        self.fs.force_dup(self.regs.get("EBX"), self.regs.get("ECX"))
+        self.ok()
+
     # 47h: current directory (DL drive, DS:SI buffer)
     def _ah_47(self, al: int) -> None:
         r = self.regs
@@ -223,15 +353,22 @@ class DosServices:
         self.fs.close_all()
         self.exit_code = al
 
-    # 4Eh: find first (DS:DX pattern, CX attributes), 4Fh: find next; results go to the DTA
+    # 4Eh: find first (DS:DX pattern, CX attributes), 4Fh: find next; results go to the DTA. As in DOS, the
+    # search state lives in the reserved bytes of the DTA (here: a search number), so a program may copy the record
+    # elsewhere and continue from the copy (WMAKE does).
     def _ah_4e(self, al: int) -> None:
-        entry = self.fs.find_first(self._name(), self.regs.get("ECX") & 0xFF, self.dta)
-        self.regs.write_linear(self.dta, entry.dta())
-        self.ok()
+        self.searches += 1
+        entry = self.fs.find_first(self._name(), self.regs.get("ECX") & 0xFF, self.searches)
+        self._found(entry, self.searches)
 
     def _ah_4f(self, al: int) -> None:
-        entry = self.fs.find_next(self.dta)
-        self.regs.write_linear(self.dta, entry.dta())
+        key = struct.unpack("<I", self.regs.read_linear(self.dta + SEARCH_KEY, 4))[0]
+        self._found(self.fs.find_next(key), key)
+
+    def _found(self, entry, key: int) -> None:
+        record = bytearray(entry.dta())
+        struct.pack_into("<I", record, SEARCH_KEY, key)
+        self.regs.write_linear(self.dta, bytes(record))
         self.ok()
 
     # 56h: rename (DS:DX old, ES:DI new)

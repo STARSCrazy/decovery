@@ -27,6 +27,7 @@ class BatchTest(unittest.TestCase):
         (self.d / "binw").mkdir(parents=True)
         (self.d / "binw" / "wcc386.exe").write_bytes(asm.write_file_program())
         (self.d / "binw" / "realtool.exe").write_bytes(asm.plain_mz())
+        (self.d / "binw" / "letool.exe").write_bytes(asm.le_exe())
         self.drives = {"C": self.c, "D": self.d}
 
     def test_set_lines_build_the_environment(self):
@@ -69,9 +70,13 @@ class BatchTest(unittest.TestCase):
 
     def test_unsupported_program_is_rejected_before_running(self):
         with self.assertRaises(RpcError) as caught:
-            plan(PRELUDE + ["REALTOOL X"], self.drives)
+            plan(PRELUDE + ["LETOOL X"], self.drives)
         self.assertEqual(caught.exception.code, -32020)
-        self.assertIn("REALTOOL", caught.exception.message)
+        self.assertIn("LETOOL", caught.exception.message)
+
+    def test_real_mode_program_gets_the_realmode_host(self):
+        run = plan(PRELUDE + ["REALTOOL X"], self.drives)[-1]
+        self.assertEqual((run.kind, run.host, run.args), ("run", "realmode", "X"))
 
     def test_choose_host(self):
         self.assertEqual(choose_host(asm.write_file_program()), "pharlap")
@@ -79,11 +84,7 @@ class BatchTest(unittest.TestCase):
         self.assertEqual(choose_host(b"\xb8\x00\x4c\xcd\x21"), "realmode")  # COM
         self.assertIsNone(choose_host(asm.p3_exe(b"", level=2)))
         self.assertIsNone(choose_host(asm.p3_exe(b"", relocations=16)))
-        le = bytearray(asm.plain_mz()) + bytes(0x80)
-        le[0x18] = 0x40
-        le[0x3C] = 0x80
-        le[0x80:0x82] = b"LE"
-        self.assertIsNone(choose_host(bytes(le)))
+        self.assertIsNone(choose_host(asm.le_exe()))
 
 
 if __name__ == "__main__":
