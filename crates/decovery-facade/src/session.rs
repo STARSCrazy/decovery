@@ -96,7 +96,7 @@ fn check_target(workspace: &Workspace, analysis: &Analysis) -> Result<(), Facade
 }
 
 /// `fun_` plus eight uppercase hex digits for flat addresses; other forms use their text with `_` for `:`.
-fn default_name(at: Address) -> String {
+pub(crate) fn default_name(at: Address) -> String {
     match at {
         Address::Flat(a) => format!("fun_{a:08X}"),
         other => format!("fun_{}", other.to_string().replace(':', "_")),

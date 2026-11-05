@@ -69,6 +69,27 @@ pub struct RebuildRecord {
     pub diagnoses: Vec<String>,
     #[serde(default)]
     pub date: Option<String>,
+    /// The last equivalence check (`[function.equivalence]`); only the fields shown in output are kept.
+    #[serde(default)]
+    pub equivalence: Option<Equivalence>,
+}
+
+/// The last equivalence check of a rebuilt function, as far as output shows it.
+///
+/// Other keys of the table (reasons, code, case counts by kind) are ignored when reading.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct Equivalence {
+    #[serde(default)]
+    pub verdict: Option<String>,
+    #[serde(default, rename = "static")]
+    pub static_check: Option<String>,
+    #[serde(default)]
+    pub dynamic: Option<String>,
+    #[serde(default)]
+    pub cases: Option<u32>,
+    #[serde(default)]
+    pub date: Option<String>,
 }
 
 /// `first_difference` is an integer in practice, but the schema allows text (`"12"`, `"0x0C"`).
@@ -238,10 +259,14 @@ result = "identical"
         assert_eq!(r.first_difference, Some(12));
         assert_eq!(r.diagnoses, ["operand-swap", "constant"]);
         assert_eq!(r.date.as_deref(), Some("2026-10-30"));
+        let e = r.equivalence.as_ref().unwrap();
+        assert_eq!(e.verdict.as_deref(), Some("unchecked"));
+        assert_eq!((e.static_check.as_deref(), e.cases), (None, None));
         let t = &records[1];
         assert_eq!(t.result, RebuildResult::Identical);
         assert_eq!((t.bytes, t.first_difference), (0, None));
         assert!(t.diagnoses.is_empty() && t.file.is_none() && t.message.is_none());
+        assert!(t.equivalence.is_none());
     }
 
     #[test]

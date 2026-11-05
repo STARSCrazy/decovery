@@ -99,7 +99,7 @@ fn from_file_offset(session: &Session, off: u64) -> Result<Address, FacadeError>
     )))
 }
 
-fn in_segment(seg: &SegmentConfig, at: Address) -> bool {
+pub(crate) fn in_segment(seg: &SegmentConfig, at: Address) -> bool {
     match (seg.start, at) {
         (
             Address::Sel {

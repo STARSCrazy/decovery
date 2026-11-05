@@ -1,5 +1,7 @@
 //! Errors of the facade.
 
+use std::path::PathBuf;
+
 use decovery_core::{Address, WorkspaceError};
 
 /// Why a facade operation failed. Every variant maps to exit code 2 at the CLI.
@@ -29,6 +31,11 @@ pub enum FacadeError {
     Plugin(String),
     #[error("workspace is locked by pid {pid}")]
     Locked { pid: u32 },
+    #[error("cannot write {}: {source}", path.display())]
+    Output {
+        path: PathBuf,
+        source: std::io::Error,
+    },
 }
 
 fn nearest_text(nearest: &Option<(Address, String)>) -> String {
