@@ -385,3 +385,29 @@ fn find_over_limit_returns_handle() {
         std::fs::read_to_string(d.path().join("cache/handles").join(format!("{id}.txt"))).unwrap();
     assert_eq!(stored, "flat:00020020\twor\\tld\n");
 }
+
+#[test]
+fn find_code_reads_non_utf8_file_lossily() {
+    let (d, s) = workspace();
+    let lock = s.workspace.lock(Duration::ZERO).unwrap();
+    write_all(&s, &lock).unwrap();
+    drop(lock);
+    std::fs::write(
+        d.path().join("output/functions/code/zz_latin1.c"),
+        b"int a;\n  x = zzmarker \xff\xfe;\n",
+    )
+    .unwrap();
+    let r = find(
+        &s,
+        &query(FindWhat::Code, Some("zzmarker")),
+        Budget::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        r.data["items"],
+        json!([{"file": "output/functions/code/zz_latin1.c", "line": 2,
+                "text": "x = zzmarker \u{fffd}\u{fffd};"}])
+    );
+    assert_eq!(r.summary, "1 code lines");
+    assert!(r.data.get("unreadable").is_none());
+}
