@@ -229,6 +229,21 @@ impl Tbl {
     }
 }
 
+/// `[nachbau.optionen_je_datei]`: source file name to extra flags.
+fn file_flags(n: &mut Tbl, cx: &mut Ctx) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    if let Some(mut t) = n.table("optionen_je_datei", cx) {
+        let keys: Vec<String> = t.map.keys().cloned().collect();
+        for k in keys {
+            if let Some(v) = t.string(&k, cx) {
+                out.insert(k, v);
+            }
+        }
+        t.finish(cx);
+    }
+    out
+}
+
 /// Translates a Decomp address (`va:X`, `rel:S:O`) or an already canonical one.
 fn translate_address(text: &str) -> Option<Address> {
     if let Some(hex) = text.strip_prefix("va:") {
@@ -700,7 +715,8 @@ fn convert_config(table: toml::Table, cx: &mut Ctx) -> Result<WorkspaceConfig, M
             let mut r = RebuildConfig {
                 compiler: n.string("compiler", cx),
                 flags: n.string("optionen", cx),
-                link: None,
+                file_flags: file_flags(&mut n, cx),
+                ..RebuildConfig::default()
             };
             if let Some(mut l) = n.table("linken", cx) {
                 r.link = Some(LinkConfig {
@@ -708,6 +724,8 @@ fn convert_config(table: toml::Table, cx: &mut Ctx) -> Result<WorkspaceConfig, M
                     libraries: l.strings("bibliotheken", cx),
                     flags: l.string("optionen", cx),
                     startup: l.string("start", cx),
+                    insert: l.boolean("einsetzen", cx),
+                    stack: l.uint("stapel", cx).and_then(|v| u32::try_from(v).ok()),
                 });
                 l.finish(cx);
             }
@@ -856,6 +874,27 @@ optionen = "-ox"
 [nachbau.linken]
 profil = "watcom-10.6"
 "#;
+
+    #[test]
+    fn migrate_maps_file_flags_insert_stack() {
+        let config = format!(
+            "{MINIMAL}einsetzen = true
+stapel = 8192
+
+[nachbau.optionen_je_datei]
+\"MAIN.C\" = \"-od\"
+"
+        );
+        let (from, to) = setup(&config, None);
+        let report = migrate_decomp(from.path(), to.path()).unwrap();
+        assert!(report.unmapped.is_empty(), "{:?}", report.unmapped);
+        let ws = Workspace::open(to.path()).unwrap();
+        let rebuild = ws.config.rebuild.unwrap();
+        assert_eq!(rebuild.file_flags["MAIN.C"], "-od");
+        let link = rebuild.link.unwrap();
+        assert_eq!(link.insert, Some(true));
+        assert_eq!(link.stack, Some(8192));
+    }
 
     fn setup(config: &str, symbols: Option<&str>) -> (tempfile::TempDir, tempfile::TempDir) {
         let from = tempfile::tempdir().unwrap();

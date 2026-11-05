@@ -174,6 +174,13 @@ enum SetupCommand {
         #[arg(long, value_name = "DIR")]
         plugins_dir: Option<PathBuf>,
     },
+    /// Register the directory of a compiler (`[toolchains]` in the user config).
+    Toolchain {
+        /// Compiler profile id, e.g. `watcom-9.5`.
+        profile: String,
+        /// Directory that holds the compiler.
+        dir: PathBuf,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -373,6 +380,9 @@ fn main() -> ExitCode {
             plugins_dir,
             cli.json,
         )),
+        Command::Setup {
+            what: SetupCommand::Toolchain { profile, dir },
+        } => finish(setup_toolchain(&profile, &dir, cli.json)),
     }
 }
 
@@ -488,6 +498,32 @@ fn setup_ghidra(
             "config": report.config_path.display().to_string(),
             "ghidra_kept": report.ghidra_kept,
             "jdk_kept": report.jdk_kept,
+        }),
+    );
+    print_summary(&response, json)
+}
+
+fn setup_toolchain(profile: &str, dir: &Path, json: bool) -> Result<(), FacadeError> {
+    let invalid = |e: String| FacadeError::Invalid(e);
+    decovery_toolchain::profile(profile).map_err(|e| invalid(e.to_string()))?;
+    if !dir.is_dir() {
+        return Err(invalid(format!("{} is not a directory", dir.display())));
+    }
+    let dir = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let config_path = decovery_facade::plugins::user_config_path().ok_or_else(|| {
+        invalid("cannot locate the user config dir (APPDATA / HOME unset)".into())
+    })?;
+    setup::write_toolchain_entry(&config_path, profile, &dir)
+        .map_err(|e| invalid(e.to_string()))?;
+    let response = Response::new(
+        format!(
+            "Toolchain `{profile}` registered in {}",
+            config_path.display()
+        ),
+        serde_json::json!({
+            "profile": profile,
+            "dir": dir.display().to_string(),
+            "config": config_path.display().to_string(),
         }),
     );
     print_summary(&response, json)

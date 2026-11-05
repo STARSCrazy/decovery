@@ -394,3 +394,47 @@ fn migrate_without_analysis_says_so_and_errors_exit_2() {
             .starts_with("error: ")
     );
 }
+
+#[test]
+fn setup_toolchain_writes_user_config() {
+    let home = tempfile::tempdir().unwrap();
+    let tools = tempfile::tempdir().unwrap();
+    let setup = |profile: &str, dir: &std::path::Path| {
+        Command::new(env!("CARGO_BIN_EXE_decovery"))
+            .args(["setup", "toolchain", profile])
+            .arg(dir)
+            .env("APPDATA", home.path())
+            .env("XDG_CONFIG_HOME", home.path())
+            .env("HOME", home.path())
+            .output()
+            .expect("run decovery")
+    };
+    let config = home.path().join("decovery").join("config.toml");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(
+        &config,
+        "schema = 1\n\n[plugins.ghidra]\ncommand = [\"py\"]\n",
+    )
+    .unwrap();
+    let out = setup("watcom-9.5", tools.path());
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let text = std::fs::read_to_string(&config).unwrap();
+    let value: toml::Table = text.parse().unwrap();
+    assert_eq!(value["schema"].as_integer(), Some(1));
+    assert_eq!(
+        value["plugins"]["ghidra"]["command"][0].as_str(),
+        Some("py")
+    );
+    let dir = value["toolchains"]["watcom-9.5"].as_str().unwrap();
+    assert_eq!(
+        std::path::Path::new(dir).canonicalize().unwrap(),
+        tools.path().canonicalize().unwrap()
+    );
+    let out = setup("no-such-profile", tools.path());
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8(out.stderr)
+            .unwrap()
+            .contains("no-such-profile")
+    );
+}

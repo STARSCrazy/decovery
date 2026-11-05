@@ -13,39 +13,13 @@
 //! An entry in the workspace's `decovery.toml` replaces the user entry of the same name as a whole.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use decovery_core::{Workspace, WorkspaceError};
-use serde::Deserialize;
+use decovery_core::{Workspace, read_user_config, read_user_config_file};
 
-pub use decovery_core::PluginConfig;
+pub use decovery_core::{PluginConfig, user_config_path};
 
 use crate::FacadeError;
-
-#[derive(Deserialize)]
-struct UserConfig {
-    #[serde(default)]
-    schema: Option<u32>,
-    #[serde(default)]
-    plugins: BTreeMap<String, PluginConfig>,
-}
-
-/// `%APPDATA%\decovery\config.toml` on Windows; elsewhere `$XDG_CONFIG_HOME/decovery/config.toml`, else
-/// `$HOME/.config/decovery/config.toml`. `None` when the variables are unset.
-pub fn user_config_path() -> Option<PathBuf> {
-    let base = if cfg!(windows) {
-        non_empty_var("APPDATA").map(PathBuf::from)
-    } else {
-        non_empty_var("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| non_empty_var("HOME").map(|home| Path::new(&home).join(".config")))
-    }?;
-    Some(base.join("decovery").join("config.toml"))
-}
-
-fn non_empty_var(name: &str) -> Option<std::ffi::OsString> {
-    std::env::var_os(name).filter(|v| !v.is_empty())
-}
 
 /// The plugins of the user config; empty when there is none or it cannot be read (see [`read_user_plugins`]
 /// for the error).
@@ -58,40 +32,12 @@ pub fn user_plugins() -> BTreeMap<String, PluginConfig> {
 
 /// The plugins of the user config; empty when the file does not exist.
 pub fn read_user_plugins() -> Result<BTreeMap<String, PluginConfig>, FacadeError> {
-    match user_config_path() {
-        Some(path) => read_plugins_file(&path),
-        None => Ok(BTreeMap::new()),
-    }
+    Ok(read_user_config()?.plugins)
 }
 
 /// The `[plugins.*]` tables of a user config file; empty when the file does not exist.
 pub fn read_plugins_file(path: &Path) -> Result<BTreeMap<String, PluginConfig>, FacadeError> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
-        Err(source) => {
-            return Err(WorkspaceError::Io {
-                path: path.to_path_buf(),
-                source,
-            }
-            .into());
-        }
-    };
-    let config: UserConfig = toml::from_str(&text).map_err(|source| WorkspaceError::Parse {
-        path: path.to_path_buf(),
-        source: Box::new(source),
-    })?;
-    if let Some(found) = config
-        .schema
-        .filter(|&s| s != decovery_core::workspace::SCHEMA)
-    {
-        return Err(WorkspaceError::Schema {
-            path: path.to_path_buf(),
-            found,
-        }
-        .into());
-    }
-    Ok(config.plugins)
+    Ok(read_user_config_file(path)?.plugins)
 }
 
 /// The configuration of plugin `name`: the workspace entry, else the user entry.
@@ -111,14 +57,6 @@ pub fn plugin_config(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn user_config_path_ends_in_decovery_config_toml() {
-        // The variables are set on every developer machine and CI runner.
-        let path = user_config_path().expect("config dir variables set");
-        assert!(path.ends_with(Path::new("decovery").join("config.toml")));
-        assert!(path.is_absolute());
-    }
 
     #[test]
     fn plugins_file_is_read_and_checked() {

@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "profiles/<id>.toml",
+  "type": "object",
+  "required": [
+    "schema", "id", "family", "language", "version", "bits", "object_format", "object_extension",
+    "runners", "command", "decoration"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": 1 },
+    "id": { "type": "string" },
+    "family": { "type": "string" },
+    "language": { "type": "string" },
+    "version": { "type": "string" },
+    "bits": { "enum": [16, 32] },
+    "object_format": { "enum": ["omf"] },
+    "object_extension": { "type": "string" },
+    "runners": { "type": "array", "items": { "type": "string" } },
+    "command": { "type": "string", "description": "Placeholders {flags} and {input}." },
+    "prelude": { "type": "array", "items": { "type": "string" } },
+    "decoration": {
+      "type": "object",
+      "required": ["function", "data"],
+      "additionalProperties": false,
+      "properties": {
+        "function": { "type": "string" },
+        "data": { "type": "string" }
+      }
+    },
+    "prologue": { "type": "array", "items": { "type": "integer", "minimum": 0, "maximum": 255 } },
+    "padding": { "type": "boolean" },
+    "fingerprint": { "type": "array", "items": { "type": "string" } },
+    "linker": {
+      "type": "object",
+      "required": ["command", "library_dir", "output"],
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "type": "string",
+          "description": "Placeholders {response} {flags} {library_dir} {startup} {objects} {output} {libraries}."
+        },
+        "library_dir": { "type": "string" },
+        "output": { "type": "string" }
+      }
+    },
+    "assembler": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "profile": { "type": "string" },
+        "command": { "type": "string" }
+      }
+    }
+  }
+}
