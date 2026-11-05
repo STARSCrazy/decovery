@@ -23,8 +23,6 @@ pub(crate) struct HeaderData<'a> {
     /// Entries of `@globals` (`reads|writes <address>[ <name>]`).
     pub globals: Vec<String>,
     pub rebuild: Option<&'a RebuildRecord>,
-    /// The analysis was made with other knowledge than the current one.
-    pub stale: bool,
 }
 
 /// The header text, ending with `\n */\n`; the body follows directly.
@@ -83,12 +81,6 @@ pub(crate) fn header(d: &HeaderData<'_>) -> String {
         .filter(|t| !t.is_empty())
     {
         lines.push(line("@evidence", evidence));
-    }
-    if d.stale {
-        lines.push(line(
-            "@analysis",
-            "stale: knowledge changed since analysis (run decovery analyze)",
-        ));
     }
     safe(&lines.join("\n")) + "\n */\n"
 }
@@ -326,7 +318,6 @@ mod tests {
             strings: Vec::new(),
             globals: Vec::new(),
             rebuild: None,
-            stale: false,
         }
     }
 
@@ -537,18 +528,6 @@ mod tests {
             "unknown result (main.c, 2026-01-02)"
         );
         assert_eq!(rebuild_line(None), "not tried");
-    }
-
-    #[test]
-    fn stale_analysis_line() {
-        let f = AnalyzedFunction::new(flat(0x10200), flat(0x1023F), 64);
-        let mut d = data(&f, None);
-        d.stale = true;
-        assert!(header(&d).ends_with(
-            " * @rebuild    not tried\n \
-             * @analysis   stale: knowledge changed since analysis (run decovery analyze)\n \
-             */\n"
-        ));
     }
 
     #[test]

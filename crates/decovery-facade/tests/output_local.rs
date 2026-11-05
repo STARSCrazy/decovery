@@ -82,8 +82,10 @@ const SOURCES: &[(&str, &str)] = &[
     ("engine", "analysis"),
 ];
 
+/// English key of a Decomp header key; `None` for the runtime keys phase 1 does not generate.
 fn key_en(key: &str) -> Option<&'static str> {
     Some(match key {
+        "@laufzeit" | "@beobachtet" => return None,
         "@adresse" => "@address",
         "@name" => "@name",
         "@signatur" => "@signature",
@@ -95,7 +97,7 @@ fn key_en(key: &str) -> Option<&'static str> {
         "@nachbau" => "@rebuild",
         "@kommentar" => "@comment",
         "@beleg" => "@evidence",
-        _ => return None,
+        other => panic!("unknown Decomp header key {other}"),
     })
 }
 

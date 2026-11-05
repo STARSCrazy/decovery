@@ -119,8 +119,18 @@ fn body(cx: &Context<'_>, f: &AnalyzedFunction) -> Result<String, FacadeError> {
     }
 }
 
+/// `<address>_<name>.c`; a name that is no C identifier is replaced by the default name, so knowledge text
+/// never reaches the file system as a path.
 fn file_name(start: Address, name: &str) -> String {
-    format!("{}_{name}.c", address_stem(start))
+    if super::is_identifier(name) {
+        format!("{}_{name}.c", address_stem(start))
+    } else {
+        format!(
+            "{}_{}.c",
+            address_stem(start),
+            crate::session::default_name(start)
+        )
+    }
 }
 
 fn address_stem(start: Address) -> String {

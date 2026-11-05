@@ -69,12 +69,8 @@ fn address_of_name(session: &Session, name: &str) -> Result<Address, FacadeError
     {
         return Ok(f.start);
     }
-    if let Some(hex) = name.strip_prefix("fun_")
-        && hex.len() == 8
-        && hex.bytes().all(|b| b.is_ascii_hexdigit())
-        && let Ok(a) = u32::from_str_radix(hex, 16)
-    {
-        return Ok(Address::Flat(a));
+    if let Some(a) = crate::session::parse_default_name(name) {
+        return Ok(a);
     }
     Err(FacadeError::NotFound(name.to_string()))
 }
