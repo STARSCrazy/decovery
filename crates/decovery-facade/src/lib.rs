@@ -4,7 +4,9 @@ mod error;
 pub mod output;
 pub mod program;
 mod resolve;
+pub mod response;
 mod session;
+pub mod tools;
 
 pub use error::FacadeError;
 pub use output::{
@@ -12,4 +14,6 @@ pub use output::{
     write_affected, write_all,
 };
 pub use resolve::{Resolved, resolve};
+pub use response::{Budget, Handle, Response, store_handle};
 pub use session::{DisplayName, Session};
+pub use tools::{detail, show};

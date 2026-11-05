@@ -44,3 +44,124 @@ fn compare_requires_object_and_function() {
         "got {stderr:?}"
     );
 }
+
+const CONFIG: &str = r#"schema = 1
+
+[target]
+file = "t.exe"
+sha256 = "aa"
+format = "flat32"
+processor = "x86"
+
+[[target.segment]]
+name = "code"
+start = "flat:00010000"
+length = 4096
+file_offset = 512
+file_length = 4096
+permissions = "rx"
+"#;
+
+const SYMBOLS: &str = r#"schema = 1
+
+[[symbol]]
+address = "flat:00010010"
+kind = "function"
+name = "alpha"
+source = "human"
+confidence = "confirmed"
+"#;
+
+/// Workspace with one analyzed function `alpha`.
+fn workspace() -> tempfile::TempDir {
+    use decovery_core::{Address, Analysis, AnalyzedFunction, Provider, Workspace, knowledge_hash};
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("knowledge")).unwrap();
+    std::fs::write(root.join("decovery.toml"), CONFIG).unwrap();
+    std::fs::write(root.join("knowledge/symbols.toml"), SYMBOLS).unwrap();
+    let lock = Workspace::open(root)
+        .unwrap()
+        .lock(std::time::Duration::ZERO)
+        .unwrap();
+    let mut analysis = Analysis::new(
+        Provider::new("ghidra", "11.3"),
+        "aa",
+        knowledge_hash(root).unwrap(),
+        "2026-11-05",
+    );
+    analysis.functions = vec![AnalyzedFunction::new(
+        Address::Flat(0x10010),
+        Address::Flat(0x100FF),
+        240,
+    )];
+    analysis.save(root, &lock).unwrap();
+    Analysis::save_decompiled(
+        root,
+        Address::Flat(0x10010),
+        "\nint alpha(void) { return 0; }\n",
+        &lock,
+    )
+    .unwrap();
+    drop(lock);
+    dir
+}
+
+fn run(dir: &tempfile::TempDir, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_decovery"))
+        .args(args)
+        .arg("--workspace")
+        .arg(dir.path())
+        .output()
+        .expect("run decovery")
+}
+
+#[test]
+fn show_unknown_function_exits_2() {
+    let dir = workspace();
+    let out = run(&dir, &["show", "nosuch"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    let stderr = String::from_utf8(out.stderr).expect("utf-8");
+    assert!(
+        stderr.contains("no function or symbol named nosuch"),
+        "got {stderr:?}"
+    );
+}
+
+#[test]
+fn show_prints_text_and_json_envelope() {
+    let dir = workspace();
+    let out = run(&dir, &["show", "alpha"]);
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).expect("utf-8");
+    assert!(
+        text.starts_with("/* @address    flat:00010010"),
+        "got {text:?}"
+    );
+    assert!(
+        text.ends_with(" */\n\nint alpha(void) { return 0; }\n"),
+        "got {text:?}"
+    );
+
+    let out = run(&dir, &["show", "alpha", "--json"]);
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(v["data"]["text"], text.as_str());
+    assert_eq!(v["data"]["name"], "alpha");
+    assert!(v["handles"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn detail_pages_a_handle() {
+    let dir = workspace();
+    let handle = decovery_facade::store_handle(dir.path(), "function-text", "0123456789").unwrap();
+    let out = run(
+        &dir,
+        &["detail", &handle.id, "--offset", "2", "--limit", "3"],
+    );
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "234");
+    let out = run(&dir, &["detail", "h_000000000000"]);
+    assert_eq!(out.status.code(), Some(2));
+}
