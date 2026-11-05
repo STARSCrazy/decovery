@@ -563,3 +563,26 @@ fn annotate_after_analyze_marks_output_stale() {
     let status = read_json(&root.join("output/status.json"));
     assert_eq!(status["analysis_stale"], false);
 }
+
+#[test]
+fn selection_run_never_prunes() {
+    let Some(python) = python() else {
+        eprintln!("SKIP: no Python (set DECOVERY_PYTHON or put `python` on PATH)");
+        return;
+    };
+    // The workspace holds a body for flat:00010300, a function the fake export does not return.
+    let dir = workspace(Some(&python));
+    let root = dir.path();
+    assert!(body(root, 0x10300).is_some());
+    let (data, _) = run(root, Some(vec!["alpha"]));
+    assert_eq!(data["decompiled"], 1);
+    assert_eq!(
+        body(root, 0x10300).as_deref(),
+        Some("void old(void) {}\n"),
+        "a selection run keeps every other body"
+    );
+    assert!(body(root, 0x10010).unwrap().contains("/* run 1 */"));
+    // A full run prunes it.
+    run(root, None);
+    assert_eq!(body(root, 0x10300), None);
+}

@@ -396,29 +396,28 @@ fn show(workspace: &Path, target: &str, json: bool) -> Result<(), FacadeError> {
 
 fn annotate(workspace: &Path, request: &Annotation, json: bool) -> Result<(), FacadeError> {
     let response = decovery_facade::annotate(workspace, request)?;
-    if json {
-        return print_json(&response);
-    }
-    println!("{}", response.summary);
-    for warning in response.data["warnings"].as_array().into_iter().flatten() {
-        if let Some(text) = warning.as_str() {
-            eprintln!("warning: {text}");
-        }
-    }
-    Ok(())
+    print_summary(&response, json)
 }
 
 fn analyze(workspace: &Path, options: &AnalyzeOptions, json: bool) -> Result<(), FacadeError> {
     let progress = |p: Progress| {
-        let message = p.message.unwrap_or_default();
+        let message = p
+            .message
+            .filter(|m| !m.trim().is_empty())
+            .unwrap_or_else(|| "working …".to_string());
         match p.total {
             Some(total) => eprintln!("{}/{total} {message}", p.done),
             None => eprintln!("{message}"),
         }
     };
     let response = decovery_facade::analyze(workspace, options, &progress)?;
+    print_summary(&response, json)
+}
+
+/// The JSON envelope, or the summary on stdout and `data.warnings` on stderr.
+fn print_summary(response: &Response, json: bool) -> Result<(), FacadeError> {
     if json {
-        return print_json(&response);
+        return print_json(response);
     }
     println!("{}", response.summary);
     for warning in response.data["warnings"].as_array().into_iter().flatten() {

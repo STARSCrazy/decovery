@@ -246,10 +246,7 @@ fn drive(host: &PluginHost, r: &RunRequest<'_>) -> Result<Outcome, FacadeError> 
     if let Some(cc) = &r.calling_convention {
         options.insert("calling_convention".into(), json!(cc));
     }
-    let open_sink = |p: Progress| {
-        let message = p.message.clone().or_else(|| Some("analyzing".into()));
-        (r.progress)(Progress::new(p.done, p.total, message));
-    };
+    let open_sink = labelled(r.progress, "analyzing");
     call(
         "analyzer/open",
         json!({
@@ -263,8 +260,13 @@ fn drive(host: &PluginHost, r: &RunRequest<'_>) -> Result<Outcome, FacadeError> 
     )?;
 
     (r.progress)(stage("applying knowledge"));
-    let applied = call("analyzer/apply", r.apply.clone(), STEP_TIMEOUT, r.progress)?;
-    let warnings: Vec<String> = applied["warnings"]
+    let applied = call(
+        "analyzer/apply",
+        r.apply.clone(),
+        STEP_TIMEOUT,
+        &labelled(r.progress, "applying knowledge"),
+    )?;
+    let mut warnings: Vec<String> = applied["warnings"]
         .as_array()
         .into_iter()
         .flatten()
@@ -277,7 +279,7 @@ fn drive(host: &PluginHost, r: &RunRequest<'_>) -> Result<Outcome, FacadeError> 
         "analyzer/export",
         json!({"out_path": path_text(&out_path)}),
         STEP_TIMEOUT,
-        r.progress,
+        &labelled(r.progress, "exporting analysis"),
     )?;
     let export = read_export(name, &out_path, &exported)?;
 
@@ -304,8 +306,12 @@ fn drive(host: &PluginHost, r: &RunRequest<'_>) -> Result<Outcome, FacadeError> 
             Some("decompiling".into()),
         ));
         let sink = |p: Progress| {
-            let message = p.message.clone().or_else(|| Some("decompiling".into()));
-            (r.progress)(Progress::new(offset + p.done, Some(total), message));
+            let message = p
+                .message
+                .clone()
+                .filter(|m| !m.is_empty())
+                .unwrap_or_else(|| "decompiling".into());
+            (r.progress)(Progress::new(offset + p.done, Some(total), Some(message)));
         };
         let timeout = PER_FUNCTION * (batch.len() as u32) + PER_FUNCTION;
         let result = call(
@@ -320,7 +326,7 @@ fn drive(host: &PluginHost, r: &RunRequest<'_>) -> Result<Outcome, FacadeError> 
         let entries: Vec<DecompileEntry> = serde_json::from_value(result).map_err(|e| {
             FacadeError::Plugin(format!("{name}: bad decompiler/decompile result: {e}"))
         })?;
-        decompiled.extend(collect_batch(name, batch, entries)?);
+        decompiled.extend(collect_batch(name, batch, entries, &mut warnings)?);
     }
     (r.progress)(Progress::new(total, Some(total), Some("decompiled".into())));
     Ok(Outcome {
@@ -337,7 +343,9 @@ fn collect_batch(
     name: &str,
     batch: &[Address],
     entries: Vec<DecompileEntry>,
+    warnings: &mut Vec<String>,
 ) -> Result<Vec<Decompiled>, FacadeError> {
+    let requested: HashSet<Address> = batch.iter().copied().collect();
     let mut by_address: HashMap<Address, DecompileEntry> = HashMap::new();
     for entry in entries {
         let at = entry.address.parse::<Address>().map_err(|e| {
@@ -346,7 +354,17 @@ fn collect_batch(
                 entry.address
             ))
         })?;
-        by_address.insert(at, entry);
+        if !requested.contains(&at) {
+            warnings.push(format!(
+                "{name}: decompile result for {at}, which was not requested; ignored"
+            ));
+        } else if let std::collections::hash_map::Entry::Vacant(slot) = by_address.entry(at) {
+            slot.insert(entry);
+        } else {
+            warnings.push(format!(
+                "{name}: duplicate decompile result for {at}; the first is used"
+            ));
+        }
     }
     let mut out = Vec::with_capacity(batch.len());
     for &start in batch {
@@ -516,17 +534,17 @@ fn store(
             None => old_errors.get(&f.start).cloned().flatten(),
         };
     }
-    analysis.save(root, lock)?;
+    // Bodies first: an I/O failure part-way leaves the old analysis.json with old or new bodies, never the new
+    // analysis with old bodies.
     for d in &outcome.decompiled {
         Analysis::save_decompiled(root, d.start, &d.body, lock)?;
     }
-    // Bodies of functions that are gone; with a selection over an analysis of another target (or none)
-    // only the freshly decompiled bodies are this target's.
-    let keep: HashSet<Address> = match (&outcome.selection, old) {
-        (Some(selected), None) => selected.iter().copied().collect(),
-        _ => analysis.functions.iter().map(|f| f.start).collect(),
-    };
-    Analysis::remove_decompiled_except(root, &keep, lock)?;
+    analysis.save(root, lock)?;
+    // R9: a full run removes the bodies of functions that are gone; a selection run never prunes.
+    if outcome.selection.is_none() {
+        let keep: HashSet<Address> = analysis.functions.iter().map(|f| f.start).collect();
+        Analysis::remove_decompiled_except(root, &keep, lock)?;
+    }
 
     progress(stage("writing output"));
     let session = Session::open(root)?;
@@ -690,7 +708,7 @@ fn describe(program: &Program, blob: impl Fn(&[u8]) -> Value) -> Value {
 /// Inline below the limit; else the file `<dir>/<blake3>` (`dir` absolute) or `cache/blobs/<blake3>`.
 fn region_blob(data: &[u8], dir: Option<&Path>) -> Value {
     if let Ok(blob) = Blob::inline(data) {
-        return serde_json::to_value(blob).unwrap_or(Value::Null);
+        return blob.to_json();
     }
     let hash = blake3_hex(data);
     let path = match dir {
@@ -707,6 +725,18 @@ fn blake3_hex(bytes: &[u8]) -> String {
 /// Paths below the workspace root, which was checked to be UTF-8.
 fn path_text(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+/// Forwards plugin progress, filling in `label` when the plugin sends no message.
+fn labelled<'a>(progress: &'a dyn Fn(Progress), label: &'a str) -> impl Fn(Progress) + 'a {
+    move |p: Progress| {
+        let message = p
+            .message
+            .clone()
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| label.to_string());
+        progress(Progress::new(p.done, p.total, Some(message)));
+    }
 }
 
 fn stage(message: &str) -> Progress {
@@ -761,6 +791,38 @@ mod tests {
             failure_body("gone", &[]),
             "/* decompilation failed: gone */\n/* Disassembly:\n(not available)\n*/\n"
         );
+    }
+
+    #[test]
+    fn unexpected_decompile_entries_become_warnings() {
+        let entry = |address: &str, error: &str| DecompileEntry {
+            address: address.into(),
+            path: None,
+            error: Some(error.into()),
+            disassembly: Vec::new(),
+        };
+        let batch = [Address::Flat(0x10000), Address::Flat(0x10100)];
+        let mut warnings = Vec::new();
+        let out = collect_batch(
+            "fake",
+            &batch,
+            vec![
+                entry("flat:00010000", "first"),
+                entry("flat:00010000", "second"),
+                entry("flat:00020000", "stray"),
+            ],
+            &mut warnings,
+        )
+        .unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].error.as_deref(), Some("first"));
+        assert_eq!(
+            out[1].error.as_deref(),
+            Some("the plugin returned no result")
+        );
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings[0].contains("duplicate") && warnings[0].contains("flat:00010000"));
+        assert!(warnings[1].contains("not requested") && warnings[1].contains("flat:00020000"));
     }
 
     #[test]

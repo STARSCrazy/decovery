@@ -141,6 +141,16 @@ impl Blob {
         }
         Ok(Blob::File { path, blake3 })
     }
+
+    /// The wire form as a JSON value (same as serializing; a non-UTF-8 path is converted lossily).
+    pub fn to_json(&self) -> serde_json::Value {
+        match self {
+            Blob::Inline(b) => serde_json::json!({"inline_base64": base64_encode(b)}),
+            Blob::File { path, blake3 } => serde_json::json!({
+                "blob": {"path": path.to_string_lossy(), "blake3": blake3}
+            }),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -264,6 +274,7 @@ mod tests {
     fn blob_wire_forms() {
         let v = serde_json::to_value(Blob::inline(b"Ma").unwrap()).unwrap();
         assert_eq!(v, serde_json::json!({"inline_base64": "TWE="}));
+        assert_eq!(Blob::inline(b"Ma").unwrap().to_json(), v);
         assert_eq!(
             serde_json::from_value::<Blob>(v).unwrap(),
             Blob::Inline(b"Ma".to_vec())
@@ -273,6 +284,7 @@ mod tests {
         let path = std::env::temp_dir().join("x.bin");
         let blob = Blob::file(path.clone(), hash.clone()).unwrap();
         let v = serde_json::to_value(&blob).unwrap();
+        assert_eq!(blob.to_json(), v);
         assert_eq!(v["blob"]["blake3"], hash);
         assert_eq!(serde_json::from_value::<Blob>(v).unwrap(), blob);
 

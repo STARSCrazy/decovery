@@ -1,7 +1,7 @@
 //! `analyze` with the real Ghidra plugin against a migrated private Decomp workspace. Run with
 //! `cargo test -p decovery-facade --test analyze_local -- --ignored`; needs `DECOVERY_LOCAL_WORKSPACE`,
-//! `GHIDRA_INSTALL_DIR` and either a `[plugins.ghidra]` user config (`decovery setup ghidra`) or
-//! `DECOVERY_PYTHON` (a Python with pyghidra). Body differences go to `$DECOVERY_GOLDEN_DIR/analyze-phase-1.md`.
+//! `GHIDRA_INSTALL_DIR` (environment or the plugin config's env) and either a `[plugins.ghidra]` user config
+//! (`decovery setup ghidra`) or `DECOVERY_PYTHON` (a Python with pyghidra); fails when they are missing. Body differences go to `$DECOVERY_GOLDEN_DIR/analyze-phase-1.md`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -57,16 +57,15 @@ fn ghidra_bodies_match_decomp() {
     let from = PathBuf::from(
         std::env::var_os("DECOVERY_LOCAL_WORKSPACE").expect("DECOVERY_LOCAL_WORKSPACE is not set"),
     );
-    if std::env::var_os("GHIDRA_INSTALL_DIR").is_none() {
-        eprintln!("SKIP: GHIDRA_INSTALL_DIR is not set");
-        return;
-    }
-    let Some(plugin) = ghidra_plugin() else {
-        eprintln!(
-            "SKIP: no Ghidra plugin configured (run `decovery setup ghidra` or set DECOVERY_PYTHON)"
-        );
-        return;
-    };
+    // Explicitly requested run: missing prerequisites fail instead of passing silently (R28).
+    let plugin = ghidra_plugin().expect(
+        "no Ghidra plugin configured: run `decovery setup ghidra` or set DECOVERY_PYTHON (a Python with pyghidra)",
+    );
+    assert!(
+        std::env::var_os("GHIDRA_INSTALL_DIR").is_some()
+            || plugin.env.contains_key("GHIDRA_INSTALL_DIR"),
+        "GHIDRA_INSTALL_DIR is set neither in the environment nor in the plugin config's env"
+    );
     let to = tempfile::tempdir().unwrap();
     let root = to.path();
     migrate_decomp(&from, root).unwrap();
