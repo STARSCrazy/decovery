@@ -22,6 +22,8 @@ pub enum RebuildResult {
     Differs,
     Error,
     /// A value this version does not know; kept so the record is not lost.
+    ///
+    /// Not written back; writers refuse it.
     #[serde(other)]
     Other,
 }
@@ -99,6 +101,8 @@ pub enum ReferenceKind {
     Jump,
     Call,
     /// A value this version does not know; kept so the record is not lost.
+    ///
+    /// Not written back; writers refuse it.
     #[serde(other)]
     Other,
 }
