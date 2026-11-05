@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import os
 import sys
 import threading
 import time
@@ -120,7 +121,10 @@ class Plugin:
     def serve(self, stdin: io.TextIOBase | None = None, stdout: io.TextIOBase | None = None) -> None:
         """Blocking stdio loop. Returns after `shutdown` or end of input."""
         if stdin is None:
-            stdin = io.TextIOWrapper(sys.stdin.buffer, encoding="utf-8")
+            # Read a duplicate of fd 0: the Windows C runtime holds a per-fd lock during a blocking read, and native
+            # code in a handler that touches fd 0 (JNI_CreateJavaVM calls `_setmode` on it) would otherwise wait
+            # for the next request line, which the host only sends after the answer.
+            stdin = io.TextIOWrapper(io.FileIO(os.dup(sys.stdin.fileno()), "rb"), encoding="utf-8")
         if stdout is None:
             stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", newline="\n", write_through=True)
         _Session(self, stdin, stdout).run()
