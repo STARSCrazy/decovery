@@ -63,13 +63,7 @@ pub(super) fn plan_trees(
     if rebuild.is_dir() {
         copies.add(rebuild, "src");
     }
-    if from.join("ausgabe").exists() {
-        skip(
-            cx,
-            "ausgabe",
-            "generated output; regenerate it in the new workspace",
-        );
-    }
+    super::analysis_import::plan_skips(from, cx)?;
     let cache = from.join("cache");
     if !cache.is_dir() {
         return Ok(());

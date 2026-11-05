@@ -4,6 +4,7 @@
 //! silently. Free text (comments, evidence, notes) is copied unchanged and counted in
 //! [`MigrationReport::untranslated_texts`].
 
+mod analysis_import;
 mod knowledge;
 mod layout;
 
@@ -36,6 +37,8 @@ pub struct MigrationReport {
     pub untranslated_texts: u32,
     /// Decomp files and folders that were deliberately not migrated, each as `path: reason`.
     pub skipped: Vec<String>,
+    /// Functions imported from Decomp's `ausgabe/` into `knowledge/analysis/` (0 when there is none).
+    pub analysis_functions: u32,
 }
 
 /// Errors that stop a migration.
@@ -60,6 +63,8 @@ pub enum MigrateError {
     UnsupportedFormat(String),
     #[error("{} already contains a workspace", .0.display())]
     TargetExists(PathBuf),
+    #[error("{0}")]
+    Workspace(#[from] crate::workspace::WorkspaceError),
     #[error("cannot write {}: {source}", path.display())]
     Serialize {
         path: PathBuf,
@@ -388,6 +393,7 @@ pub fn migrate_decomp(from: &Path, to: &Path) -> Result<MigrationReport, Migrate
         }
     }
     layout::plan_trees(from, &mut copies, &mut cx)?;
+    let analysis = analysis_import::read_output(from, &mut cx)?;
 
     report_leftover_files(from, &mut cx)?;
 
@@ -430,11 +436,16 @@ pub fn migrate_decomp(from: &Path, to: &Path) -> Result<MigrationReport, Migrate
         layout::copy_item(&source, &to.join(&rel))?;
         converted.push(PathBuf::from(rel));
     }
+    let analysis_functions = match analysis {
+        Some(imported) => imported.save(to, &config.target.sha256)?,
+        None => 0,
+    };
     Ok(MigrationReport {
         converted,
         unmapped: cx.unmapped.into_iter().collect(),
         untranslated_texts: cx.texts,
         skipped: cx.skipped.into_iter().collect(),
+        analysis_functions,
     })
 }
 
@@ -1054,7 +1065,6 @@ foo = 1
         assert_eq!(
             names,
             [
-                "ausgabe",
                 "cache/ghidra",
                 "cache/nachbau/obj/*.json",
                 "cache/nachbau/versuche.jsonl"
