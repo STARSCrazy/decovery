@@ -66,6 +66,10 @@ class PharLapTest(unittest.TestCase):
         self.assertIn("no end after 0.3 s", str(caught.exception))
         self.assertTrue(machine.spent)
 
+    def test_tiny_time_limit_still_times_out(self):
+        with self.assertRaises(EmulatorTimeout):
+            self.emu(asm.loop_program(), timeout_s=1e-9).run()
+
     def test_stop_without_exit_is_an_error(self):
         emu = self.emu(asm.halt_program(), timeout_s=30)
         machine = self.pharlap.Machine(emu.p3)

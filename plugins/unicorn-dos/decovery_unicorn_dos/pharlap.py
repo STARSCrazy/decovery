@@ -330,7 +330,7 @@ class PharLapEmu:
         started = time.perf_counter()
         self.begin(machine)
         try:
-            self.execute(self.p3.eip, int(self.timeout_s * 1_000_000))
+            self.execute(self.p3.eip, max(1, int(self.timeout_s * 1_000_000)))  # 0 would mean no limit
         finally:
             self.finish()
         elapsed = time.perf_counter() - started

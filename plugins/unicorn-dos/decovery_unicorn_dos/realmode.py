@@ -7,7 +7,8 @@ Memory (1 MiB + 64 KiB, segment:offset as on a PC):
     ENV_SEG     environment block (own memory block)
     PSP_SEG     PSP, followed by the program (MZ load module with relocations applied, or the COM image at PSP:100)
     ...A000     memory blocks (MCB chain from FIRST_MCB) for AH=48h/49h/4Ah
-    STUB_SEG    `int nn; iret` per vector: a program that chains to the previous vector reaches the host there
+    STUB_SEG    `int nn; retf 2` per vector (8 bytes each): a program that chains to the previous vector reaches
+                the host there, and the flags the host sets (CF, ZF) reach the caller, as DOS returns them
 
 A software interrupt whose vector the program set (AH=25h or a direct write) is delivered to the program (FLAGS, CS
 and IP pushed); every other one is served here. Any service the emulation does not know ends the run with an
@@ -29,6 +30,7 @@ from .services import ZERO, DosServices, Regs
 MEMORY_SIZE = 0x110000
 PAGE = 0x1000
 STUB_SEG = 0xF000
+STUB_SIZE = 8  # bytes per vector in the stub segment
 ENV_SEG = 0x0080
 PSP_SEG = 0x0100
 FIRST_MCB = ENV_SEG - 1
@@ -115,8 +117,9 @@ class RealModeMachine:
         self.runs = 0
         memory = bytearray(MEMORY_SIZE)
         for n in range(256):
-            struct.pack_into("<HH", memory, 4 * n, 4 * n, STUB_SEG)
-            memory[(STUB_SEG << 4) + 4 * n : (STUB_SEG << 4) + 4 * n + 4] = bytes([0xCD, n, 0xCF, 0x90])
+            struct.pack_into("<HH", memory, 4 * n, STUB_SIZE * n, STUB_SEG)
+            stub = (STUB_SEG << 4) + STUB_SIZE * n
+            memory[stub : stub + STUB_SIZE] = bytes([0xCD, n, 0xCA, 0x02, 0x00]).ljust(STUB_SIZE, b"\x90")
         struct.pack_into("<BH", memory, 0x449, 3, 80)  # BIOS: video mode 3, 80 columns
 
         # memory blocks: environment, program, rest free
@@ -377,7 +380,7 @@ class RealModeEmu:
         started = time.perf_counter()
         self.begin(machine)
         try:
-            self.execute(int(self.timeout_s * 1_000_000))
+            self.execute(max(1, int(self.timeout_s * 1_000_000)))  # 0 would mean no limit
         finally:
             self.finish()
         elapsed = time.perf_counter() - started
@@ -430,7 +433,7 @@ class RealModeEmu:
             self.mu.mem_write(0x46C, struct.pack("<I", self._ticks()))
             r = self.regs
             vector = struct.unpack("<HH", r.read_linear(4 * number, 4))
-            if r.get("CS") & 0xFFFF != STUB_SEG and vector != (4 * number, STUB_SEG):
+            if r.get("CS") & 0xFFFF != STUB_SEG and vector != (STUB_SIZE * number, STUB_SEG):
                 self._count(f"{number:02X}/program")
                 self._deliver(*vector)
                 return
