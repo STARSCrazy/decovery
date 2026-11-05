@@ -47,7 +47,9 @@ No other differences; no fix to decovery was needed.
 
 ## Analysis with Ghidra
 
-`analyze_local::ghidra_bodies_match_decomp`: not run — Ghidra not installed on the dev machine (setup ghidra
-pending approval).
+`analyze_local::ghidra_bodies_match_decomp` on the first target, with Ghidra 12.1.4 installed by
+`decovery setup ghidra`: `analyze` analysed and decompiled all 675 functions, none failed (99 s). Function
+ranges and caller/callee sets equal Decomp's analysis; the first 50 pseudo-C bodies and body sizes are
+identical. Real-mode (16-bit) targets have not been run through Ghidra yet.
 
 The detailed list with function names and addresses is kept privately (`$DECOVERY_GOLDEN_DIR/parity-phase-1.md`).
