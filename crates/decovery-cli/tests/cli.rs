@@ -165,3 +165,48 @@ fn detail_pages_a_handle() {
     let out = run(&dir, &["detail", "h_000000000000"]);
     assert_eq!(out.status.code(), Some(2));
 }
+
+#[test]
+fn status_prints_counts_and_json() {
+    let dir = workspace();
+    let out = run(&dir, &["status"]);
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        text.starts_with("1/1 functions named (1 confirmed, 0 assumed)\n"),
+        "got {text:?}"
+    );
+    assert!(
+        text.contains("next: rebuild alpha: decovery show alpha\n"),
+        "got {text:?}"
+    );
+    let out = run(&dir, &["status", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(v["data"]["named"], 1);
+}
+
+#[test]
+fn find_prints_rows_and_rejects_bad_values() {
+    let dir = workspace();
+    let out = run(
+        &dir,
+        &["find", "functions", "--filter", "named", "--sort", "size"],
+    );
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "1 functions\nflat:00010010\talpha\t240\t0\tconfirmed\tnot-tried\n"
+    );
+    let out = run(&dir, &["find", "names", "AL*"]);
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "1 names\nflat:00010010\talpha\n"
+    );
+    let out = run(&dir, &["find", "functions", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(v["data"]["total"], 1);
+    let out = run(&dir, &["find", "functions", "--filter", "nonsense"]);
+    assert_eq!(out.status.code(), Some(2));
+    let out = run(&dir, &["find", "xrefs", "nosuch"]);
+    assert_eq!(out.status.code(), Some(2));
+}
