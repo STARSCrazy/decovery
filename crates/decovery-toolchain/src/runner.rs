@@ -12,6 +12,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
+use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant, SystemTime};
 
 use decovery_core::{PluginConfig, UserConfig, Workspace, plugin_config};
@@ -491,6 +492,7 @@ fn native_job(
     let mut env: BTreeMap<String, String> = BTreeMap::new();
     let mut stdout = String::new();
     let mut exit_code = 0;
+    let mut incomplete = false;
     for line in &job.commands {
         if let Some((name, value)) = parse_set(line) {
             env.insert(name.to_string(), map_token(value, &request.mounts));
@@ -503,15 +505,17 @@ fn native_job(
         let Some((program, args)) = tokens.split_first() else {
             continue;
         };
-        let mut child = match Command::new(program)
+        let mut command = Command::new(program);
+        command
             .args(args)
             .envs(&env)
             .current_dir(cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-        {
+            .stderr(Stdio::piped());
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        let mut child = match command.spawn() {
             Ok(child) => child,
             Err(e) => return Ok(failed(format!("cannot start {program}: {e}"), stdout)),
         };
@@ -526,18 +530,22 @@ fn native_job(
             match child.try_wait() {
                 Ok(Some(status)) => break Some(status),
                 Ok(None) => {}
-                Err(e) => return Ok(failed(format!("cannot wait for {program}: {e}"), stdout)),
+                Err(e) => {
+                    kill_tree(&mut child);
+                    return Ok(failed(format!("cannot wait for {program}: {e}"), stdout));
+                }
             }
             if cancelled() || Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
+                kill_tree(&mut child);
                 break None;
             }
             std::thread::sleep(Duration::from_millis(10));
         };
+        let grace = Instant::now() + READER_GRACE;
         for reader in readers {
-            if let Ok(bytes) = reader.join() {
-                stdout.push_str(&String::from_utf8_lossy(&bytes));
+            match reader.recv_timeout(grace.saturating_duration_since(Instant::now())) {
+                Ok(bytes) => stdout.push_str(&String::from_utf8_lossy(&bytes)),
+                Err(_) => incomplete = true,
             }
         }
         if cancelled() {
@@ -549,8 +557,13 @@ fn native_job(
                 exit_code: None,
                 stdout,
                 message: Some(format!(
-                    "{program} did not end within {} s",
-                    request.timeout.as_secs_f64()
+                    "{program} did not end within {} s{}",
+                    request.timeout.as_secs_f64(),
+                    if incomplete {
+                        "; output may be incomplete"
+                    } else {
+                        ""
+                    }
                 )),
             });
         };
@@ -563,16 +576,45 @@ fn native_job(
         status: JobStatus::Done,
         exit_code: Some(exit_code),
         stdout,
-        message: None,
+        message: incomplete.then(|| "output may be incomplete".to_string()),
     })
 }
 
-fn spawn_reader(mut stream: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
+/// Ends the child and its descendants (they inherit the output pipes), then reaps the child.
+fn kill_tree(child: &mut std::process::Child) {
+    let pid = child.id().to_string();
+    let mut killer = if cfg!(windows) {
+        let mut c = Command::new("taskkill");
+        c.args(["/PID", &pid, "/T", "/F"]);
+        c
+    } else {
+        let mut c = Command::new("kill");
+        c.args(["-KILL", &format!("-{pid}")]);
+        c
+    };
+    let killed = killer
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if !killed {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+}
+
+/// How long the output readers may take after the child ended (a surviving descendant can hold the pipe).
+const READER_GRACE: Duration = Duration::from_secs(2);
+
+fn spawn_reader(mut stream: impl Read + Send + 'static) -> Receiver<Vec<u8>> {
+    let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut bytes = Vec::new();
         let _ = stream.read_to_end(&mut bytes);
-        bytes
-    })
+        let _ = tx.send(bytes);
+    });
+    rx
 }
 
 /// Opens the runners named in `names` in order (`native` is built in, any other name is a plugin from
