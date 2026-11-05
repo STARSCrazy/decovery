@@ -19,3 +19,4 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Ghidra plugin skeleton.
 - `decovery compare`: one rebuilt function against the original in a workspace, with verdict, blockers and
   metrics as text or JSON.
+- Phase-0 parity check against Decomp (`docs/parity/phase-0.md`).
