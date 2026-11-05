@@ -177,9 +177,13 @@ class GhidraBackend(Backend):
         if not pyghidra.started():
             pyghidra.start(install_dir=install_dir)
             # Java would otherwise write to fd 1, which carries the protocol.
-            from java.lang import System  # type: ignore[import-not-found]
+            from java.lang import System, Thread  # type: ignore[import-not-found]
 
             System.setOut(System.err)
+            # The SDK runs requests on worker threads, so this is usually one. The thread that creates the JVM is
+            # its non-daemon "main" thread; if it ends still attached, DestroyJavaVM at interpreter exit waits for
+            # it forever. Detach it; JPype re-attaches it as a daemon on its next Java call.
+            Thread.detach()
         self._pyghidra = pyghidra
         return pyghidra
 

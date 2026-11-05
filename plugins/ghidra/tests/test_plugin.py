@@ -575,6 +575,37 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(error["code"], -32010)
         self.assertIn("GHIDRA_INSTALL_DIR", error["message"])
 
+    def test_jvm_started_on_worker_thread_is_detached(self):
+        # The SDK runs requests on worker threads, so the first analyzer/open starts the JVM on one. JNI makes the
+        # creating thread the JVM's non-daemon "main" thread; if it ends attached, DestroyJavaVM at interpreter
+        # exit waits for it forever. The starting thread must detach (JPype re-attaches it as a daemon).
+        props = self.root / "Ghidra" / "application.properties"
+        props.parent.mkdir()
+        props.write_text(f"application.version={EXPECTED_GHIDRA_VERSION}\n", encoding="utf-8")
+        started = []
+        pyghidra = mock.Mock()
+        pyghidra.started.side_effect = lambda: bool(started)
+        pyghidra.start.side_effect = lambda install_dir: started.append(install_dir)
+        java_lang = mock.Mock()
+        modules = {"pyghidra": pyghidra, "java": mock.Mock(lang=java_lang), "java.lang": java_lang}
+        with mock.patch.dict(sys.modules, modules), mock.patch.dict(os.environ, {"GHIDRA_INSTALL_DIR": str(self.root)}):
+            errors = []
+
+            def start():
+                try:
+                    GhidraBackend()._start()
+                except Exception as exc:  # surfaced below; a worker's exception would otherwise be lost
+                    errors.append(exc)
+
+            worker = threading.Thread(target=start)
+            worker.start()
+            worker.join()
+            self.assertEqual(errors, [])
+            self.assertEqual(len(started), 1)
+            java_lang.Thread.detach.assert_called_once_with()
+            GhidraBackend()._start()  # already started: nothing more to detach
+            java_lang.Thread.detach.assert_called_once_with()
+
     def test_version_mismatch_warns(self):
         props = self.root / "Ghidra" / "application.properties"
         props.parent.mkdir()
