@@ -144,7 +144,12 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "decovery-core",
+ "decovery-diff",
+ "decovery-loaders",
+ "decovery-objects",
  "serde_json",
+ "tempfile",
+ "toml",
 ]
 
 [[package]]
