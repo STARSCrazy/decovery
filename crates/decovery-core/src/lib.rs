@@ -1,6 +1,7 @@
 //! Core model of decovery: addresses, programs, knowledge and workspaces.
 
 pub mod address;
+pub mod analysis;
 pub mod knowledge;
 pub mod migrate;
 pub mod program;
@@ -9,6 +10,10 @@ pub mod store;
 pub mod workspace;
 
 pub use address::{Address, AddressError, AddressInput};
+pub use analysis::{
+    ANALYSIS_DIR, AccessKind, Analysis, AnalysisIndex, AnalyzedFunction, CallEdge, DataAccess,
+    Provider, StringItem, knowledge_hash,
+};
 pub use knowledge::{
     ClaimSource, Confidence, LineComment, LocalVariable, RefutedClaim, Symbol, SymbolKind,
     SymbolsFile,
