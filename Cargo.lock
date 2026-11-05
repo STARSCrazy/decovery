@@ -189,6 +189,7 @@ dependencies = [
  "decovery-loaders",
  "decovery-objects",
  "serde_json",
+ "sha2",
  "tempfile",
  "toml",
 ]

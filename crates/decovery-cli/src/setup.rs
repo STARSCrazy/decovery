@@ -10,6 +10,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 /// Marker file in the extern dir that records what is installed.
 pub const MARKER_FILE: &str = ".decovery-setup.json";
@@ -129,6 +130,12 @@ fn fail<T>(message: impl Into<String>) -> Result<T, SetupError> {
     Err(SetupError::Message(message.into()))
 }
 
+fn path_str(path: &Path) -> Result<String, SetupError> {
+    path.to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| SetupError::Message(format!("path {} is not valid UTF-8", path.display())))
+}
+
 fn io_err(what: &str, path: &Path, e: std::io::Error) -> SetupError {
     SetupError::Message(format!("{what} {}: {e}", path.display()))
 }
@@ -212,14 +219,31 @@ pub fn run_setup(
 
     let venv = extern_dir.join("ghidra-venv");
     let venv_python = venv_python(&venv, opts.platform);
-    if venv_python.is_file() {
+    let sdk = opts.plugins_dir.join("decovery-plugin-sdk");
+    let ghidra_plugin = opts.plugins_dir.join("ghidra");
+    let venv_record = json!({
+        "python": path_str(&venv_python)?,
+        "pyghidra": pins.pyghidra,
+        "plugins": [path_str(&sdk)?, path_str(&ghidra_plugin)?],
+    });
+    if marker["venv"] == venv_record && venv_python.is_file() {
         log("step: venv exists");
     } else {
+        // Not recorded: a previous run may have died halfway, so build it again from scratch.
+        if let Some(object) = marker.as_object_mut() {
+            object.remove("venv");
+        }
+        write_marker(extern_dir, &marker)?;
         log(&format!("step: creating venv {}", venv.display()));
         run(
             runner,
             OsStr::new(&opts.python),
-            &["-m".into(), "venv".into(), venv.clone().into_os_string()],
+            &[
+                "-m".into(),
+                "venv".into(),
+                "--clear".into(),
+                venv.clone().into_os_string(),
+            ],
         )?;
         if !venv_python.is_file() {
             return fail(format!(
@@ -229,8 +253,6 @@ pub fn run_setup(
         }
     }
 
-    let sdk = opts.plugins_dir.join("decovery-plugin-sdk");
-    let ghidra_plugin = opts.plugins_dir.join("ghidra");
     for dir in [&sdk, &ghidra_plugin] {
         if !dir.is_dir() {
             return fail(format!(
@@ -258,6 +280,7 @@ pub fn run_setup(
         ],
     )?;
     marker["pyghidra"] = json!(pins.pyghidra);
+    marker["venv"] = venv_record;
     write_marker(extern_dir, &marker)?;
 
     log(&format!(
@@ -265,19 +288,13 @@ pub fn run_setup(
         opts.config_path.display()
     ));
     let command = vec![
-        venv_python.to_string_lossy().into_owned(),
+        path_str(&venv_python)?,
         "-m".into(),
         "decovery_ghidra".into(),
     ];
     let env = BTreeMap::from([
-        (
-            "GHIDRA_INSTALL_DIR".to_string(),
-            ghidra_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "JAVA_HOME".to_string(),
-            jdk_dir.to_string_lossy().into_owned(),
-        ),
+        ("GHIDRA_INSTALL_DIR".to_string(), path_str(&ghidra_dir)?),
+        ("JAVA_HOME".to_string(), path_str(&jdk_dir)?),
     ]);
     write_plugin_entry(&opts.config_path, "ghidra", &command, &env)?;
 
@@ -319,36 +336,51 @@ fn install_component(
         }
     }
 
-    let file = match archive {
-        Some(path) => path.to_path_buf(),
+    let (file, actual, downloaded) = match archive {
+        Some(path) => {
+            log(&format!("step: verifying {}", path.display()));
+            (path.to_path_buf(), sha256_file(path)?, false)
+        }
         None => {
             let downloads = extern_dir.join("downloads");
             std::fs::create_dir_all(&downloads)
                 .map_err(|e| io_err("cannot create", &downloads, e))?;
             let file = downloads.join(pin.file_name);
-            if file.is_file() && sha256_file(&file)? == pin.sha256 {
-                log(&format!("step: {key} archive already downloaded"));
+            let cached = if file.is_file() {
+                Some(sha256_file(&file)?).filter(|h| h == pin.sha256)
             } else {
-                log(&format!("step: downloading {}", pin.url));
-                run(
-                    runner,
-                    OsStr::new("curl"),
-                    &[
-                        "-fL".into(),
-                        "--retry".into(),
-                        "3".into(),
-                        "-o".into(),
-                        file.clone().into_os_string(),
-                        pin.url.into(),
-                    ],
-                )?;
+                None
+            };
+            match cached {
+                Some(hash) => {
+                    log(&format!("step: {key} archive already downloaded"));
+                    (file, hash, false)
+                }
+                None => {
+                    log(&format!("step: downloading {}", pin.url));
+                    run(
+                        runner,
+                        OsStr::new("curl"),
+                        &[
+                            "-fL".into(),
+                            "--retry".into(),
+                            "3".into(),
+                            "-o".into(),
+                            file.clone().into_os_string(),
+                            pin.url.into(),
+                        ],
+                    )?;
+                    log(&format!("step: verifying {}", file.display()));
+                    let hash = sha256_file(&file)?;
+                    (file, hash, true)
+                }
             }
-            file
         }
     };
-    log(&format!("step: verifying {}", file.display()));
-    let actual = sha256_file(&file)?;
     if actual != pin.sha256 {
+        if downloaded {
+            let _ = std::fs::remove_file(&file);
+        }
         return Err(SetupError::Checksum {
             file,
             expected: pin.sha256.to_string(),
@@ -379,7 +411,7 @@ fn install_component(
     marker[key] = json!({
         "version": pin.version,
         "sha256": pin.sha256,
-        "dir": format!("{key}/{}", name.to_string_lossy()),
+        "dir": format!("{key}/{}", path_str(Path::new(&name))?),
     });
     write_marker(extern_dir, marker)?;
     Ok((dir, false))
@@ -540,111 +572,16 @@ fn sha256_file(path: &Path) -> Result<String, SetupError> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(hasher.finish_hex())
+    Ok(hex(&hasher.finalize()))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(test)]
 fn sha256_hex(data: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    hasher.finish_hex()
-}
-
-const K: [u32; 64] = [
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
-];
-
-/// SHA-256 (FIPS 180-4); the dependency set has no SHA-2 crate (ADR 0003).
-struct Sha256 {
-    state: [u32; 8],
-    block: [u8; 64],
-    filled: usize,
-    length: u64,
-}
-
-impl Sha256 {
-    fn new() -> Self {
-        Sha256 {
-            state: [
-                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-                0x5be0cd19,
-            ],
-            block: [0; 64],
-            filled: 0,
-            length: 0,
-        }
-    }
-
-    fn update(&mut self, mut data: &[u8]) {
-        self.length += data.len() as u64;
-        while !data.is_empty() {
-            let take = (64 - self.filled).min(data.len());
-            self.block[self.filled..self.filled + take].copy_from_slice(&data[..take]);
-            self.filled += take;
-            data = &data[take..];
-            if self.filled == 64 {
-                let block = self.block;
-                self.compress(&block);
-                self.filled = 0;
-            }
-        }
-    }
-
-    fn compress(&mut self, block: &[u8; 64]) {
-        let mut w = [0u32; 64];
-        for (i, chunk) in block.as_chunks::<4>().0.iter().enumerate() {
-            w[i] = u32::from_be_bytes(*chunk);
-        }
-        for i in 16..64 {
-            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
-            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-            w[i] = w[i - 16]
-                .wrapping_add(s0)
-                .wrapping_add(w[i - 7])
-                .wrapping_add(s1);
-        }
-        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = self.state;
-        for i in 0..64 {
-            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-            let ch = (e & f) ^ (!e & g);
-            let t1 = h
-                .wrapping_add(s1)
-                .wrapping_add(ch)
-                .wrapping_add(K[i])
-                .wrapping_add(w[i]);
-            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-            let maj = (a & b) ^ (a & c) ^ (b & c);
-            let t2 = s0.wrapping_add(maj);
-            h = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(t1);
-            d = c;
-            c = b;
-            b = a;
-            a = t1.wrapping_add(t2);
-        }
-        for (s, v) in self.state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
-            *s = s.wrapping_add(v);
-        }
-    }
-
-    fn finish_hex(mut self) -> String {
-        let bits = self.length.wrapping_mul(8);
-        self.update(&[0x80]);
-        while self.filled != 56 {
-            self.update(&[0]);
-        }
-        self.update(&bits.to_be_bytes());
-        self.state.iter().map(|w| format!("{w:08x}")).collect()
-    }
+    hex(&Sha256::digest(data))
 }
 
 #[cfg(test)]
@@ -654,6 +591,7 @@ mod tests {
     use std::cell::RefCell;
     use std::path::Path;
 
+    const TEST_PLATFORM: Platform = Platform::LinuxX64;
     const GHIDRA_BYTES: &[u8] = b"ghidra-archive";
     const JDK_BYTES: &[u8] = b"jdk-archive";
 
@@ -680,6 +618,10 @@ mod tests {
     #[derive(Default)]
     struct FakeRunner {
         calls: RefCell<Vec<Vec<String>>>,
+        /// `curl` writes wrong bytes.
+        bad_download: bool,
+        /// pip fails.
+        pip_fails: bool,
     }
 
     impl FakeRunner {
@@ -696,7 +638,9 @@ mod tests {
             match program.to_string_lossy().as_ref() {
                 "curl" => {
                     let out = Path::new(&args[args.len() - 2]);
-                    let bytes = if args[args.len() - 1].to_string_lossy().contains("ghidra") {
+                    let bytes = if self.bad_download {
+                        &b"corrupt"[..]
+                    } else if args[args.len() - 1].to_string_lossy().contains("ghidra") {
                         GHIDRA_BYTES
                     } else {
                         JDK_BYTES
@@ -708,9 +652,12 @@ mod tests {
                     std::fs::create_dir_all(dest.join("top")).map_err(|e| e.to_string())
                 }
                 _ if args.len() >= 3 && args[1] == "venv" => {
-                    let python = venv_python(Path::new(&args[2]), Platform::current().unwrap());
+                    let python = venv_python(Path::new(&args[args.len() - 1]), TEST_PLATFORM);
                     std::fs::create_dir_all(python.parent().unwrap()).map_err(|e| e.to_string())?;
                     std::fs::write(python, b"").map_err(|e| e.to_string())
+                }
+                _ if self.pip_fails && args.contains(&OsString::from("pip")) => {
+                    Err("pip failed".into())
                 }
                 _ => Ok(()),
             }
@@ -728,7 +675,7 @@ mod tests {
             plugins_dir: plugins,
             python: "py".into(),
             config_path: root.join("cfg").join("config.toml"),
-            platform: Platform::current().unwrap(),
+            platform: TEST_PLATFORM,
         }
     }
 
@@ -754,20 +701,15 @@ mod tests {
     }
 
     #[test]
-    fn sha256_matches_known_vectors() {
-        assert_eq!(
-            sha256_hex(b""),
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        );
+    fn checksum_helper_returns_known_sha256() {
         assert_eq!(
             sha256_hex(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
-        let long = vec![b'a'; 1_000_000];
-        assert_eq!(
-            sha256_hex(&long),
-            "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
-        );
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f");
+        std::fs::write(&file, b"abc").unwrap();
+        assert_eq!(sha256_file(&file).unwrap(), sha256_hex(b"abc"));
     }
 
     #[test]
@@ -895,5 +837,50 @@ mod tests {
                 .unwrap_err()
                 .contains("--plugins-dir")
         );
+    }
+
+    #[test]
+    fn partial_venv_is_recreated() {
+        let dir = tempfile::tempdir().unwrap();
+        let opts = options(dir.path());
+        let failing = FakeRunner {
+            pip_fails: true,
+            ..Default::default()
+        };
+        assert!(run_setup(&opts, &test_pins(), &failing, &mut |_| {}).is_err());
+        // The venv python exists, but the venv was never recorded.
+        assert!(venv_python(&opts.extern_dir.join("ghidra-venv"), TEST_PLATFORM).is_file());
+        let runner = FakeRunner::default();
+        run_setup(&opts, &test_pins(), &runner, &mut |_| {}).unwrap();
+        let calls = runner.calls.borrow();
+        let venv = calls
+            .iter()
+            .find(|c| c.contains(&"venv".to_string()))
+            .unwrap();
+        assert!(venv.contains(&"--clear".to_string()));
+        // Recorded now: a third run keeps the venv.
+        let third = FakeRunner::default();
+        run_setup(&opts, &test_pins(), &third, &mut |_| {}).unwrap();
+        assert!(
+            !third
+                .calls
+                .borrow()
+                .iter()
+                .any(|c| c.contains(&"venv".to_string()))
+        );
+    }
+
+    #[test]
+    fn downloaded_archive_with_wrong_checksum_is_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let opts = options(dir.path());
+        let runner = FakeRunner {
+            bad_download: true,
+            ..Default::default()
+        };
+        let err = run_setup(&opts, &test_pins(), &runner, &mut |_| {}).unwrap_err();
+        assert!(err.to_string().contains("checksum mismatch"));
+        let file = opts.extern_dir.join("downloads").join("ghidra_1.2.3.zip");
+        assert!(!file.exists());
     }
 }

@@ -459,10 +459,10 @@ fn setup_ghidra(
     let response = Response::new(
         summary,
         serde_json::json!({
-            "ghidra_dir": report.ghidra_dir,
-            "jdk_dir": report.jdk_dir,
-            "venv_python": report.venv_python,
-            "config": report.config_path,
+            "ghidra_dir": report.ghidra_dir.display().to_string(),
+            "jdk_dir": report.jdk_dir.display().to_string(),
+            "venv_python": report.venv_python.display().to_string(),
+            "config": report.config_path.display().to_string(),
             "ghidra_kept": report.ghidra_kept,
             "jdk_kept": report.jdk_kept,
         }),

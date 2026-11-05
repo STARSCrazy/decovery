@@ -34,6 +34,9 @@ about 500 MB** (checksums are pinned; windows-x64 and linux-x64 only). Run it in
 downloaded yourself. `DECOVERY_PYTHON` selects the Python that creates the venv. A second run keeps what is
 installed.
 
+`decovery analyze` runs the `command` of the `[plugins.<name>]` entry in a workspace's `decovery.toml` (and in the
+user config) as a program on your machine. Only analyze workspaces you trust.
+
 ## No proprietary material
 
 This repository must never contain game executables, commercial compilers or libraries, code decompiled from
