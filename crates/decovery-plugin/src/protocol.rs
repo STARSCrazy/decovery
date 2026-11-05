@@ -198,7 +198,7 @@ fn base64_encode(data: &[u8]) -> String {
 
 fn base64_decode(text: &str) -> Result<Vec<u8>, BlobError> {
     let bytes = text.as_bytes();
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return Err(BlobError::Base64(bytes.len()));
     }
     let mut out = Vec::with_capacity(bytes.len() / 4 * 3);

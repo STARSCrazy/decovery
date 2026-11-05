@@ -401,14 +401,13 @@ pub fn migrate_decomp(from: &Path, to: &Path) -> Result<MigrationReport, Migrate
         path: config_path.clone(),
         source: Box::new(source),
     })?;
-    let symbols_toml = toml::to_string(&SymbolsFile {
-        schema: SCHEMA,
-        symbols,
-    })
-    .map_err(|source| MigrateError::Serialize {
-        path: to.join(SYMBOLS_FILE),
-        source: Box::new(source),
-    })?;
+    let symbols_toml =
+        SymbolsFile::new(symbols)
+            .to_toml()
+            .map_err(|source| MigrateError::Serialize {
+                path: to.join(SYMBOLS_FILE),
+                source: Box::new(source),
+            })?;
     let mut converted = Vec::new();
     let mut files = vec![
         (CONFIG_FILE.to_string(), config_toml),

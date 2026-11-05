@@ -39,6 +39,8 @@ pub enum WorkspaceError {
     },
     #[error("{}: unsupported schema {found} (expected {SCHEMA})", path.display())]
     Schema { path: PathBuf, found: u32 },
+    #[error("workspace is locked by pid {pid}")]
+    Locked { pid: u32 },
 }
 
 impl Workspace {
