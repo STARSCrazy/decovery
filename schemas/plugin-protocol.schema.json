@@ -120,6 +120,66 @@
       },
       "additionalProperties": false
     },
+    "runnerRunParams": {
+      "description": "params of runner/run (capability runner v1).",
+      "type": "object",
+      "required": ["mounts", "current_drive", "timeout_s", "jobs"],
+      "properties": {
+        "mounts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["drive", "path", "writable"],
+            "properties": {
+              "drive": { "type": "string", "pattern": "^[A-Z]$" },
+              "path": { "type": "string", "minLength": 1, "description": "Absolute host directory." },
+              "writable": { "type": "boolean" }
+            },
+            "additionalProperties": false
+          }
+        },
+        "current_drive": { "type": "string", "pattern": "^[A-Z]$" },
+        "timeout_s": { "type": "number", "exclusiveMinimum": 0, "description": "Per job." },
+        "jobs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["commands"],
+            "properties": {
+              "commands": {
+                "type": "array",
+                "items": { "type": "string", "maxLength": 126 },
+                "description": "DOS command lines; SET NAME=value lines set the environment for the following lines."
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "runnerRunResult": {
+      "description": "result of runner/run: one entry per job, in order.",
+      "type": "object",
+      "required": ["jobs"],
+      "properties": {
+        "jobs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["status"],
+            "properties": {
+              "status": { "enum": ["done", "timeout", "failed"] },
+              "exit_code": { "type": ["integer", "null"] },
+              "stdout": { "type": "string" },
+              "message": { "type": ["string", "null"] }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "blob": {
       "description": "Binary payload: inline_base64 below 65536 bytes, otherwise a file with its blake3.",
       "oneOf": [

@@ -60,7 +60,8 @@ impl CancelToken {
         self.0.store(true, Ordering::SeqCst);
     }
 
-    fn is_cancelled(&self) -> bool {
+    /// Whether [`CancelToken::cancel`] was called.
+    pub fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::SeqCst)
     }
 }

@@ -15,9 +15,9 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use decovery_core::{Workspace, read_user_config, read_user_config_file};
+use decovery_core::{read_user_config, read_user_config_file};
 
-pub use decovery_core::{PluginConfig, user_config_path};
+pub use decovery_core::{PluginConfig, plugin_config, user_config_path};
 
 use crate::FacadeError;
 
@@ -40,23 +40,10 @@ pub fn read_plugins_file(path: &Path) -> Result<BTreeMap<String, PluginConfig>, 
     Ok(read_user_config_file(path)?.plugins)
 }
 
-/// The configuration of plugin `name`: the workspace entry, else the user entry.
-pub fn plugin_config(
-    workspace: &Workspace,
-    user: &BTreeMap<String, PluginConfig>,
-    name: &str,
-) -> Option<PluginConfig> {
-    workspace
-        .config
-        .plugins
-        .get(name)
-        .or_else(|| user.get(name))
-        .cloned()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use decovery_core::Workspace;
 
     #[test]
     fn plugins_file_is_read_and_checked() {
