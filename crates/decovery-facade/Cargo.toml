@@ -10,6 +10,7 @@ rust-version.workspace = true
 [dependencies]
 blake3.workspace = true
 decovery-core.workspace = true
+decovery-diff.workspace = true
 decovery-loaders.workspace = true
 decovery-plugin.workspace = true
 serde.workspace = true

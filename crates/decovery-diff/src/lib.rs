@@ -30,21 +30,31 @@
 //! bytes (`at + width + field`) unless the program does carry a relocation there, which then has to match.
 //! Fields inside padding behind the original's end (the following function's jump table) are left to that
 //! function, as in Decomp's byte comparison. On top of that, zero differing bytes and zero differing
-//! instructions. A target without a name (a string in `CONST`, an unknown symbol) is an
+//! instructions. A target that cannot be resolved (an unknown symbol, a group target) is an
 //! [`Blocker::UncheckedRef`].
+//!
+//! **Anchors** (ADR 0006, [`compare_module`]): fields of 16-bit functions whose original has no relocation at the
+//! same place (MZ offsets) are checked against frame and section anchors established by consensus over all
+//! placements of one comparison; 16-bit selector fields against the frame anchor's segment. A 32-bit field whose
+//! target is an unnamed position in another section (a string in `CONST`) is checked against a section anchor.
+//! [`compare`] is [`compare_module`] with one placement.
 //!
 //! Deviations from Decomp, all outside the metrics: the table of functions of the same object used to name
 //! fixup-less calls (`intern`) holds only the function's own section (Decomp merged all code segments by
 //! offset); data names come only from [`SymbolView::name_at`] (Decomp also named addresses inside variables
 //! of known size, which only adds display hints when the name is known by address).
 
+mod anchors;
 mod compare;
 mod instructions;
 mod sequence;
 
-use decovery_core::Address;
+use std::collections::BTreeMap;
 
-pub use compare::compare;
+use decovery_core::Address;
+use decovery_objects::FunctionView;
+
+pub use compare::{compare, compare_module};
 
 /// The name of an address in the original, and whether it is only a default name (`fun_0001A2B0`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,4 +213,73 @@ pub struct Comparison {
     pub verdict: Verdict,
     pub blockers: Vec<Blocker>,
     pub metrics: Metrics,
+}
+
+/// A rebuilt function and where its original lives.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct Placement<'a> {
+    pub function: FunctionView<'a>,
+    pub at: Address,
+    /// Length of the original function, when known (see [`CompareOptions::original_len`]).
+    pub original_len: Option<u32>,
+}
+
+impl<'a> Placement<'a> {
+    pub fn new(function: FunctionView<'a>, at: Address, original_len: Option<u32>) -> Self {
+        Placement {
+            function,
+            at,
+            original_len,
+        }
+    }
+}
+
+/// Options of a module comparison.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct ModuleOptions {
+    /// See [`CompareOptions::padding`].
+    pub padding: bool,
+    /// Frame bases fixed by configuration (`[rebuild.frames]`), by frame name (group or section); they override
+    /// the consensus.
+    pub frames: BTreeMap<String, Address>,
+}
+
+impl ModuleOptions {
+    pub fn new(padding: bool, frames: BTreeMap<String, Address>) -> Self {
+        ModuleOptions { padding, frames }
+    }
+}
+
+/// Where an anchor's base comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AnchorSource {
+    Config,
+    Consensus,
+}
+
+/// A frame anchor (`section` is `None`: linear base of the frame) or a section anchor (offset of the OBJ section
+/// inside its frame; for 32-bit sections the linear address, frame `FLAT`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Anchor {
+    pub frame: String,
+    pub section: Option<String>,
+    pub base: u64,
+    /// Distinct (target, proposed base) pairs agreeing with `base`.
+    pub votes: u32,
+    /// Distinct pairs proposing another base.
+    pub dissent: u32,
+    pub source: AnchorSource,
+}
+
+/// Result of [`compare_module`]: one [`Comparison`] per placement, in order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ModuleComparison {
+    pub functions: Vec<Comparison>,
+    pub anchors: Vec<Anchor>,
+    pub warnings: Vec<String>,
 }

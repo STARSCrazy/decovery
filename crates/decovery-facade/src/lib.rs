@@ -17,7 +17,7 @@ pub use output::{
 };
 pub use resolve::{Resolved, resolve};
 pub use response::{Budget, Handle, Response, store_handle};
-pub use session::{DisplayName, Session};
+pub use session::{DisplayName, KnowledgeView, Session};
 pub use tools::{
     AnalyzeOptions, AnnotateAction, Annotation, DEFAULT_LIMIT, FindQuery, FindWhat, FunctionFilter,
     FunctionSort, analyze, analyze_with_user_plugins, annotate, detail, find, program_description,

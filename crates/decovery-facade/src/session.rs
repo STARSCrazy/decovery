@@ -1,10 +1,12 @@
 //! A workspace opened together with its analysis.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use decovery_core::{
     Address, Analysis, Confidence, Provider, RebuildRecord, Symbol, Workspace, read_rebuild,
 };
+use decovery_diff::{NameAt, SymbolView};
 
 use crate::FacadeError;
 
@@ -81,6 +83,67 @@ impl Session {
             .symbols
             .iter()
             .find(|s| s.address == at && s.confidence != Confidence::Refuted && !s.name.is_empty())
+    }
+
+    /// The knowledge as names for comparisons: active symbols, default names for flat and real-mode addresses.
+    pub fn symbol_view(&self) -> impl SymbolView + '_ {
+        KnowledgeView::new(&self.workspace, Some(&self.analysis))
+    }
+}
+
+/// Active (not refuted) names of a workspace's knowledge for comparisons ([`SymbolView`]). An address without a
+/// name has its default name (`fun_0001A2B0`, `fun_1234_0010`); static segment addresses have none. A default name
+/// resolves to its address; with an analysis that has functions, only when a function starts there.
+pub struct KnowledgeView<'a> {
+    by_address: BTreeMap<Address, &'a str>,
+    by_name: BTreeMap<&'a str, Address>,
+    function_starts: Option<BTreeSet<Address>>,
+}
+
+impl<'a> KnowledgeView<'a> {
+    pub fn new(workspace: &'a Workspace, analysis: Option<&Analysis>) -> Self {
+        let mut by_address = BTreeMap::new();
+        for s in &workspace.symbols {
+            if s.confidence != Confidence::Refuted && !s.name.is_empty() {
+                by_address.entry(s.address).or_insert(s.name.as_str());
+            }
+        }
+        let mut by_name = BTreeMap::new();
+        for (&address, &name) in &by_address {
+            by_name.entry(name).or_insert(address);
+        }
+        let function_starts = analysis
+            .filter(|a| !a.functions.is_empty())
+            .map(|a| a.functions.iter().map(|f| f.start).collect());
+        KnowledgeView {
+            by_address,
+            by_name,
+            function_starts,
+        }
+    }
+}
+
+impl SymbolView for KnowledgeView<'_> {
+    fn name_at(&self, at: Address) -> Option<NameAt> {
+        match self.by_address.get(&at) {
+            Some(&name) => Some(NameAt::new(name, false)),
+            None => match at {
+                Address::Flat(_) | Address::Seg { .. } => Some(NameAt::new(default_name(at), true)),
+                _ => None,
+            },
+        }
+    }
+
+    fn address_of(&self, name: &str) -> Option<Address> {
+        if let Some(&at) = self.by_name.get(name) {
+            return Some(at);
+        }
+        let at = parse_default_name(name)?;
+        let starts_function = self
+            .function_starts
+            .as_ref()
+            .is_none_or(|starts| starts.contains(&at));
+        starts_function.then_some(at)
     }
 }
 
