@@ -238,7 +238,7 @@ fn splits_library_modules() {
     assert_eq!(lib.len(), page);
     for m in [m1, m2] {
         lib.extend(m);
-        while lib.len() % page != 0 {
+        while !lib.len().is_multiple_of(page) {
             lib.push(0);
         }
     }
@@ -283,7 +283,7 @@ fn truncated_library_never_panics() {
     ]);
     let mut lib = rec(0xF0, &vec![0; page - 4]);
     lib.extend(m1);
-    while lib.len() % page != 0 {
+    while !lib.len().is_multiple_of(page) {
         lib.push(0);
     }
     lib.push(0xF1);

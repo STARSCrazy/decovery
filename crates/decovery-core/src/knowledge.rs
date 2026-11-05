@@ -29,7 +29,7 @@ pub enum ClaimSource {
 }
 
 /// What a symbol names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum SymbolKind {
@@ -130,7 +130,8 @@ impl Symbol {
 
 /// On-disk form of `knowledge/symbols.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct SymbolsFile {
+#[non_exhaustive]
+pub struct SymbolsFile {
     pub schema: u32,
     #[serde(default, rename = "symbol")]
     pub symbols: Vec<Symbol>,
