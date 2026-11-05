@@ -62,6 +62,20 @@ pub struct RefutedClaim {
     pub note: Option<String>,
 }
 
+impl RefutedClaim {
+    /// A history entry for `name` without further details.
+    pub fn new(name: impl Into<String>) -> Self {
+        RefutedClaim {
+            name: name.into(),
+            source: None,
+            confidence: None,
+            evidence: None,
+            date: None,
+            note: None,
+        }
+    }
+}
+
 /// A named local variable or parameter of a function.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -73,6 +87,20 @@ pub struct LocalVariable {
     pub data_type: Option<String>,
 }
 
+impl LocalVariable {
+    pub fn new(
+        place: impl Into<String>,
+        name: impl Into<String>,
+        data_type: Option<String>,
+    ) -> Self {
+        LocalVariable {
+            place: place.into(),
+            name: name.into(),
+            data_type,
+        }
+    }
+}
+
 /// A comment attached to one instruction address.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -80,6 +108,16 @@ pub struct LineComment {
     pub address: Address,
     pub text: String,
     pub source: ClaimSource,
+}
+
+impl LineComment {
+    pub fn new(address: Address, text: impl Into<String>, source: ClaimSource) -> Self {
+        LineComment {
+            address,
+            text: text.into(),
+            source,
+        }
+    }
 }
 
 /// A function, global or label with its claims.

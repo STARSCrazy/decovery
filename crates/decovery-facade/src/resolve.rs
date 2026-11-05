@@ -14,6 +14,22 @@ pub struct Resolved {
 
 /// Resolves `input` (`file:0x…`, canonical address, or a name) to the analyzed function containing it.
 pub fn resolve(session: &Session, input: &str) -> Result<Resolved, FacadeError> {
+    let requested = locate(session, input)?;
+    let index = session.analysis.index();
+    match index.function_containing(requested) {
+        Some(f) => Ok(Resolved {
+            function: f.start,
+            requested,
+        }),
+        None => Err(FacadeError::NotInFunction {
+            address: requested,
+            nearest: nearest(session, requested),
+        }),
+    }
+}
+
+/// The address `input` stands for (`file:0x…`, canonical address, or a name), checked against the memory map.
+pub(crate) fn locate(session: &Session, input: &str) -> Result<Address, FacadeError> {
     let input = input.trim();
     if input.is_empty() {
         return Err(FacadeError::Invalid("empty target".into()));
@@ -29,27 +45,21 @@ pub fn resolve(session: &Session, input: &str) -> Result<Resolved, FacadeError> 
     } else {
         address_of_name(session, input)?
     };
-    if !session
+    if segment_of(session, requested).is_none() {
+        return Err(FacadeError::OutsideMap(requested));
+    }
+    Ok(requested)
+}
+
+/// The configured segment containing `at`.
+pub(crate) fn segment_of(session: &Session, at: Address) -> Option<&SegmentConfig> {
+    session
         .workspace
         .config
         .target
         .segments
         .iter()
-        .any(|s| in_segment(s, requested))
-    {
-        return Err(FacadeError::OutsideMap(requested));
-    }
-    let index = session.analysis.index();
-    match index.function_containing(requested) {
-        Some(f) => Ok(Resolved {
-            function: f.start,
-            requested,
-        }),
-        None => Err(FacadeError::NotInFunction {
-            address: requested,
-            nearest: nearest(session, requested),
-        }),
-    }
+        .find(|s| in_segment(s, at))
 }
 
 fn address_of_name(session: &Session, name: &str) -> Result<Address, FacadeError> {

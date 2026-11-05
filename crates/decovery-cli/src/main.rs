@@ -7,9 +7,10 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 mod compare;
 
+use decovery_core::{ClaimSource, Confidence};
 use decovery_facade::{
-    Budget, DEFAULT_LIMIT, FacadeError, FindQuery, FindWhat, FunctionFilter, FunctionSort,
-    Response, Session,
+    AnnotateAction, Annotation, Budget, DEFAULT_LIMIT, FacadeError, FindQuery, FindWhat,
+    FunctionFilter, FunctionSort, Response, Session,
 };
 
 /// Recover source code from old executables.
@@ -74,6 +75,48 @@ enum Command {
         #[arg(long, default_value_t = DEFAULT_LIMIT)]
         limit: usize,
     },
+    /// Record knowledge: a name, comment, signature, type, local, refutation or type definition.
+    #[command(group(clap::ArgGroup::new("action").required(true).args([
+        "name", "comment", "signature", "data_type", "local", "refute", "add_type",
+    ])))]
+    Annotate {
+        /// Function or symbol name, address or `file:0x…`; not needed for `--add-type`.
+        #[arg(required_unless_present = "add_type")]
+        target: Option<String>,
+        /// Name the target (a C identifier).
+        #[arg(long)]
+        name: Option<String>,
+        /// Comment on the target; inside a function it becomes a line comment.
+        #[arg(long)]
+        comment: Option<String>,
+        /// C prototype of the function.
+        #[arg(long)]
+        signature: Option<String>,
+        /// C type of a global.
+        #[arg(long = "type", id = "data_type")]
+        data_type: Option<String>,
+        /// Name a local: place (`param:1`, `stack:-0x10`, `reg:EAX`), name, optional type.
+        #[arg(long, num_args = 2..=3, value_names = ["PLACE", "NAME", "TYPE"])]
+        local: Option<Vec<String>>,
+        /// Withdraw the target's name; the reason is kept in its history.
+        #[arg(long, value_name = "REASON")]
+        refute: Option<String>,
+        /// Append a definition to `types.h`.
+        #[arg(long, value_name = "DEF")]
+        add_type: Option<String>,
+        /// How sure the claim is.
+        #[arg(long, value_enum, default_value = "assumed")]
+        confidence: ClaimConfidence,
+        /// Who makes the claim.
+        #[arg(long, value_enum, default_value = "human")]
+        source: ClaimOrigin,
+        /// What the claim rests on.
+        #[arg(long)]
+        evidence: Option<String>,
+        /// Replace a stronger claim.
+        #[arg(long)]
+        force: bool,
+    },
     /// Page the content of a handle returned by another command.
     Detail {
         /// Handle id (`h_` plus 12 hex characters).
@@ -85,6 +128,18 @@ enum Command {
         #[arg(long, default_value_t = 8000)]
         limit: usize,
     },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ClaimConfidence {
+    Confirmed,
+    Assumed,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ClaimOrigin {
+    Human,
+    Agent,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -226,6 +281,61 @@ fn main() -> ExitCode {
             };
             finish(find(&cli.workspace, &query, cli.json))
         }
+        Command::Annotate {
+            target,
+            name,
+            comment,
+            signature,
+            data_type,
+            local,
+            refute,
+            add_type,
+            confidence,
+            source,
+            evidence,
+            force,
+        } => {
+            let action = if let Some(v) = name {
+                AnnotateAction::Name(v)
+            } else if let Some(v) = comment {
+                AnnotateAction::Comment(v)
+            } else if let Some(v) = signature {
+                AnnotateAction::Signature(v)
+            } else if let Some(v) = data_type {
+                AnnotateAction::DataType(v)
+            } else if let Some(mut v) = local {
+                let data_type = if v.len() == 3 { v.pop() } else { None };
+                let name = v.pop().unwrap_or_default();
+                let place = v.pop().unwrap_or_default();
+                AnnotateAction::Local {
+                    place,
+                    name,
+                    data_type,
+                }
+            } else if let Some(reason) = refute {
+                AnnotateAction::Refute { reason }
+            } else if let Some(v) = add_type {
+                AnnotateAction::AddType(v)
+            } else {
+                // clap's required argument group rules this out
+                return ExitCode::from(2);
+            };
+            let request = Annotation {
+                target: target.unwrap_or_default(),
+                action,
+                confidence: match confidence {
+                    ClaimConfidence::Confirmed => Confidence::Confirmed,
+                    ClaimConfidence::Assumed => Confidence::Assumed,
+                },
+                source: match source {
+                    ClaimOrigin::Human => ClaimSource::Human,
+                    ClaimOrigin::Agent => ClaimSource::Agent,
+                },
+                evidence,
+                force,
+            };
+            finish(annotate(&cli.workspace, &request, cli.json))
+        }
         Command::Detail {
             handle,
             offset,
@@ -263,6 +373,20 @@ fn show(workspace: &Path, target: &str, json: bool) -> Result<(), FacadeError> {
     }
     if response.data["analysis_stale"] == true {
         eprintln!("note: analysis is older than the knowledge; run `decovery analyze`");
+    }
+    Ok(())
+}
+
+fn annotate(workspace: &Path, request: &Annotation, json: bool) -> Result<(), FacadeError> {
+    let response = decovery_facade::annotate(workspace, request)?;
+    if json {
+        return print_json(&response);
+    }
+    println!("{}", response.summary);
+    for warning in response.data["warnings"].as_array().into_iter().flatten() {
+        if let Some(text) = warning.as_str() {
+            eprintln!("warning: {text}");
+        }
     }
     Ok(())
 }
