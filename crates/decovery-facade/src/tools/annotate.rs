@@ -375,11 +375,25 @@ fn guard(
     ))
 }
 
-/// The active record at `at`, if any.
-fn active_at(symbols: &[Symbol], at: Address) -> Option<&Symbol> {
-    index_of(symbols, at)
-        .map(|i| &symbols[i])
-        .filter(|s| is_active(s))
+/// The stamp a record's texts carry: its own for an active record, the one from before the refutation for
+/// a refuted record (refute keeps `source` and records the earlier confidence in the history).
+fn effective_stamp(s: &Symbol) -> (ClaimSource, Confidence) {
+    if is_active(s) {
+        (s.source, s.confidence)
+    } else {
+        let before = s
+            .refuted
+            .last()
+            .and_then(|e| e.confidence)
+            .filter(|c| *c != Confidence::Refuted)
+            .unwrap_or(Confidence::Assumed);
+        (s.source, before)
+    }
+}
+
+/// The record at `at`, active or refuted, with its effective stamp (for the precedence guards).
+fn held_at(symbols: &[Symbol], at: Address) -> Option<(&Symbol, (ClaimSource, Confidence))> {
+    index_of(symbols, at).map(|i| (&symbols[i], effective_stamp(&symbols[i])))
 }
 
 struct Target {
@@ -493,6 +507,23 @@ fn claim_slot(
             fresh.source = request.source;
             fresh.confidence = request.confidence;
             if let Some(i) = found {
+                // carried texts keep a stronger stamp: a restamp never lowers it (R25)
+                let (source, confidence) = effective_stamp(&symbols[i]);
+                let carries = symbols[i].comment.as_deref().is_some_and(|c| !c.is_empty())
+                    || symbols[i]
+                        .signature
+                        .as_deref()
+                        .is_some_and(|c| !c.is_empty())
+                    || symbols[i]
+                        .data_type
+                        .as_deref()
+                        .is_some_and(|c| !c.is_empty())
+                    || !symbols[i].locals.is_empty()
+                    || !symbols[i].line_comments.is_empty();
+                if carries && rank(source, confidence) > rank(request.source, request.confidence) {
+                    fresh.source = source;
+                    fresh.confidence = confidence;
+                }
                 let old = std::mem::replace(&mut symbols[i], fresh);
                 let s = &mut symbols[i];
                 s.comment = old.comment;
@@ -609,8 +640,11 @@ fn set_name(
         let s = &mut session.workspace.symbols[i];
         s.name = name.to_string();
         s.kind = target.kind;
-        s.source = request.source;
-        s.confidence = request.confidence;
+        // a stronger stamp kept by claim_slot for carried texts stays (R25)
+        if rank(request.source, request.confidence) >= rank(s.source, s.confidence) {
+            s.source = request.source;
+            s.confidence = request.confidence;
+        }
         if request.evidence.is_some() {
             s.evidence = request.evidence.clone();
         }
@@ -645,7 +679,7 @@ fn set_comment(
     } else {
         target.kind
     };
-    if let Some(s) = active_at(&session.workspace.symbols, owner) {
+    if let Some((s, stamp)) = held_at(&session.workspace.symbols, owner) {
         let blocked = match line_at {
             Some(at) => s
                 .line_comments
@@ -655,7 +689,7 @@ fn set_comment(
                     let source = if c.source == ClaimSource::Human {
                         ClaimSource::Human
                     } else {
-                        s.source
+                        stamp.0
                     };
                     guard(
                         request,
@@ -663,23 +697,14 @@ fn set_comment(
                         "comment",
                         "line comment",
                         &c.text,
-                        (source, s.confidence),
+                        (source, stamp.1),
                     )
                 }),
             None => s
                 .comment
                 .as_deref()
                 .filter(|c| !c.is_empty() && *c != text)
-                .and_then(|c| {
-                    guard(
-                        request,
-                        owner,
-                        "comment",
-                        "comment",
-                        c,
-                        (s.source, s.confidence),
-                    )
-                }),
+                .and_then(|c| guard(request, owner, "comment", "comment", c, stamp)),
         };
         if let Some(unchanged) = blocked {
             return Ok(unchanged);
@@ -770,10 +795,7 @@ fn set_claim_text(
 ) -> Result<Applied, FacadeError> {
     let at = target.at;
     let action = field.label();
-    if let Some(i) = index_of(&session.workspace.symbols, at)
-        && is_active(&session.workspace.symbols[i])
-    {
-        let old = &session.workspace.symbols[i];
+    if let Some((old, stamp)) = held_at(&session.workspace.symbols, at) {
         match field.get(old) {
             Some(current) if *current == value => {
                 return Ok(Applied::unchanged(
@@ -784,14 +806,7 @@ fn set_claim_text(
                 ));
             }
             Some(current) => {
-                if let Some(unchanged) = guard(
-                    request,
-                    at,
-                    action,
-                    action,
-                    current,
-                    (old.source, old.confidence),
-                ) {
+                if let Some(unchanged) = guard(request, at, action, action, current, stamp) {
                     return Ok(unchanged);
                 }
             }
@@ -818,7 +833,7 @@ fn set_local(
 ) -> Result<Applied, FacadeError> {
     let at = target.at;
     let new = LocalVariable::new(place, name, data_type.map(|t| t.trim().to_string()));
-    if let Some(s) = active_at(&session.workspace.symbols, at)
+    if let Some((s, stamp)) = held_at(&session.workspace.symbols, at)
         && let Some(old) = s.locals.iter().find(|l| l.place == place && **l != new)
         && let Some(unchanged) = guard(
             request,
@@ -826,7 +841,7 @@ fn set_local(
             "local",
             &format!("local {place}"),
             &old.name,
-            (s.source, s.confidence),
+            stamp,
         )
     {
         return Ok(unchanged);
