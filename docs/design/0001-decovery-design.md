@@ -154,7 +154,7 @@ variants"). Estimated per-call overhead is µs–sub-ms versus ms–s for a comp
 measured in phase 0).
 
 Plugins are discovered from `decovery.toml` / user config (`[plugins.<name>] command = [...]`), not from a global
-registry.
+registry. `analyze` executes the `command` a workspace's `decovery.toml` names, so only analyze workspaces you trust.
 
 ### 5.2 Compiler profiles
 

@@ -255,16 +255,38 @@ fn annotate_names_and_rejects_bad_input() {
     assert_eq!(json["data"]["changed"], true);
 }
 
+/// `decovery analyze` with the user config directories pointed at an empty temp dir.
+fn analyze_isolated(dir: &tempfile::TempDir, args: &[&str]) -> std::process::Output {
+    let home = tempfile::tempdir().unwrap();
+    Command::new(env!("CARGO_BIN_EXE_decovery"))
+        .arg("analyze")
+        .args(args)
+        .arg("--workspace")
+        .arg(dir.path())
+        .env("APPDATA", home.path())
+        .env("XDG_CONFIG_HOME", home.path())
+        .env("HOME", home.path())
+        .output()
+        .expect("run decovery")
+}
+
 #[test]
 fn analyze_without_plugin_config_exits_2() {
     let dir = workspace();
-    let out = run(&dir, &["analyze", "--plugin", "decovery-test-none"]);
+    let out = analyze_isolated(&dir, &[]);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("no analyzer configured; run decovery setup ghidra"),
+        "got {stderr:?}"
+    );
+    let out = analyze_isolated(&dir, &["--plugin", "decovery-test-none"]);
     assert_eq!(out.status.code(), Some(2));
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(
         stderr.contains("no analyzer configured for plugin decovery-test-none"),
         "got {stderr:?}"
     );
-    let out = run(&dir, &["analyze", "--plugin", "../x"]);
+    let out = analyze_isolated(&dir, &["--plugin", "../x"]);
     assert_eq!(out.status.code(), Some(2));
 }

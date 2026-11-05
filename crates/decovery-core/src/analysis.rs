@@ -553,27 +553,13 @@ mod tests {
             0
         );
         for a in [0x10010, 0x10100] {
-            Analysis::save_decompiled(
-                dir.path(),
-                flat(a),
-                "x
-",
-                &lock,
-            )
-            .unwrap();
+            Analysis::save_decompiled(dir.path(), flat(a), "x\n", &lock).unwrap();
         }
         let seg = Address::Seg {
             seg: 0x1234,
             off: 0x10,
         };
-        Analysis::save_decompiled(
-            dir.path(),
-            seg,
-            "x
-",
-            &lock,
-        )
-        .unwrap();
+        Analysis::save_decompiled(dir.path(), seg, "x\n", &lock).unwrap();
         let foreign = dir.path().join(DECOMPILED_DIR).join("notes.c");
         std::fs::write(&foreign, "keep").unwrap();
         let keep = [flat(0x10100)].into_iter().collect();
