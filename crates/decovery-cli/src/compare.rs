@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use decovery_core::{Address, Confidence, Program, SymbolKind, TargetFormat, Workspace};
+use decovery_core::{Address, Confidence, SymbolKind, Workspace};
 use decovery_diff::{
     Blocker, CompareOptions, Comparison, Decoration, NameAt, SymbolView, Verdict, compare,
 };
@@ -72,21 +72,6 @@ fn resolve(path: &Path, root: &Path) -> PathBuf {
     }
 }
 
-fn load_program(ws: &Workspace) -> Result<Program, String> {
-    if ws.config.target.format != TargetFormat::Le {
-        return Err(format!(
-            "target format {:?} is not supported yet; phase 0 reads LE only",
-            ws.config.target.format
-        ));
-    }
-    let file = resolve(Path::new(&ws.config.target.file), &ws.root);
-    let bytes =
-        std::fs::read(&file).map_err(|e| format!("cannot read target {}: {e}", file.display()))?;
-    decovery_loaders::load_le(&bytes)
-        .map(|image| image.program)
-        .map_err(|e| format!("cannot load target {}: {e}", file.display()))
-}
-
 /// Runs the comparison. Errors are messages for the user.
 pub fn run(request: &Request) -> Result<Outcome, String> {
     let ws = Workspace::open(&request.workspace)
@@ -127,7 +112,7 @@ pub fn run(request: &Request) -> Result<Outcome, String> {
             )
         })?;
 
-    let program = load_program(&ws)?;
+    let program = decovery_facade::program::load(&ws).map_err(|e| e.to_string())?;
     let options = CompareOptions::new(request.padding, original_len);
     let comparison = compare(&view, address, &program, &knowledge, &decoration, &options);
     Ok(Outcome {

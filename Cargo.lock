@@ -185,6 +185,7 @@ dependencies = [
  "clap",
  "decovery-core",
  "decovery-diff",
+ "decovery-facade",
  "decovery-loaders",
  "decovery-objects",
  "serde_json",
@@ -213,6 +214,16 @@ dependencies = [
  "decovery-objects",
  "decovery-x86",
  "toml",
+]
+
+[[package]]
+name = "decovery-facade"
+version = "0.1.0"
+dependencies = [
+ "decovery-core",
+ "decovery-loaders",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]
