@@ -4,10 +4,8 @@ use decovery_core::Address;
 use serde_json::json;
 
 use super::find::distinct_callers;
-use crate::output::{analysis_stale, status_counts};
+use crate::output::{STALE_ANALYSIS, analysis_stale, status_counts};
 use crate::{FacadeError, Response, Session};
-
-const STALE_NOTE: &str = " (analysis is older than the knowledge; run `decovery analyze`)";
 
 /// Counts over all functions, the analysis' origin and the next thing to do.
 pub fn status(session: &Session) -> Result<Response, FacadeError> {
@@ -19,7 +17,7 @@ pub fn status(session: &Session) -> Result<Response, FacadeError> {
         c.named, c.functions, c.confirmed, c.assumed
     );
     if stale {
-        summary.push_str(STALE_NOTE);
+        summary.push_str(&format!(" ({STALE_ANALYSIS})"));
     }
     let analysis = &session.analysis;
     Ok(Response::new(

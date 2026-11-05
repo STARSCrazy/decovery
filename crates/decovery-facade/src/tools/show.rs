@@ -4,29 +4,40 @@ use std::time::Duration;
 
 use serde_json::json;
 
-use crate::output::{analysis_stale, function_path, render_function, write_function};
+use crate::output::{
+    STALE_ANALYSIS, analysis_stale, function_path, render_function, write_function,
+};
 use crate::{Budget, FacadeError, Response, Session, resolve, store_handle};
 
 const LOCK_WAIT: Duration = Duration::from_secs(10);
-const STALE_NOTE: &str = " (analysis is older than the knowledge; run `decovery analyze`)";
 
 /// Header and pseudo-C of the function `target` resolves to. Writes the function's file when it is missing;
 /// text beyond `budget` is cut and the full text stored as a handle.
 pub fn show(session: &Session, target: &str, budget: Budget) -> Result<Response, FacadeError> {
     let start = resolve(session, target)?.function;
     let root = &session.workspace.root;
-    let file = function_path(session, start);
-    if !root.join(&file).exists() {
+    let fresh;
+    let mut file = function_path(session, start);
+    let session = if root.join(&file).exists() {
+        session
+    } else {
+        // Under the lock the knowledge on disk is what counts: a rename saved since `session` was opened
+        // must not be undone by writing the file under the old name.
         let lock = session.workspace.lock(LOCK_WAIT)?;
-        write_function(session, start, &lock)?;
-    }
+        fresh = Session::open(root)?;
+        file = function_path(&fresh, start);
+        if !root.join(&file).exists() {
+            write_function(&fresh, start, &lock)?;
+        }
+        &fresh
+    };
     let text = render_function(session, start)?;
     let stale = analysis_stale(session)?;
     let name = session.name_of(start).name;
     let lines = text.lines().count();
     let mut summary = format!("{name} at {start}: {lines} lines");
     if stale {
-        summary.push_str(STALE_NOTE);
+        summary.push_str(&format!(" ({STALE_ANALYSIS})"));
     }
     let mut handles = Vec::new();
     let shown = if text.chars().count() > budget.chars {

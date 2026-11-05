@@ -57,7 +57,7 @@ pub fn write_affected(
     let root = &session.workspace.root;
     let mut report = OutputReport::default();
     match change {
-        Change::Types | Change::References => {
+        Change::Types => {
             report = write_every_function(&cx)?;
         }
         Change::Renamed { at, old } => {

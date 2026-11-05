@@ -1,17 +1,17 @@
 //! `annotate`: the one tool that writes knowledge (port of Decomp's write commands).
 
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use decovery_core::{
     Address, ClaimSource, Confidence, LineComment, LocalVariable, RefutedClaim, Symbol, SymbolKind,
-    Workspace, WorkspaceLock,
+    Workspace, WorkspaceLock, today,
 };
 use serde_json::json;
 
-use crate::output::is_identifier;
+use crate::output::{is_identifier, kebab};
 use crate::resolve::{locate, segment_of};
-use crate::session::default_name;
+use crate::session::{default_name, parse_default_name};
 use crate::{Change, FacadeError, OutputReport, Response, Session, resolve, write_affected};
 
 const LOCK_WAIT: Duration = Duration::from_secs(10);
@@ -66,7 +66,7 @@ pub struct Annotation {
     pub confidence: Confidence,
     pub source: ClaimSource,
     pub evidence: Option<String>,
-    /// Replace a stronger claim.
+    /// Replace a value held under a stronger claim (see [`annotate`]).
     pub force: bool,
 }
 
@@ -93,8 +93,10 @@ pub enum AnnotateAction {
 
 /// Records one claim in the workspace knowledge and regenerates the output it affects.
 ///
-/// Takes the workspace lock for the whole operation. A claim weaker than the one it would replace
-/// (`human` > `confirmed` > `assumed`) changes nothing and says why, unless `force` is set.
+/// Takes the workspace lock for the whole operation. A claim weaker than the record it changes
+/// (`human` > `confirmed` > `assumed`) does not replace an existing name, comment, line comment, signature,
+/// type or local: it changes nothing and warns, unless `force` is set. Filling an empty field is always
+/// allowed. A human line comment counts as human whatever the record's stamp.
 pub fn annotate(root: &Path, request: &Annotation) -> Result<Response, FacadeError> {
     check_request(request)?;
     let lock = Workspace::open(root)?.lock(LOCK_WAIT)?;
@@ -348,11 +350,36 @@ fn describe(source: ClaimSource, confidence: Confidence) -> String {
     format!("{}, {}", kebab(&source), kebab(&confidence))
 }
 
-fn kebab<T: serde::Serialize>(value: &T) -> String {
-    serde_json::to_value(value)
-        .ok()
-        .and_then(|v| v.as_str().map(str::to_string))
-        .unwrap_or_default()
+/// The unchanged result when `request` would replace `current`, held under the stronger claim `theirs`,
+/// without `force`; `None` when the request may go ahead.
+fn guard(
+    request: &Annotation,
+    at: Address,
+    action: &'static str,
+    what: &str,
+    current: &str,
+    theirs: (ClaimSource, Confidence),
+) -> Option<Applied> {
+    if request.force || rank(request.source, request.confidence) >= rank(theirs.0, theirs.1) {
+        return None;
+    }
+    Some(Applied::unchanged(
+        at,
+        action,
+        format!(
+            "{at} keeps its {what} {current} ({}), which outranks this claim ({}); use force to replace it",
+            describe(theirs.0, theirs.1),
+            describe(request.source, request.confidence)
+        ),
+        true,
+    ))
+}
+
+/// The active record at `at`, if any.
+fn active_at(symbols: &[Symbol], at: Address) -> Option<&Symbol> {
+    index_of(symbols, at)
+        .map(|i| &symbols[i])
+        .filter(|s| is_active(s))
 }
 
 struct Target {
@@ -435,8 +462,9 @@ fn is_active(s: &Symbol) -> bool {
     s.confidence != Confidence::Refuted
 }
 
-/// The record to claim on at `at`: the existing active one, or a fresh one that keeps the history of a
-/// refuted record. A new record always takes the request's source and confidence; with `restamp` an
+/// The record to claim on at `at`: the existing active one, or a fresh one. A fresh record replacing a
+/// refuted one keeps everything but the refuted name claim (R34): comment, signature, type, locals, line
+/// comments, size, library and the history. A new record always takes the request's source and confidence; with `restamp` an
 /// existing unnamed record does too (Decomp: the claim goes with the name, an unnamed record has none).
 /// Returns its index.
 fn claim_slot(
@@ -465,8 +493,16 @@ fn claim_slot(
             fresh.source = request.source;
             fresh.confidence = request.confidence;
             if let Some(i) = found {
-                fresh.refuted = std::mem::take(&mut symbols[i].refuted);
-                symbols[i] = fresh;
+                let old = std::mem::replace(&mut symbols[i], fresh);
+                let s = &mut symbols[i];
+                s.comment = old.comment;
+                s.signature = old.signature;
+                s.data_type = old.data_type;
+                s.locals = old.locals;
+                s.line_comments = old.line_comments;
+                s.size = old.size;
+                s.library = old.library;
+                s.refuted = old.refuted;
                 i
             } else {
                 symbols.push(fresh);
@@ -483,6 +519,11 @@ fn set_name(
     name: &str,
 ) -> Result<Applied, FacadeError> {
     let at = target.at;
+    if let Some(other) = parse_default_name(name).filter(|&other| other != at) {
+        return Err(FacadeError::Invalid(format!(
+            "'{name}' is the default name of {other}; choose another name"
+        )));
+    }
     if let Some(other) = session
         .workspace
         .symbols
@@ -604,6 +645,46 @@ fn set_comment(
     } else {
         target.kind
     };
+    if let Some(s) = active_at(&session.workspace.symbols, owner) {
+        let blocked = match line_at {
+            Some(at) => s
+                .line_comments
+                .iter()
+                .find(|c| c.address == at && c.text != text)
+                .and_then(|c| {
+                    let source = if c.source == ClaimSource::Human {
+                        ClaimSource::Human
+                    } else {
+                        s.source
+                    };
+                    guard(
+                        request,
+                        at,
+                        "comment",
+                        "line comment",
+                        &c.text,
+                        (source, s.confidence),
+                    )
+                }),
+            None => s
+                .comment
+                .as_deref()
+                .filter(|c| !c.is_empty() && *c != text)
+                .and_then(|c| {
+                    guard(
+                        request,
+                        owner,
+                        "comment",
+                        "comment",
+                        c,
+                        (s.source, s.confidence),
+                    )
+                }),
+        };
+        if let Some(unchanged) = blocked {
+            return Ok(unchanged);
+        }
+    }
     let i = claim_slot(session, request, owner, kind, false);
     let symbols = &mut session.workspace.symbols;
     let s = &mut symbols[i];
@@ -689,7 +770,6 @@ fn set_claim_text(
 ) -> Result<Applied, FacadeError> {
     let at = target.at;
     let action = field.label();
-    let mine = rank(request.source, request.confidence);
     if let Some(i) = index_of(&session.workspace.symbols, at)
         && is_active(&session.workspace.symbols[i])
     {
@@ -703,19 +783,19 @@ fn set_claim_text(
                     false,
                 ));
             }
-            Some(current) if mine < rank(old.source, old.confidence) && !request.force => {
-                return Ok(Applied::unchanged(
+            Some(current) => {
+                if let Some(unchanged) = guard(
+                    request,
                     at,
                     action,
-                    format!(
-                        "{at} keeps its {action} {current} ({}), which outranks this claim ({}); use force to replace it",
-                        describe(old.source, old.confidence),
-                        describe(request.source, request.confidence)
-                    ),
-                    true,
-                ));
+                    action,
+                    current,
+                    (old.source, old.confidence),
+                ) {
+                    return Ok(unchanged);
+                }
             }
-            _ => {}
+            None => {}
         }
     }
     let i = claim_slot(session, request, at, target.kind, true);
@@ -738,6 +818,19 @@ fn set_local(
 ) -> Result<Applied, FacadeError> {
     let at = target.at;
     let new = LocalVariable::new(place, name, data_type.map(|t| t.trim().to_string()));
+    if let Some(s) = active_at(&session.workspace.symbols, at)
+        && let Some(old) = s.locals.iter().find(|l| l.place == place && **l != new)
+        && let Some(unchanged) = guard(
+            request,
+            at,
+            "local",
+            &format!("local {place}"),
+            &old.name,
+            (s.source, s.confidence),
+        )
+    {
+        return Ok(unchanged);
+    }
     let i = claim_slot(session, request, at, SymbolKind::Function, true);
     let symbols = &mut session.workspace.symbols;
     let s = &mut symbols[i];
@@ -844,22 +937,4 @@ fn add_type(session: &mut Session, definition: &str) -> Result<Applied, FacadeEr
         change: Some(Change::Types),
         save: Save::Types(text),
     })
-}
-
-/// Today's date (UTC) as `YYYY-MM-DD`.
-pub(crate) fn today() -> String {
-    let days = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() / 86_400) as i64;
-    // Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm).
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    format!("{year:04}-{month:02}-{day:02}")
 }

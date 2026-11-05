@@ -169,6 +169,28 @@ fn show_writes_missing_file() {
 }
 
 #[test]
+fn show_writes_missing_file_under_the_name_on_disk() {
+    let (d, s) = workspace();
+    // another writer renames alpha after `s` was opened
+    let symbols = d.path().join("knowledge/symbols.toml");
+    let text = std::fs::read_to_string(&symbols).unwrap();
+    std::fs::write(
+        &symbols,
+        text.replace("name = \"alpha\"", "name = \"renamed\""),
+    )
+    .unwrap();
+    let r = show(&s, "flat:00010010", Budget::default()).unwrap();
+    let dir = d.path().join("output/functions/code");
+    assert!(dir.join("flat_00010010_renamed.c").exists());
+    assert!(!dir.join("flat_00010010_alpha.c").exists());
+    assert_eq!(r.data["name"], "renamed");
+    assert_eq!(
+        r.data["file"],
+        "output/functions/code/flat_00010010_renamed.c"
+    );
+}
+
+#[test]
 fn show_reports_stale_analysis() {
     let (d, s) = workspace();
     std::fs::write(d.path().join("knowledge/types.h"), "struct x;\n").unwrap();
@@ -245,7 +267,7 @@ fn detail_pages_handle() {
 }
 
 #[test]
-fn detail_unknown_handle_is_not_found() {
+fn detail_unknown_handle_is_reported_as_handle() {
     let (d, _s) = workspace();
     for id in [
         "h_000000000000",
@@ -254,6 +276,8 @@ fn detail_unknown_handle_is_not_found() {
         "h_12",
     ] {
         let e = detail(d.path(), id, 0, 10).unwrap_err();
-        assert!(matches!(e, FacadeError::NotFound(_)), "{id}: {e}");
+        assert!(matches!(e, FacadeError::UnknownHandle(_)), "{id}: {e}");
+        assert_eq!(e.to_string(), format!("unknown handle {id}"));
+        assert_eq!(e.exit_code(), 2);
     }
 }
