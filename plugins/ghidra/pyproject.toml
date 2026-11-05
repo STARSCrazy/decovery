@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "decovery-ghidra"
-version = "0.1.0"
+version = "0.2.0"
 description = "decovery plugin: Ghidra analysis and decompilation over the plugin protocol"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -12,7 +12,7 @@ license = "Apache-2.0 OR MIT"
 dependencies = ["decovery-plugin"]
 
 [project.optional-dependencies]
-ghidra = ["pyghidra"]
+ghidra = ["pyghidra", "blake3"]
 
 [tool.setuptools]
 packages = ["decovery_ghidra"]

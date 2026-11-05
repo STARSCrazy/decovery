@@ -37,6 +37,14 @@ class GhidraAddress:
             return f"{self.offset:08X}"
         return f"{self.segment:04X}:{self.offset:04X}"
 
+    @staticmethod
+    def parse(text: str) -> "GhidraAddress":
+        """Inverse of `text()`."""
+        segment, sep, offset = text.partition(":")
+        if sep:
+            return GhidraAddress(int(segment, 16), int(offset, 16))
+        return GhidraAddress(None, int(text, 16))
+
 
 @dataclass(frozen=True)
 class MemoryBlockSpec:
@@ -84,6 +92,17 @@ def from_ghidra_address(address: GhidraAddress, arch: str) -> str:
     if kind == "seg" and address.segment is not None:
         return f"seg:{address.segment:04X}:{address.offset:04X}"
     raise MappingError(f"address {address} does not fit arch {arch!r}")
+
+
+def default_name(address: GhidraAddress) -> str:
+    """decovery's default function name (`fun_0001A2B0`, `fun_1000_0010`); functions without a knowledge name
+    carry it in Ghidra, so decompiled callers read the same names as decovery's output."""
+    return "fun_" + address.text().replace(":", "_")
+
+
+def file_stem(text: str) -> str:
+    """Output file name of a decovery address: `:` replaced by `_`."""
+    return text.replace(":", "_")
 
 
 def permissions(text: str) -> tuple[bool, bool, bool]:
