@@ -290,3 +290,107 @@ fn analyze_without_plugin_config_exits_2() {
     let out = analyze_isolated(&dir, &["--plugin", "../x"]);
     assert_eq!(out.status.code(), Some(2));
 }
+
+const DECOMP_TOML: &str = r#"
+[ziel]
+datei = "spiel/PROGRAM.EXE"
+sha256 = "ab12"
+format = "le"
+prozessor = "x86:LE:32:default"
+segment = [
+    { name = "obj1", start = "va:00010000", laenge = 4096, datei_offset = 512, datei_laenge = 4000, rechte = "rx" },
+]
+"#;
+
+/// A Decomp workspace whose `ausgabe/` holds one function.
+fn decomp_with_output() -> tempfile::TempDir {
+    let from = tempfile::tempdir().unwrap();
+    let f = from.path();
+    std::fs::write(f.join("decomp.toml"), DECOMP_TOML).unwrap();
+    let dir = f.join("ausgabe/funktionen/obj1");
+    std::fs::create_dir_all(&dir).unwrap();
+    let header = "/* @adresse    va:00010010 .. va:0001001F (16 Bytes, datei 0x210)\n * @name       fun_00010010  [unbenannt]\n * @gerufen-von (keine)\n * @ruft       (keine)\n * @strings    (keine)\n * @globale    (keine)\n * @laufzeit   unbekannt\n * @nachbau    nicht-versucht\n */\n";
+    std::fs::write(
+        dir.join("va_00010010_fun_00010010.c"),
+        format!("{header}\nvoid f(void)\n{{\n  return;\n}}\n"),
+    )
+    .unwrap();
+    from
+}
+
+#[test]
+fn migrate_with_analysis_generates_output() {
+    let from = decomp_with_output();
+    let to = tempfile::tempdir().unwrap();
+    let ws = to.path().join("ws");
+    let out = Command::new(env!("CARGO_BIN_EXE_decovery"))
+        .arg("migrate")
+        .arg(from.path())
+        .arg(&ws)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains("output generated: 1 files written"),
+        "{stdout}"
+    );
+    let file = ws.join("output/functions/obj1/flat_00010010_fun_00010010.c");
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.starts_with("/* @address    flat:00010010"), "{text}");
+    assert!(
+        text.ends_with("\nvoid f(void)\n{\n  return;\n}\n"),
+        "{text}"
+    );
+    let index = std::fs::read_to_string(ws.join("output/index.md")).unwrap();
+    assert!(
+        index.contains("functions/obj1/flat_00010010_fun_00010010.c"),
+        "{index}"
+    );
+    // `find code` reads the generated files
+    let out = Command::new(env!("CARGO_BIN_EXE_decovery"))
+        .args(["find", "code", "return"])
+        .arg("--workspace")
+        .arg(&ws)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(String::from_utf8(out.stdout).unwrap().contains("return;"));
+}
+
+#[test]
+fn migrate_without_analysis_says_so_and_errors_exit_2() {
+    let from = tempfile::tempdir().unwrap();
+    std::fs::write(from.path().join("decomp.toml"), DECOMP_TOML).unwrap();
+    let to = tempfile::tempdir().unwrap();
+    let ws = to.path().join("ws");
+    let migrate = || {
+        Command::new(env!("CARGO_BIN_EXE_decovery"))
+            .arg("migrate")
+            .arg(from.path())
+            .arg(&ws)
+            .output()
+            .unwrap()
+    };
+    let out = migrate();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .contains("No analysis imported"),
+    );
+    assert!(!ws.join("output").exists());
+    // the target workspace exists now: refused with exit code 2
+    let out = migrate();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8(out.stderr)
+            .unwrap()
+            .starts_with("error: ")
+    );
+}
