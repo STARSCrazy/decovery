@@ -18,12 +18,15 @@ use decovery_core::{
 use crate::{FacadeError, Session};
 
 pub use files::{function_path, render_function, write_affected, write_all, write_function};
+pub(crate) use header::{kebab, safe};
 pub use indices::{StatusCounts, status_counts};
 
 /// Directory of all generated output, relative to the workspace root.
 pub const OUTPUT_DIR: &str = "output";
 /// Directory of the function files below [`OUTPUT_DIR`].
 pub const FUNCTIONS_DIR: &str = "functions";
+/// What `index.md`, `show`, `status` and the CLI say when [`analysis_stale`] is true.
+pub const STALE_ANALYSIS: &str = "analysis is older than the knowledge; run `decovery analyze`";
 
 /// What changed in the knowledge, to decide which function files to regenerate.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,8 +38,6 @@ pub enum Change {
     Symbol { at: Address },
     /// `types.h` changed.
     Types,
-    /// `references.toml` changed.
-    References,
 }
 
 /// How many function files were written and how many stale ones removed.

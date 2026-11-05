@@ -161,7 +161,7 @@ struct AnnotateParams {
     confidence: Option<ClaimConfidence>,
     /// What the claim rests on.
     evidence: Option<String>,
-    /// Replace a stronger claim.
+    /// Replace a value held under a stronger claim (see the tool description).
     force: Option<bool>,
 }
 
@@ -253,7 +253,7 @@ impl Server {
     }
 
     #[tool(
-        description = "Record one claim (exactly one action field) with source `agent`; affected output files are regenerated. A weaker claim never replaces a stronger one unless `force` is set."
+        description = "Record one claim (exactly one action field) with source `agent`; affected output files are regenerated. Ranks: human > confirmed > assumed. A claim ranked below the record it changes does not replace an existing name, comment, line comment, signature, type or local (no change, a warning instead) unless `force` is set; filling an empty field is always allowed. A human line comment counts as human. A refute below the record's rank needs `force` too."
     )]
     async fn annotate(&self, Parameters(p): Parameters<AnnotateParams>) -> CallToolResult {
         let request = match annotation(p) {

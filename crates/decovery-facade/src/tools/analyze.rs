@@ -20,6 +20,7 @@ use decovery_plugin::{Blob, CallOptions, PluginError, PluginHost, PluginInfo, Pr
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
+use crate::output::safe;
 use crate::plugins::{PluginConfig, plugin_config, read_user_plugins};
 use crate::{FacadeError, Response, Session, resolve, write_all};
 
@@ -425,10 +426,6 @@ fn failure_body(error: &str, disassembly: &[(String, String)]) -> String {
     )
 }
 
-fn safe(text: &str) -> String {
-    text.replace("*/", "* /")
-}
-
 /// The selected targets resolved against the freshly exported functions.
 fn resolve_selection(
     r: &RunRequest<'_>,
@@ -457,7 +454,7 @@ fn new_analysis(
     knowledge: &str,
     export: &ExportFile,
 ) -> Analysis {
-    let mut analysis = Analysis::new(provider, target, knowledge, super::annotate::today());
+    let mut analysis = Analysis::new(provider, target, knowledge, decovery_core::today());
     analysis.functions = export
         .functions
         .iter()

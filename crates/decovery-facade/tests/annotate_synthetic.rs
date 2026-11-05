@@ -310,7 +310,7 @@ fn comment_inside_function_is_line_comment() {
     assert_eq!(s.line_comments[0].address, flat(0x10050));
     assert_eq!(s.line_comments[0].text, "loop head");
     assert_eq!(s.line_comments[0].source, ClaimSource::Human);
-    // at the start it is the function comment, and a comment is never blocked by precedence
+    // at the start it is the function comment; filling an empty comment is never blocked by precedence
     let r = annotate(
         d.path(),
         &agent("flat:00010010", AnnotateAction::Comment("entry".into())),
@@ -679,4 +679,169 @@ fn agent_local_does_not_downgrade_human_signature() {
         symbol_at(d.path(), 0x10100).signature.as_deref(),
         Some("int helper(int a)")
     );
+}
+
+fn comment(text: &str) -> AnnotateAction {
+    AnnotateAction::Comment(text.into())
+}
+
+fn local(place: &str, name: &str) -> AnnotateAction {
+    AnnotateAction::Local {
+        place: place.into(),
+        name: name.into(),
+        data_type: None,
+    }
+}
+
+#[test]
+fn agent_cannot_replace_human_comment() {
+    let d = workspace();
+    annotate(d.path(), &request("alpha", comment("entry point"))).unwrap();
+    annotate(d.path(), &request("flat:00010050", comment("loop head"))).unwrap();
+    let before = symbols_bytes(d.path());
+    for (at, text) in [("alpha", "main loop"), ("flat:00010050", "copy loop")] {
+        let mut req = agent(at, comment(text));
+        req.confidence = Confidence::Confirmed;
+        let r = annotate(d.path(), &req).unwrap();
+        assert_eq!(r.data["changed"], false, "{at}");
+        let warnings = r.data["warnings"].as_array().unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].as_str().unwrap().contains("force"),
+            "{warnings:?}"
+        );
+    }
+    assert_eq!(symbols_bytes(d.path()), before);
+    // a human line comment stays human even on an agent's record
+    annotate(d.path(), &request("flat:00010210", comment("human note"))).unwrap();
+    let r = annotate(d.path(), &agent("flat:00010210", comment("agent note"))).unwrap();
+    assert_eq!(r.data["changed"], false);
+    assert_eq!(
+        symbol_at(d.path(), 0x10200).line_comments[0].text,
+        "human note"
+    );
+    // an agent's comment on an agent's record can be replaced by an agent
+    annotate(d.path(), &agent("gamma", comment("first"))).unwrap();
+    let r = annotate(d.path(), &agent("gamma", comment("second"))).unwrap();
+    assert_eq!(r.data["changed"], true);
+    assert_eq!(
+        symbol_at(d.path(), 0x10200).comment.as_deref(),
+        Some("second")
+    );
+}
+
+#[test]
+fn agent_cannot_replace_human_local() {
+    let d = workspace();
+    annotate(d.path(), &request("alpha", local("param:1", "count"))).unwrap();
+    let before = symbols_bytes(d.path());
+    let mut req = agent("alpha", local("param:1", "size"));
+    req.confidence = Confidence::Confirmed;
+    let r = annotate(d.path(), &req).unwrap();
+    assert_eq!(r.data["changed"], false);
+    assert!(
+        r.data["warnings"][0].as_str().unwrap().contains("force"),
+        "{}",
+        r.data
+    );
+    assert_eq!(symbols_bytes(d.path()), before);
+    // another place is not a replacement
+    let r = annotate(d.path(), &agent("alpha", local("param:2", "size"))).unwrap();
+    assert_eq!(r.data["changed"], true);
+    let mut req = agent("alpha", local("param:1", "size"));
+    req.force = true;
+    assert_eq!(annotate(d.path(), &req).unwrap().data["changed"], true);
+    let s = symbol_at(d.path(), 0x10010);
+    assert_eq!(s.locals.len(), 2);
+    assert!(
+        s.locals
+            .iter()
+            .any(|l| l.place == "param:1" && l.name == "size")
+    );
+}
+
+#[test]
+fn force_replaces_human_comment() {
+    let d = workspace();
+    annotate(d.path(), &request("alpha", comment("entry point"))).unwrap();
+    annotate(d.path(), &request("flat:00010050", comment("loop head"))).unwrap();
+    for (at, text) in [("alpha", "main loop"), ("flat:00010050", "copy loop")] {
+        let mut req = agent(at, comment(text));
+        req.force = true;
+        assert_eq!(
+            annotate(d.path(), &req).unwrap().data["changed"],
+            true,
+            "{at}"
+        );
+    }
+    let s = symbol_at(d.path(), 0x10010);
+    assert_eq!(s.comment.as_deref(), Some("main loop"));
+    assert_eq!(s.line_comments[0].text, "copy loop");
+    assert_eq!(s.line_comments[0].source, ClaimSource::Agent);
+    // the record keeps its human name claim
+    assert_eq!((s.name.as_str(), s.source), ("alpha", ClaimSource::Human));
+}
+
+#[test]
+fn claim_after_refute_keeps_other_fields() {
+    let d = workspace();
+    let at = "alpha";
+    annotate(d.path(), &request(at, comment("entry point"))).unwrap();
+    annotate(d.path(), &request("flat:00010050", comment("loop head"))).unwrap();
+    annotate(
+        d.path(),
+        &request(at, AnnotateAction::Signature("int alpha(int n)".into())),
+    )
+    .unwrap();
+    annotate(
+        d.path(),
+        &request(at, AnnotateAction::DataType("int".into())),
+    )
+    .unwrap();
+    annotate(d.path(), &request(at, local("param:1", "n"))).unwrap();
+    annotate(
+        d.path(),
+        &request(
+            at,
+            AnnotateAction::Refute {
+                reason: "wrong".into(),
+            },
+        ),
+    )
+    .unwrap();
+    let refuted = symbol_at(d.path(), 0x10010);
+    assert_eq!(refuted.confidence, Confidence::Refuted);
+    // any later claim on the address starts a new record that keeps the other fields
+    annotate(d.path(), &agent("flat:00010010", name("alpha2"))).unwrap();
+    let all: Vec<_> = symbols(d.path())
+        .into_iter()
+        .filter(|s| s.address == flat(0x10010))
+        .collect();
+    assert_eq!(all.len(), 1);
+    let s = &all[0];
+    assert_eq!(
+        (s.name.as_str(), s.source, s.confidence),
+        ("alpha2", ClaimSource::Agent, Confidence::Assumed)
+    );
+    assert_eq!(s.comment, refuted.comment);
+    assert_eq!(s.signature.as_deref(), Some("int alpha(int n)"));
+    assert_eq!(s.data_type.as_deref(), Some("int"));
+    assert_eq!(s.locals, refuted.locals);
+    assert_eq!(s.line_comments, refuted.line_comments);
+    assert_eq!(s.refuted, refuted.refuted);
+    assert_eq!(s.refuted.len(), 1);
+}
+
+#[test]
+fn rejects_default_name_of_other_address() {
+    let d = workspace();
+    let before = symbols_bytes(d.path());
+    let m = invalid(annotate(
+        d.path(),
+        &request("flat:00010100", name("fun_00010200")),
+    ));
+    assert!(m.contains("default name of flat:00010200"), "{m}");
+    assert_eq!(symbols_bytes(d.path()), before);
+    // its own default name is no conflict
+    annotate(d.path(), &request("flat:00010100", name("fun_00010100"))).unwrap();
 }

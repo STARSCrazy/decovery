@@ -18,6 +18,8 @@ pub enum FacadeError {
     AnalysisOfOtherTarget { expected: String, found: String },
     #[error("no function or symbol named {0}")]
     NotFound(String),
+    #[error("unknown handle {0}")]
+    UnknownHandle(String),
     #[error("{address} is in no function{}", nearest_text(nearest))]
     NotInFunction {
         address: Address,

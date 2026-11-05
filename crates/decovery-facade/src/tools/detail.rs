@@ -15,13 +15,13 @@ pub fn detail(
     limit: usize,
 ) -> Result<Response, FacadeError> {
     if !is_handle_id(handle) {
-        return Err(FacadeError::NotFound(handle.to_string()));
+        return Err(FacadeError::UnknownHandle(handle.to_string()));
     }
     let path = handle_path(root, handle);
     let content = match std::fs::read_to_string(&path) {
         Ok(content) => content,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(FacadeError::NotFound(handle.to_string()));
+            return Err(FacadeError::UnknownHandle(handle.to_string()));
         }
         Err(source) => return Err(FacadeError::Output { path, source }),
     };

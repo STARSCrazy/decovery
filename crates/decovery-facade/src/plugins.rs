@@ -49,6 +49,9 @@ fn non_empty_var(name: &str) -> Option<std::ffi::OsString> {
 
 /// The plugins of the user config; empty when there is none or it cannot be read (see [`read_user_plugins`]
 /// for the error).
+///
+/// Public for the local (`#[ignore]`) tests, which take the user's `[plugins.ghidra]` without failing on a
+/// missing or broken config; the tools themselves use [`read_user_plugins`] and report its error.
 pub fn user_plugins() -> BTreeMap<String, PluginConfig> {
     read_user_plugins().unwrap_or_default()
 }

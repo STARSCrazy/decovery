@@ -12,7 +12,7 @@ pub mod workspace;
 pub use address::{Address, AddressError, AddressInput};
 pub use analysis::{
     ANALYSIS_DIR, AccessKind, Analysis, AnalysisIndex, AnalyzedFunction, CallEdge, DataAccess,
-    Provider, StringItem, knowledge_hash,
+    Provider, StringItem, knowledge_hash, today,
 };
 pub use knowledge::{
     ClaimSource, Confidence, LineComment, LocalVariable, RefutedClaim, Symbol, SymbolKind,
