@@ -222,6 +222,8 @@ version = "0.1.0"
 dependencies = [
  "decovery-core",
  "decovery-loaders",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
 ]

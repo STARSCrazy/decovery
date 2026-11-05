@@ -23,7 +23,8 @@ pub use program::{
     ArchMode, ExecutableFormat, Permissions, Program, Region, RelocKind, Relocation,
 };
 pub use records::{
-    RebuildRecord, RebuildResult, Reference, ReferenceKind, read_rebuild, read_references,
+    Equivalence, RebuildRecord, RebuildResult, Reference, ReferenceKind, read_rebuild,
+    read_references,
 };
 pub use store::{WorkspaceLock, write_atomic};
 pub use workspace::{
