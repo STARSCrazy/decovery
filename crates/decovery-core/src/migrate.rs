@@ -8,6 +8,14 @@ mod analysis_import;
 mod knowledge;
 mod layout;
 
+/// German-to-English id tables of the import, for parity checks against Decomp's generated output.
+#[doc(hidden)]
+pub mod tables {
+    pub use super::knowledge::{
+        DIAGNOSES, EQUIVALENCE_DYNAMIC, EQUIVALENCE_STATIC, EQUIVALENCE_VERDICTS, SOURCES,
+    };
+}
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 

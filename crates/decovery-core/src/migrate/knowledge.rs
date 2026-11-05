@@ -41,7 +41,8 @@ struct Node {
     fields: &'static [(&'static str, &'static str, F)],
 }
 
-const SOURCES: &[(&str, &str)] = &[
+/// Claim sources (`quelle`).
+pub const SOURCES: &[(&str, &str)] = &[
     ("mensch", "human"),
     ("ki", "agent"),
     ("signatur", "signature"),
@@ -53,7 +54,8 @@ const SOURCES: &[(&str, &str)] = &[
 
 const RESULTS: &[(&str, &str)] = &[("identisch", "identical"), ("abweichend", "differs")];
 
-const DIAGNOSES: &[(&str, &str)] = &[
+/// Rebuild diagnosis ids (`diagnose`).
+pub const DIAGNOSES: &[(&str, &str)] = &[
     ("operanden-tausch", "operand-swap"),
     ("gleiche-enden", "same-endings"),
     ("konstante", "constant"),
@@ -75,32 +77,29 @@ const DIAGNOSES: &[(&str, &str)] = &[
     ),
 ];
 
+/// Equivalence verdicts (`gleichwertig.urteil`).
+pub const EQUIVALENCE_VERDICTS: &[(&str, &str)] = &[
+    ("ungeprueft", "unchecked"),
+    ("gleichwertig_getestet", "equivalent_tested"),
+    ("gleichwertig_belegt", "equivalent_proven"),
+];
+
+/// Static equivalence results (`gleichwertig.statisch`).
+pub const EQUIVALENCE_STATIC: &[(&str, &str)] = &[
+    ("anders", "different"),
+    ("unklar", "unclear"),
+    ("nur_register", "registers_only"),
+];
+
+/// Dynamic equivalence results (`gleichwertig.dynamisch`).
+pub const EQUIVALENCE_DYNAMIC: &[(&str, &str)] = &[("ohne_fall", "no_case"), ("gleich", "equal")];
+
 static EQUIVALENCE: Node = Node {
     fields: &[
-        (
-            "urteil",
-            "verdict",
-            F::Enum(&[
-                ("ungeprueft", "unchecked"),
-                ("gleichwertig_getestet", "equivalent_tested"),
-                ("gleichwertig_belegt", "equivalent_proven"),
-            ]),
-        ),
-        (
-            "statisch",
-            "static",
-            F::Enum(&[
-                ("anders", "different"),
-                ("unklar", "unclear"),
-                ("nur_register", "registers_only"),
-            ]),
-        ),
+        ("urteil", "verdict", F::Enum(EQUIVALENCE_VERDICTS)),
+        ("statisch", "static", F::Enum(EQUIVALENCE_STATIC)),
         ("statisch_grund", "static_reason", F::Text),
-        (
-            "dynamisch",
-            "dynamic",
-            F::Enum(&[("ohne_fall", "no_case"), ("gleich", "equal")]),
-        ),
+        ("dynamisch", "dynamic", F::Enum(EQUIVALENCE_DYNAMIC)),
         ("faelle", "cases", F::Copy),
         ("echte", "genuine", F::Copy),
         ("belastbar", "reliable", F::Copy),
