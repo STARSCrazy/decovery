@@ -1,0 +1,19 @@
+[package]
+name = "decovery-facade"
+description = "Shared operations of decovery: sessions, target resolution, output, queries"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+decovery-core.workspace = true
+decovery-loaders.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

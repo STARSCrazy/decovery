@@ -15,6 +15,7 @@ path = "src/main.rs"
 clap.workspace = true
 decovery-core.workspace = true
 decovery-diff.workspace = true
+decovery-facade.workspace = true
 decovery-loaders.workspace = true
 decovery-objects.workspace = true
 serde_json.workspace = true
