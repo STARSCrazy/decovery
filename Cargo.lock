@@ -223,10 +223,12 @@ dependencies = [
  "blake3",
  "decovery-core",
  "decovery-loaders",
+ "decovery-plugin",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror",
+ "toml",
 ]
 
 [[package]]

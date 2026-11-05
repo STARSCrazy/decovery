@@ -9,8 +9,8 @@ mod compare;
 
 use decovery_core::{ClaimSource, Confidence};
 use decovery_facade::{
-    AnnotateAction, Annotation, Budget, DEFAULT_LIMIT, FacadeError, FindQuery, FindWhat,
-    FunctionFilter, FunctionSort, Response, Session,
+    AnalyzeOptions, AnnotateAction, Annotation, Budget, DEFAULT_LIMIT, FacadeError, FindQuery,
+    FindWhat, FunctionFilter, FunctionSort, Progress, Response, Session,
 };
 
 /// Recover source code from old executables.
@@ -116,6 +116,16 @@ enum Command {
         /// Replace a stronger claim.
         #[arg(long)]
         force: bool,
+    },
+    /// Run the analyzer plugin over the target: functions, calls, strings, data accesses and pseudo-C.
+    /// Progress goes to stderr.
+    Analyze {
+        /// Plugin as configured in `[plugins.<name>]` (decovery.toml or the user config).
+        #[arg(long, default_value = "ghidra")]
+        plugin: String,
+        /// Decompile only this function again (name, address or `file:0x…`; repeatable).
+        #[arg(long = "function", value_name = "TARGET")]
+        function: Vec<String>,
     },
     /// Page the content of a handle returned by another command.
     Detail {
@@ -336,6 +346,13 @@ fn main() -> ExitCode {
             };
             finish(annotate(&cli.workspace, &request, cli.json))
         }
+        Command::Analyze { plugin, function } => {
+            let options = AnalyzeOptions {
+                plugin,
+                functions: (!function.is_empty()).then_some(function),
+            };
+            finish(analyze(&cli.workspace, &options, cli.json))
+        }
         Command::Detail {
             handle,
             offset,
@@ -379,6 +396,27 @@ fn show(workspace: &Path, target: &str, json: bool) -> Result<(), FacadeError> {
 
 fn annotate(workspace: &Path, request: &Annotation, json: bool) -> Result<(), FacadeError> {
     let response = decovery_facade::annotate(workspace, request)?;
+    if json {
+        return print_json(&response);
+    }
+    println!("{}", response.summary);
+    for warning in response.data["warnings"].as_array().into_iter().flatten() {
+        if let Some(text) = warning.as_str() {
+            eprintln!("warning: {text}");
+        }
+    }
+    Ok(())
+}
+
+fn analyze(workspace: &Path, options: &AnalyzeOptions, json: bool) -> Result<(), FacadeError> {
+    let progress = |p: Progress| {
+        let message = p.message.unwrap_or_default();
+        match p.total {
+            Some(total) => eprintln!("{}/{total} {message}", p.done),
+            None => eprintln!("{message}"),
+        }
+    };
+    let response = decovery_facade::analyze(workspace, options, &progress)?;
     if json {
         return print_json(&response);
     }

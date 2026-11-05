@@ -1,5 +1,6 @@
 //! Workspace configuration (`decovery.toml`) and opening a workspace.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -113,6 +114,29 @@ pub struct WorkspaceConfig {
     pub unpacked: Option<UnpackedConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub detected: Vec<DetectedFact>,
+    /// `[plugins.<name>]`: how to start a plugin; overrides the user config entry of the same name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub plugins: BTreeMap<String, PluginConfig>,
+}
+
+/// How to start a plugin (`[plugins.<name>]` in `decovery.toml` or the user config).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct PluginConfig {
+    /// Program and arguments.
+    pub command: Vec<String>,
+    /// Extra environment variables of the plugin process.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+}
+
+impl PluginConfig {
+    pub fn new(command: Vec<String>) -> Self {
+        PluginConfig {
+            command,
+            env: BTreeMap::new(),
+        }
+    }
 }
 
 /// File format of the target as configured.
@@ -263,5 +287,47 @@ mod hex_u32 {
             .or_else(|| text.strip_prefix("0X"))
             .unwrap_or(&text);
         u32::from_str_radix(digits, 16).map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BASE: &str = "schema = 1
+
+[target]
+file = \"t.exe\"
+sha256 = \"aa\"
+format = \"le\"
+processor = \"x86\"
+";
+
+    #[test]
+    fn config_without_plugins_loads_and_writes_none() {
+        let config: WorkspaceConfig = toml::from_str(BASE).unwrap();
+        assert!(config.plugins.is_empty());
+        assert!(!toml::to_string(&config).unwrap().contains("plugins"));
+    }
+
+    #[test]
+    fn plugins_round_trip() {
+        let text = format!(
+            "{BASE}
+[plugins.ghidra]
+command = [\"py\", \"-m\", \"decovery_ghidra\"]
+env = {{ A = \"1\" }}
+
+[plugins.other]
+command = [\"x\"]
+"
+        );
+        let config: WorkspaceConfig = toml::from_str(&text).unwrap();
+        let ghidra = &config.plugins["ghidra"];
+        assert_eq!(ghidra.command, ["py", "-m", "decovery_ghidra"]);
+        assert_eq!(ghidra.env["A"], "1");
+        assert!(config.plugins["other"].env.is_empty());
+        let again: WorkspaceConfig = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(again, config);
     }
 }

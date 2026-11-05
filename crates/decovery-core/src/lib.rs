@@ -28,7 +28,7 @@ pub use records::{
 };
 pub use store::{WorkspaceLock, write_atomic};
 pub use workspace::{
-    AnalysisConfig, DetectedFact, LinkConfig, OutputConfig, RebuildConfig, RuntimeBase,
-    RuntimeConfig, SegmentConfig, TargetConfig, TargetFormat, UnpackedConfig, Workspace,
-    WorkspaceConfig, WorkspaceError,
+    AnalysisConfig, DetectedFact, LinkConfig, OutputConfig, PluginConfig, RebuildConfig,
+    RuntimeBase, RuntimeConfig, SegmentConfig, TargetConfig, TargetFormat, UnpackedConfig,
+    Workspace, WorkspaceConfig, WorkspaceError,
 };

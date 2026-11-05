@@ -180,6 +180,7 @@ mod tests {
             runtime: None,
             unpacked: None,
             detected: Vec::new(),
+            plugins: Default::default(),
         };
         std::fs::write(dir.join(CONFIG_FILE), toml::to_string(&config).unwrap()).unwrap();
         Workspace {
