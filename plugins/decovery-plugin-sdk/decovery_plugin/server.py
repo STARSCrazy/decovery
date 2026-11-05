@@ -83,6 +83,7 @@ class Plugin:
         self.version = version
         self._methods: dict[str, Handler] = {}
         self._capabilities: dict[str, int] = {}
+        self._shutdown_hooks: list[Callable[[], None]] = []
 
     def method(self, name: str, capability_version: int = 1) -> Callable[[Handler], Handler]:
         """Register `<capability>/<op>`; the capability's version is announced in `initialize`."""
@@ -101,6 +102,12 @@ class Plugin:
             return handler
 
         return register
+
+    def on_shutdown(self, hook: Callable[[], None]) -> Callable[[], None]:
+        """Run `hook` when the session ends (`shutdown` or end of input), after running requests had their
+        grace period. Hooks run in registration order; one that raises does not stop the others."""
+        self._shutdown_hooks.append(hook)
+        return hook
 
     def initialize_result(self) -> dict:
         return {
@@ -216,6 +223,11 @@ class _Session:
         deadline = time.monotonic() + 5
         for worker in self.workers:
             worker.join(max(0.0, deadline - time.monotonic()))
+        for hook in self.plugin._shutdown_hooks:
+            try:
+                hook()
+            except Exception as exc:  # cleanup must go on
+                print(f"decovery-plugin: shutdown hook failed: {type(exc).__name__}: {exc}", file=sys.stderr)
 
 
 def decode_blob(blob: dict) -> bytes:

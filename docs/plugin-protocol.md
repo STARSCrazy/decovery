@@ -20,7 +20,7 @@ Design background: `docs/design/0001-decovery-design.md`, sections 5.1 and 5.11 
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocol":"decovery-plugin/1","host_version":"0.1.0"}}
-{"jsonrpc":"2.0","id":1,"result":{"name":"ghidra","version":"0.1.0","protocol":"decovery-plugin/1",
+{"jsonrpc":"2.0","id":1,"result":{"name":"ghidra","version":"0.2.0","protocol":"decovery-plugin/1",
   "capabilities":{"analyzer":{"version":2},"decompiler":{"version":2}}}}
 ```
 
@@ -147,3 +147,7 @@ functions.
 | `-32602` | invalid params, unmappable program description, unknown calling convention |
 | `-32010` | Ghidra unavailable (`GHIDRA_INSTALL_DIR` unset or wrong, pyghidra missing, project locked by another process) |
 | `-32011` | no program open (`analyzer/open` not called yet) |
+| `-32012` | project or file I/O failed (project folder, `project.json`, export file, `out_dir`, `applied.json`) |
+
+On `shutdown` or end of input the plugin closes the decompiler, the program and the Ghidra project (releasing its
+lock).

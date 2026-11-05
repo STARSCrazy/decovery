@@ -22,10 +22,15 @@ DECOMPILER_VERSION = 2
 
 INVALID_PARAMS = -32602
 NOT_OPENED = -32011
+IO_FAILED = -32012
 
 
 def _backend_error(exc: BackendError) -> RpcError:
     return RpcError(exc.code, exc.message)
+
+
+def _io_error(exc: OSError) -> RpcError:
+    return RpcError(IO_FAILED, f"project or file I/O failed: {exc}")
 
 
 def build_plugin(backend_factory: Callable[[], Backend] = GhidraBackend) -> Plugin:
@@ -34,6 +39,14 @@ def build_plugin(backend_factory: Callable[[], Backend] = GhidraBackend) -> Plug
     session: dict[str, Any] = {"backend": None, "arch": None, "calling_convention": None}
     # The SDK runs requests on worker threads; one Ghidra program is used by one request at a time.
     lock = threading.RLock()
+
+    @plugin.on_shutdown
+    def close_session() -> None:
+        """Release the program, the decompiler and the project lock when the session ends."""
+        with lock:
+            backend, session["backend"] = session["backend"], None
+            if backend is not None:
+                backend.close()
 
     def opened() -> tuple[Backend, str]:
         if session["backend"] is None:
@@ -81,13 +94,19 @@ def build_plugin(backend_factory: Callable[[], Backend] = GhidraBackend) -> Plug
                     blocks,
                     entries,
                     str(location),
-                    {"calling_convention": calling_convention},
+                    {
+                        "calling_convention": calling_convention,
+                        # Decomp enabled it for flat 32-bit formats only, never for real mode
+                        "aggressive_instruction_finder": arch == "x86-flat-32",
+                    },
                     reuse,
                     ctx.progress,
                 )
                 project.save_key(location, key)
             except BackendError as exc:
                 raise _backend_error(exc) from exc
+            except OSError as exc:
+                raise _io_error(exc) from exc
             session.update(backend=backend, arch=arch, calling_convention=calling_convention)
         return {"functions": outcome.functions, "reused": outcome.reused}
 
@@ -121,6 +140,8 @@ def build_plugin(backend_factory: Callable[[], Backend] = GhidraBackend) -> Plug
                 applied, more = backend.apply(symbols, types_h, references, session["calling_convention"])
             except BackendError as exc:
                 raise _backend_error(exc) from exc
+            except OSError as exc:
+                raise _io_error(exc) from exc
         return {"applied": applied, "warnings": warnings + list(more)}
 
     @plugin.method("analyzer/export", capability_version=ANALYZER_VERSION)
@@ -134,7 +155,10 @@ def build_plugin(backend_factory: Callable[[], Backend] = GhidraBackend) -> Plug
                 data = backend.export_data()
             except BackendError as exc:
                 raise _backend_error(exc) from exc
-        return export.write_export(data, arch, out_path)
+        try:
+            return export.write_export(data, arch, out_path)
+        except OSError as exc:
+            raise _io_error(exc) from exc
 
     @plugin.method("decompiler/decompile", capability_version=DECOMPILER_VERSION)
     def decompile(params: dict, ctx: Context) -> list[dict]:
@@ -165,7 +189,10 @@ def build_plugin(backend_factory: Callable[[], Backend] = GhidraBackend) -> Plug
                 if outcome.code is not None:
                     path = Path(out_dir) / f"{mapping.file_stem(text)}.c"
                     code = outcome.code.replace("\r\n", "\n")
-                    export.write_atomic(path, code.encode("utf-8", "replace"))
+                    try:
+                        export.write_atomic(path, code.encode("utf-8", "replace"))
+                    except OSError as exc:  # out_dir unusable: no later function would fare better
+                        raise _io_error(exc) from exc
                     entry["path"] = str(path)
                 else:
                     entry["error"] = outcome.error or "decompilation failed"

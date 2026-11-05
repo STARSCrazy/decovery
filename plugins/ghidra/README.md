@@ -56,5 +56,6 @@ re-analysis. A `project_dir` with a leading-dot path component moves to
 | `-32602` | invalid params, unmappable program description, unknown calling convention |
 | `-32010` | Ghidra unavailable (`GHIDRA_INSTALL_DIR` unset or wrong, pyghidra missing, project locked) |
 | `-32011` | no program open (`analyzer/open` not called yet) |
+| `-32012` | project or file I/O failed (project folder, export file, `out_dir`) |
 
 Tests: `python -m unittest discover -s tests` (finds the SDK in `../decovery-plugin-sdk` when it is not installed).

@@ -72,16 +72,24 @@ def stored_key_matches(location: Path, key: dict) -> bool:
     return stored == key
 
 
+PROJECT_FILES = (
+    f"{PROJECT_NAME}.gpr",
+    f"{PROJECT_NAME}.rep",
+    f"{PROJECT_NAME}.lock",
+    f"{PROJECT_NAME}.lock~",
+    KEY_FILE,
+    APPLIED_FILE,
+)
+
+
 def reset_project(location: Path) -> None:
-    """Delete a stale Ghidra project and its bookkeeping; other files in the folder stay."""
-    if not location.is_dir():
-        return
-    for entry in location.iterdir():
-        if entry.name.startswith(PROJECT_NAME + ".") or entry.name in (KEY_FILE, APPLIED_FILE):
-            if entry.is_dir() and not entry.is_symlink():
-                shutil.rmtree(entry)
-            else:
-                entry.unlink()
+    """Delete a stale Ghidra project and its bookkeeping (exactly `PROJECT_FILES`); other files stay."""
+    for name in PROJECT_FILES:
+        entry = location / name
+        if entry.is_dir() and not entry.is_symlink():
+            shutil.rmtree(entry)
+        elif entry.exists() or entry.is_symlink():
+            entry.unlink()
 
 
 def save_key(location: Path, key: dict) -> None:

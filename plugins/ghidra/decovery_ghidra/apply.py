@@ -265,6 +265,23 @@ def wanted_sets(symbols: dict[GhidraAddress, ApplySymbol], references: list[Appl
     return {"function": function, "line": line, "signature": signature, "reference": reference}
 
 
+def applied_document(wanted: dict[str, set[str]]) -> bytes:
+    """Content of `applied.json`."""
+    document = {"schema": 1, **{k: sorted(v) for k, v in sorted(wanted.items())}}
+    return (json.dumps(document) + "\n").encode("utf-8")
+
+
+def parse_applied(text: str) -> dict[str, list[str]]:
+    """Lists of `applied.json` (files written before the `schema` key are read as well)."""
+    data = json.loads(text)
+    if not isinstance(data, dict):
+        raise ValueError("not an object")
+    data.pop("schema", None)
+    if not all(isinstance(v, list) for v in data.values()):
+        raise ValueError("not an object of lists")
+    return data
+
+
 # -- Ghidra ----------------------------------------------------------------------------------------------------
 
 
@@ -389,10 +406,7 @@ class GhidraApplier:
         if new:
             self._reanalyze()
         p.save("knowledge applied", pyghidra.task_monitor())
-        write_atomic(
-            self.folder / "applied.json",
-            (json.dumps({k: sorted(v) for k, v in sorted(wanted.items())}) + "\n").encode("utf-8"),
-        )
+        write_atomic(self.folder / "applied.json", applied_document(wanted))
         return applied, warnings
 
     # -- types.h ---------------------------------------------------------------------------------------------
@@ -437,10 +451,7 @@ class GhidraApplier:
         if not path.exists():
             return {}
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(data, dict) or not all(isinstance(v, list) for v in data.values()):
-                raise ValueError("not an object of lists")
-            return data
+            return parse_applied(path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             warnings.append(f"{path.name} unreadable, treated as empty: {exc}")
             return {}

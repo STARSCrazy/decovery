@@ -61,6 +61,7 @@ class LocalGhidraTests(unittest.TestCase):
                 req(3, "analyzer/apply", {"symbols": symbols, "types_h": "", "references": []}),
                 req(4, "analyzer/export", {"out_path": str(out_path)}),
                 req(5, "decompiler/decompile", {"addresses": ["flat:00010000"], "out_dir": str(root / "c")}),
+                req(6, "shutdown"),  # releases the project lock for the next session
             )
             opened = by_id(out, 2)
             self.assertEqual(opened.get("result", {}).get("reused"), False, opened)
@@ -79,7 +80,7 @@ class LocalGhidraTests(unittest.TestCase):
             self.assertIn("helper", Path(decompiled["path"]).read_text(encoding="utf-8"))
 
             # the saved project is reused by the next open
-            again = run(build_plugin(), opening)
+            again = run(build_plugin(), opening, req(3, "shutdown"))
             self.assertEqual(by_id(again, 2)["result"]["reused"], True)
 
 

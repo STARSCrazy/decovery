@@ -102,7 +102,8 @@ class Backend(ABC):
     ) -> OpenOutcome:
         """Open the Ghidra project in `location`. With `reuse` and a saved program there, open that without
         analysis; otherwise build the program from the blocks, analyze and save it. `options`:
-        `calling_convention` (str or None)."""
+        `calling_convention` (str or None), `aggressive_instruction_finder` (bool, the plugin sets it for
+        x86-flat-32 only)."""
 
     @abstractmethod
     def functions(self) -> list[GhidraFunction]: ...
@@ -222,7 +223,7 @@ class GhidraBackend(Backend):
             self._project = self._project_cm.__enter__()
             reused = reuse and self._project.getProjectData().getFile(PROGRAM_PATH) is not None
             if not reused:
-                self._import(language_id, blocks, entry_points, options.get("calling_convention"), progress)
+                self._import(language_id, blocks, entry_points, options, progress)
             self._program, self._consumer = pyghidra.consume_program(self._project, PROGRAM_PATH)
             from ghidra.app.decompiler import DecompileOptions, DecompInterface  # type: ignore[import-not-found]
 
@@ -242,7 +243,7 @@ class GhidraBackend(Backend):
         self._location = folder
         return OpenOutcome(int(self._program.getFunctionManager().getFunctionCount()), reused)
 
-    def _import(self, language_id, blocks, entry_points, calling_convention, progress) -> None:
+    def _import(self, language_id, blocks, entry_points, options, progress) -> None:
         """Build the program from the memory blocks into the project, then analyze and save it."""
         import java.lang  # type: ignore[import-not-found]
         from ghidra.program.database import ProgramDB  # type: ignore[import-not-found]
@@ -251,6 +252,7 @@ class GhidraBackend(Backend):
         from java.io import ByteArrayInputStream  # type: ignore[import-not-found]
 
         pyghidra = self._pyghidra
+        calling_convention = options.get("calling_convention")
         total = 4
         progress(0, total, "creating program")
         language = DefaultLanguageService.getLanguageService().getLanguage(LanguageID(language_id))
@@ -279,7 +281,7 @@ class GhidraBackend(Backend):
         try:
             if calling_convention:
                 self._install_calling_convention(program, calling_convention)
-            if program.getDefaultPointerSize() == 4:
+            if options.get("aggressive_instruction_finder"):
                 with pyghidra.transaction(program, "analysis options"):
                     program.getOptions("Analyzers").setBoolean("Aggressive Instruction Finder", True)
             progress(2, total, "analyzing")
