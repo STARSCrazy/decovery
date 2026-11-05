@@ -210,3 +210,47 @@ fn find_prints_rows_and_rejects_bad_values() {
     let out = run(&dir, &["find", "xrefs", "nosuch"]);
     assert_eq!(out.status.code(), Some(2));
 }
+
+#[test]
+fn annotate_names_and_rejects_bad_input() {
+    let d = workspace();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_decovery"))
+            .arg("annotate")
+            .args(args)
+            .arg("--workspace")
+            .arg(d.path())
+            .output()
+            .expect("run decovery")
+    };
+    // human by default: replaces nothing stronger, names a new address
+    let out = run(&["flat:00010020", "--name", "helper", "--evidence", "seen"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.starts_with("named flat:00010020 helper"),
+        "{stdout:?}"
+    );
+    let symbols = std::fs::read_to_string(d.path().join("knowledge/symbols.toml")).unwrap();
+    assert!(symbols.contains("helper") && symbols.contains("source = \"human\""));
+    // an agent does not replace the human claim; reported, exit 0
+    let out = run(&["alpha", "--name", "other", "--source", "agent"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .starts_with("no change: ")
+    );
+    assert!(String::from_utf8(out.stderr).unwrap().contains("warning: "));
+    // validation errors exit 2
+    let out = run(&["alpha", "--name", "while"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8(out.stderr).unwrap().contains("C keyword"));
+    assert_eq!(run(&["alpha"]).status.code(), Some(2));
+    // JSON envelope and --local
+    let out = run(&["alpha", "--local", "param:1", "count", "int", "--json"]);
+    assert_eq!(out.status.code(), Some(0));
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["data"]["action"], "local");
+    assert_eq!(json["data"]["changed"], true);
+}

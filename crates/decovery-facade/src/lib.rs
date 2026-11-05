@@ -17,5 +17,6 @@ pub use resolve::{Resolved, resolve};
 pub use response::{Budget, Handle, Response, store_handle};
 pub use session::{DisplayName, Session};
 pub use tools::{
-    DEFAULT_LIMIT, FindQuery, FindWhat, FunctionFilter, FunctionSort, detail, find, show, status,
+    AnnotateAction, Annotation, DEFAULT_LIMIT, FindQuery, FindWhat, FunctionFilter, FunctionSort,
+    annotate, detail, find, show, status,
 };
