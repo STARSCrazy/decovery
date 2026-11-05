@@ -127,6 +127,17 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(by_id(out, 1)["result"], None)
         self.assertEqual([m for m in out if m.get("id") == 2], [])
 
+    def test_shutdown_hooks_run_on_shutdown_and_end_of_input(self):
+        for messages in ([req(1, "echo/ping"), req(2, "shutdown")], [req(1, "echo/ping")]):
+            plugin = self.make()
+            calls = []
+            plugin.on_shutdown(lambda: calls.append("closed"))
+            plugin.on_shutdown(lambda: 1 / 0)  # a failing hook does not stop the others
+            plugin.on_shutdown(lambda: calls.append("second"))
+            out = run(plugin, *messages)
+            self.assertEqual(by_id(out, 1)["result"], {})
+            self.assertEqual(calls, ["closed", "second"], messages)
+
     def test_capability_version_conflict_is_rejected(self):
         plugin = Plugin("demo", "1")
         plugin.method("a/x", capability_version=1)(lambda p, c: 1)

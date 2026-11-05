@@ -17,5 +17,7 @@ plugin.serve()  # blocks; stdout carries the protocol, write logs to stderr
 ```
 
 Handlers run in worker threads. Poll `ctx.cancelled` or call `ctx.check_cancelled()` (answers `-32002`).
+`@plugin.on_shutdown` registers a cleanup callback; it runs once the session ends (`shutdown` or end of input),
+after running requests had their grace period.
 
 Run the tests: `python -m unittest discover -s tests`.

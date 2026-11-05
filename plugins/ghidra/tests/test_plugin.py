@@ -48,6 +48,7 @@ class FakeBackend(Backend):
         self.version = EXPECTED_GHIDRA_VERSION
         self.opened = None
         self.analyzed = 0
+        self.closed = 0
         self.functions_ = [
             GhidraFunction(segment=None, offset=0x10040, name="sub_10040", size=8),
             GhidraFunction(segment=None, offset=0x10010, name="main", size=0x30),
@@ -92,7 +93,7 @@ class FakeBackend(Backend):
         return DecompileResult(f"void f_{address.offset:X}(void) {{}}\n", None, [])
 
     def close(self):
-        pass
+        self.closed += 1
 
 
 class _Output(io.StringIO):
@@ -195,7 +196,9 @@ class PluginTests(unittest.TestCase):
             language_id, blocks, entries, location, options, reuse = backend.opened
             self.assertEqual(language_id, language)
             self.assertEqual(Path(location), (self.root / arch).resolve())
-            self.assertEqual(options, {"calling_convention": None})
+            self.assertEqual(
+                options, {"calling_convention": None, "aggressive_instruction_finder": arch == "x86-flat-32"}
+            )
             self.assertEqual(len(blocks), 1)
             self.assertEqual(blocks[0].name, "code")
             self.assertEqual(blocks[0].size, 0x100)
@@ -211,7 +214,7 @@ class PluginTests(unittest.TestCase):
     def test_open_passes_calling_convention(self):
         out = run(self.plugin, self.open_msg(options={"calling_convention": "__watcall"}))
         self.assertIn("result", by_id(out, 2), out)
-        self.assertEqual(self.backend.opened[4], {"calling_convention": "__watcall"})
+        self.assertEqual(self.backend.opened[4]["calling_convention"], "__watcall")
         out = run(self.plugin, self.open_msg(options={"calling_convention": 5}))
         self.assertEqual(by_id(out, 2)["error"]["code"], -32602)
 
@@ -257,11 +260,13 @@ class PluginTests(unittest.TestCase):
         stale = self.root / "proj" / "decovery.rep"
         stale.mkdir()
         (self.root / "proj" / "unrelated.txt").write_text("keep", encoding="utf-8")
+        (self.root / "proj" / "decovery.notes").write_text("keep", encoding="utf-8")
         out = run(self.plugin, self.open_msg(program_hash="b" * 64))
         self.assertEqual(by_id(out, 2)["result"], {"functions": 2, "reused": False})
         self.assertFalse(self.backend.opened[5], "a stale project must not be reused")
         self.assertFalse(stale.exists(), "the stale Ghidra project is deleted")
         self.assertTrue((self.root / "proj" / "unrelated.txt").exists(), "only the project's own files are deleted")
+        self.assertTrue((self.root / "proj" / "decovery.notes").exists(), "only the project's own files are deleted")
         self.assertEqual(self.backend.analyzed, 2)
         stored = json.loads((self.root / "proj" / "project.json").read_text(encoding="utf-8"))
         self.assertEqual(stored["program_hash"], "b" * 64)
@@ -451,6 +456,51 @@ class PluginTests(unittest.TestCase):
         # unchanged data gives identical bytes
         run(self.plugin, self.open_msg(), req(3, "analyzer/export", {"out_path": str(out_path)}))
         self.assertEqual(out_path.read_bytes(), data)
+
+    def test_shutdown_closes_backend(self):
+        run(self.plugin, self.open_msg(), req(3, "shutdown"))
+        self.assertEqual(self.backend.closed, 1)
+        backend = FakeBackend()
+        run(self.plugin_for(backend), self.open_msg())  # end of input
+        self.assertEqual(backend.closed, 1)
+        backend = FakeBackend()
+        run(self.plugin_for(backend), req(3, "shutdown"))  # nothing open: nothing to close
+        self.assertEqual(backend.closed, 0)
+
+    def test_aggressive_finder_only_for_flat32(self):
+        for arch, expected in (("x86-flat-32", True), ("x86-real-16", False)):
+            backend = FakeBackend()
+            run(self.plugin_for(backend), self.open_msg(arch=arch, project_dir=self.root / arch))
+            self.assertIs(backend.opened[4]["aggressive_instruction_finder"], expected, arch)
+
+    def test_io_errors_are_32012(self):
+        blocker = self.root / "blocker"
+        blocker.write_text("a file, not a folder", encoding="utf-8")
+        out = run(self.plugin, self.open_msg(project_dir=blocker / "proj"))
+        error = by_id(out, 2)["error"]
+        self.assertEqual(error["code"], -32012, error)
+        self.assertIn("project or file I/O failed", error["message"])
+        out = run(self.plugin, self.open_msg(), req(3, "analyzer/export", {"out_path": str(blocker / "x.json")}))
+        self.assertEqual(by_id(out, 3)["error"]["code"], -32012)
+        out = run(
+            self.plugin,
+            self.open_msg(),
+            req(3, "decompiler/decompile", {"addresses": ["flat:00010010"], "out_dir": str(blocker)}),
+        )
+        self.assertEqual(by_id(out, 3)["error"]["code"], -32012)
+
+    def test_applied_document_round_trip(self):
+        wanted = {"line": {"00010012"}, "function": set(), "signature": {"00010010"}, "reference": set()}
+        raw = apply_mod.applied_document(wanted)
+        self.assertEqual(json.loads(raw)["schema"], 1)
+        self.assertEqual(
+            apply_mod.parse_applied(raw.decode("utf-8")),
+            {"function": [], "line": ["00010012"], "reference": [], "signature": ["00010010"]},
+        )
+        # files written before the schema key are still read
+        self.assertEqual(apply_mod.parse_applied('{"line": ["00010012"]}'), {"line": ["00010012"]})
+        with self.assertRaises(ValueError):
+            apply_mod.parse_applied('{"line": 3}')
 
     def test_export_requires_out_path(self):
         out = run(self.plugin, self.open_msg(), req(3, "analyzer/export", {}))
