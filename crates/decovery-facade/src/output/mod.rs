@@ -72,7 +72,7 @@ impl<'a> Context<'a> {
             }
         }
         let rebuild = session.rebuild.iter().map(|r| (r.address, r)).collect();
-        let stale = session.analysis.knowledge_hash != knowledge_hash(&session.workspace.root)?;
+        let stale = analysis_stale(session)?;
         Ok(Context {
             session,
             index: session.analysis.index(),
@@ -168,9 +168,23 @@ impl<'a> Context<'a> {
             strings,
             globals,
             rebuild: self.rebuild.get(&f.start).copied(),
-            stale: self.stale,
         })
     }
+}
+
+/// `true` when the analysis was made with other knowledge than the current one (R17: reported in
+/// `index.md`, `status.json` and by `show`/`status`, not in function files).
+pub fn analysis_stale(session: &Session) -> Result<bool, FacadeError> {
+    Ok(session.analysis.knowledge_hash != knowledge_hash(&session.workspace.root)?)
+}
+
+/// Whether a name can be used as part of a file name (`[A-Za-z_][A-Za-z0-9_]*`).
+pub(crate) fn is_identifier(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    bytes
+        .next()
+        .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 fn access_word(kind: AccessKind) -> &'static str {

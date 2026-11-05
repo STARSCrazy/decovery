@@ -95,10 +95,33 @@ fn check_target(workspace: &Workspace, analysis: &Analysis) -> Result<(), Facade
     }
 }
 
-/// `fun_` plus eight uppercase hex digits for flat addresses; other forms use their text with `_` for `:`.
+/// Decomp's `standardname`: `fun_` plus the address text without its prefix, `:` as `_`
+/// (`fun_0001A2B0`, `fun_1234_0010`, `fun_0007_00001234`).
 pub(crate) fn default_name(at: Address) -> String {
-    match at {
-        Address::Flat(a) => format!("fun_{a:08X}"),
-        other => format!("fun_{}", other.to_string().replace(':', "_")),
+    let text = at.to_string();
+    let short = text.split_once(':').map_or(text.as_str(), |(_, rest)| rest);
+    format!("fun_{}", short.replace(':', "_"))
+}
+
+/// The address a default name stands for (inverse of [`default_name`]).
+pub(crate) fn parse_default_name(name: &str) -> Option<Address> {
+    let rest = name.strip_prefix("fun_")?;
+    let hex = |t: &str, n: usize| {
+        (t.len() == n && t.bytes().all(|b| b.is_ascii_hexdigit()))
+            .then(|| u32::from_str_radix(t, 16).ok())
+            .flatten()
+    };
+    let parts: Vec<&str> = rest.split('_').collect();
+    match parts.as_slice() {
+        [a] => Some(Address::Flat(hex(a, 8)?)),
+        [s, o] if o.len() == 4 => Some(Address::Seg {
+            seg: u16::try_from(hex(s, 4)?).ok()?,
+            off: u16::try_from(hex(o, 4)?).ok()?,
+        }),
+        [s, o] => Some(Address::Sel {
+            segment: u16::try_from(hex(s, 4)?).ok()?,
+            off: hex(o, 8)?,
+        }),
+        _ => None,
     }
 }

@@ -249,3 +249,63 @@ fn odd_inputs_do_not_panic() {
         );
     }
 }
+
+#[test]
+fn default_name_of_real_mode_address() {
+    let (_d, s) = session();
+    let seg = Address::Seg {
+        seg: 0x12,
+        off: 0x1A2,
+    };
+    assert_eq!(s.name_of(seg).name, "fun_0012_01A2");
+    assert!(s.name_of(seg).is_default);
+    let sel = Address::Sel {
+        segment: 7,
+        off: 0x1234,
+    };
+    assert_eq!(s.name_of(sel).name, "fun_0007_00001234");
+    assert_eq!(s.name_of(flat(0x1A2B0)).name, "fun_0001A2B0");
+}
+
+#[test]
+fn resolves_real_mode_default_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("knowledge")).unwrap();
+    std::fs::write(
+        root.join("decovery.toml"),
+        format!(
+            r#"schema = 1
+
+[target]
+file = "t.exe"
+sha256 = "{SHA}"
+format = "mz"
+processor = "x86:LE:16:Real Mode"
+
+[[target.segment]]
+name = "code"
+start = "seg:0000:0000"
+length = 65536
+file_offset = 512
+permissions = "rx"
+"#
+        ),
+    )
+    .unwrap();
+    let ws = Workspace::open(root).unwrap();
+    let lock = ws.lock(std::time::Duration::ZERO).unwrap();
+    let seg = |off| Address::Seg { seg: 0, off };
+    let mut a = Analysis::new(Provider::new("ghidra", "11.3"), SHA, "00", "2026-11-05");
+    a.functions = vec![AnalyzedFunction::new(seg(0x162), seg(0x1D1), 112)];
+    a.save(root, &lock).unwrap();
+    drop(lock);
+    let s = Session::open(root).unwrap();
+    assert_eq!(s.name_of(seg(0x162)).name, "fun_0000_0162");
+    assert_eq!(resolve(&s, "fun_0000_0162").unwrap().function, seg(0x162));
+    assert_eq!(resolve(&s, "fun_0000_0170").unwrap().function, seg(0x162));
+    assert!(matches!(
+        resolve(&s, "fun_0000_016"),
+        Err(FacadeError::NotFound(_))
+    ));
+}
