@@ -5,6 +5,8 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+mod compare;
+
 /// Recover source code from old executables.
 #[derive(Parser)]
 #[command(name = "decovery", version, about)]
@@ -22,6 +24,28 @@ enum Command {
         /// Directory for the new decovery workspace.
         to: PathBuf,
         /// Print the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Compare one rebuilt function of an object file with the original. Exit code 0 when identical,
+    /// 1 when not, 2 on errors.
+    Compare {
+        /// decovery workspace (contains `decovery.toml`).
+        #[arg(long, default_value = ".")]
+        workspace: PathBuf,
+        /// Rebuilt OMF object file; relative paths that do not exist are taken from the workspace root.
+        #[arg(long)]
+        object: PathBuf,
+        /// Function name as in the knowledge (undecorated).
+        #[arg(long)]
+        function: String,
+        /// Length of the original function in bytes; default: the symbol's `size`.
+        #[arg(long)]
+        length: Option<u32>,
+        /// Tolerate alignment written as `00` where the original has `90`.
+        #[arg(long)]
+        padding: bool,
+        /// Print the result as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -68,5 +92,39 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Command::Compare {
+            workspace,
+            object,
+            function,
+            length,
+            padding,
+            json,
+        } => {
+            let request = compare::Request {
+                workspace,
+                object,
+                function,
+                length,
+                padding,
+            };
+            match compare::run(&request) {
+                Ok(outcome) => {
+                    if json {
+                        println!("{:#}", outcome.to_json());
+                    } else {
+                        print!("{}", outcome.to_text());
+                    }
+                    if outcome.identical() {
+                        ExitCode::SUCCESS
+                    } else {
+                        ExitCode::from(1)
+                    }
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::from(2)
+                }
+            }
+        }
     }
 }

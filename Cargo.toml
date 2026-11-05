@@ -11,6 +11,7 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 decovery-core = { path = "crates/decovery-core" }
+decovery-diff = { path = "crates/decovery-diff" }
 decovery-loaders = { path = "crates/decovery-loaders" }
 decovery-objects = { path = "crates/decovery-objects" }
 decovery-x86 = { path = "crates/decovery-x86" }

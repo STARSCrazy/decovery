@@ -17,3 +17,5 @@ and the project uses [Semantic Versioning](https://semver.org/).
   caches as skipped.
 - Versioned JSON-RPC plugin protocol with plugin host and Python SDK.
 - Ghidra plugin skeleton.
+- `decovery compare`: one rebuilt function against the original in a workspace, with verdict, blockers and
+  metrics as text or JSON.
