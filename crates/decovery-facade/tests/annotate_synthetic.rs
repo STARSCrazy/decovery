@@ -616,3 +616,67 @@ fn comment_and_signature_reject_bad_text() {
     ));
     assert!(m.contains("C prototype"), "{m}");
 }
+
+#[test]
+fn agent_signature_does_not_downgrade_human_type() {
+    let d = workspace();
+    let at = "flat:00010100";
+    annotate(
+        d.path(),
+        &request(at, AnnotateAction::DataType("int".into())),
+    )
+    .unwrap();
+    let r = annotate(
+        d.path(),
+        &agent(at, AnnotateAction::Signature("int helper(int a)".into())),
+    )
+    .unwrap();
+    assert_eq!(r.data["changed"], true);
+    let s = symbol_at(d.path(), 0x10100);
+    assert_eq!(s.source, ClaimSource::Human);
+    let r = annotate(
+        d.path(),
+        &agent(at, AnnotateAction::DataType("long".into())),
+    )
+    .unwrap();
+    assert_eq!(r.data["changed"], false);
+    assert_eq!(r.data["warnings"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        symbol_at(d.path(), 0x10100).data_type.as_deref(),
+        Some("int")
+    );
+}
+
+#[test]
+fn agent_local_does_not_downgrade_human_signature() {
+    let d = workspace();
+    let at = "flat:00010100";
+    annotate(
+        d.path(),
+        &request(at, AnnotateAction::Signature("int helper(int a)".into())),
+    )
+    .unwrap();
+    annotate(
+        d.path(),
+        &agent(
+            at,
+            AnnotateAction::Local {
+                place: "param:1".into(),
+                name: "count".into(),
+                data_type: None,
+            },
+        ),
+    )
+    .unwrap();
+    assert_eq!(symbol_at(d.path(), 0x10100).source, ClaimSource::Human);
+    let r = annotate(
+        d.path(),
+        &agent(at, AnnotateAction::Signature("void helper(void)".into())),
+    )
+    .unwrap();
+    assert_eq!(r.data["changed"], false);
+    assert_eq!(
+        symbol_at(d.path(), 0x10100).signature.as_deref(),
+        Some("int helper(int a)")
+    );
+}

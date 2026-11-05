@@ -449,7 +449,12 @@ fn claim_slot(
     let symbols = &mut session.workspace.symbols;
     match index_of(symbols, at) {
         Some(i) if is_active(&symbols[i]) => {
-            if restamp && symbols[i].name.is_empty() {
+            // a restamp never lowers the record's stamp
+            if restamp
+                && symbols[i].name.is_empty()
+                && rank(request.source, request.confidence)
+                    >= rank(symbols[i].source, symbols[i].confidence)
+            {
                 symbols[i].source = request.source;
                 symbols[i].confidence = request.confidence;
             }
