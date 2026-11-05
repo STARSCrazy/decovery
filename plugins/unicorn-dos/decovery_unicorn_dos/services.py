@@ -168,7 +168,7 @@ class DosServices:
     def _ah_29(self, al: int) -> None:
         r = self.regs
         si, di = r.arg("SI"), r.arg("DI")
-        text = r.read(r.get("DS"), si, 128) + b"\0"
+        text = r.read(r.get("DS"), si, 128) + b"\0\0"  # the scans below stop at the first zero
         fcb = bytearray(r.read(r.get("ES"), di, 12))
         i = 0
         while text[i] in b" \t":
@@ -256,10 +256,14 @@ class DosServices:
 
     # 33h: Ctrl-Break check
     def _ah_33(self, al: int) -> None:
-        if al == 0:
+        if al == 0:  # get: off
             self.regs.set_low("EDX", 0)
+        elif al == 1:  # set: nothing to check, ignored
+            pass
         elif al == 5:
             self.regs.set_low("EDX", 3)  # boot drive C:
+        else:
+            raise Unsupported(f"unsupported INT 21h AH=33h AL={al:02X}h")
 
     # 37h: switch character
     def _ah_37(self, al: int) -> None:

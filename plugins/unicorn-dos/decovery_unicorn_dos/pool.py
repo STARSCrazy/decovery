@@ -6,6 +6,8 @@ A job is a dict: `drives` {letter: path}, `read_only` [letters], `current` drive
 
 A worker process that dies (a crash inside unicorn) breaks the whole pool and with it every job still pending. Those
 jobs run once more, each in a fresh process of its own, so only a job that breaks again is reported as failed.
+A retried job runs again from its first step, so jobs must be idempotent (compiling and linking are: they
+rewrite their outputs).
 """
 
 from __future__ import annotations

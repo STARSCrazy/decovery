@@ -125,6 +125,10 @@ class RealModeTest(unittest.TestCase):
         self.assertIn("no end after 0.3 s", str(caught.exception))
         self.assertTrue(machine.spent)
 
+    def test_tiny_time_limit_still_times_out(self):
+        with self.assertRaises(EmulatorTimeout):
+            self.emu(asm.loop_program16(), timeout_s=1e-9).run()
+
     def test_stop_without_exit_is_an_error(self):
         program = asm.mz_exe(asm.HLT)
         machine = self.realmode.RealModeMachine(program)
@@ -179,6 +183,24 @@ class RealModeTest(unittest.TestCase):
         result, _ = self.run_program(asm.mz_exe(code))
         self.assertEqual(result.exit_code, 1)
 
+    def test_chained_int21_returns_the_carry_of_dos(self):
+        # handler: jmp far cs:[OLD]; main: open a missing file through it, exit with CF
+        old = 0x200
+        handler = b"\x2e\xff\x2e" + struct.pack("<H", old)
+        main = (
+            mov16("AX", 0x3521) + int21()
+            + b"\x2e\x89\x1e" + struct.pack("<H", old)  # mov cs:[OLD], bx
+            + b"\x2e\x8c\x06" + struct.pack("<H", old + 2)  # mov cs:[OLD+2], es
+            + PUSH_CS_POP_DS + mov16("DX", 0x100) + mov16("AX", 0x2521) + int21()
+            + mov16("DX", 0x300) + mov16("AX", 0x3D00) + int21()  # open "NONE.TXT": error 2, CF set
+            + b"\x0f\x92\xc0"  # setc al
+            + mov_ah(0x4C) + int21()
+        )
+        code = (main.ljust(0x100, b"\x90") + handler).ljust(0x300, b"\x90") + b"NONE.TXT\0"
+        result, _ = self.run_program(asm.mz_exe(code))
+        self.assertEqual(result.exit_code, 1)
+        self.assertEqual(result.calls["21/3D00"], 1)
+
     def test_get_and_set_vector(self):
         _, _, d = self.run_calls(
             [
@@ -187,7 +209,7 @@ class RealModeTest(unittest.TestCase):
                 (mov16("AX", 0x3561), 0x21),
             ]
         )
-        self.assertEqual((d[0]["ES"], d[0]["BX"]), (self.realmode.STUB_SEG, 0x61 * 4))
+        self.assertEqual((d[0]["ES"], d[0]["BX"]), (self.realmode.STUB_SEG, 0x61 * 8))
         self.assertEqual((d[2]["ES"], d[2]["BX"]), (asm.DATA_SEG, 0x1234))
 
     # --- console -------------------------------------------------------------------------------------------------
@@ -353,6 +375,20 @@ class RealModeTest(unittest.TestCase):
         self.assertEqual((d[1]["AX"] & 0xFF, d[1]["SI"]), (0, 0x26))
         self.assertEqual(self.memory(machine, asm.DATA_SEG, 0x60, 12), b"\x00README     ")
         self.assertEqual(d[2]["AX"] & 0xFF, 0xFF)  # invalid drive
+
+    def test_parse_file_name_without_zero_in_reach(self):
+        # 128 blanks up to the end of the read window: no IndexError, nothing parsed
+        _, _, d = self.run_calls(
+            [(PUSH_DS_POP_ES + mov16("AX", 0x2901) + mov16("SI", 0x80) + mov16("DI", 0), 0x21)],
+            bytes(0x80) + b" " * 0x80,
+        )
+        self.assertEqual((d[0]["AX"] & 0xFF, d[0]["SI"]), (0, 0x100))
+
+    def test_ctrl_break_subfunctions(self):
+        _, _, d = self.run_calls([(mov16("AX", 0x3301) + mov16("DX", 1), 0x21), (mov16("AX", 0x3305), 0x21)])
+        self.assertEqual((d[0]["DX"], d[1]["DX"] & 0xFF), (1, 3))
+        with self.assertRaisesRegex(EmulatorError, r"^unsupported INT 21h AH=33h AL=02h at "):
+            self.run_program(asm.calls16([(mov16("AX", 0x3302), 0x21)]))
 
     def test_system_services(self):
         _, _, d = self.run_calls(
