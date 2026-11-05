@@ -327,3 +327,36 @@ fn native_runner_kills_at_timeout() {
     assert_eq!(outcomes[0].status, JobStatus::Timeout);
     assert!(started.elapsed() < Duration::from_secs(30));
 }
+
+#[test]
+fn native_runner_kills_grandchild_at_timeout() {
+    let python = python_or_skip!();
+    if python.contains(':') {
+        return;
+    }
+    let build = tempfile::tempdir().unwrap();
+    // The child starts a sleeping grandchild that shares stdout/stderr, then sleeps itself.
+    std::fs::write(
+        build.path().join("p.py"),
+        concat!(
+            "import subprocess, sys, time\n",
+            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n",
+            "time.sleep(60)\n",
+        ),
+    )
+    .unwrap();
+    let timeout = Duration::from_millis(500);
+    let req = request(
+        build.path(),
+        vec![job(&[&format!("{python} C:\\p.py")], &[])],
+        timeout,
+    );
+    let started = std::time::Instant::now();
+    let outcomes = NativeRunner.run(&req, None).unwrap();
+    assert_eq!(outcomes[0].status, JobStatus::Timeout);
+    assert!(
+        started.elapsed() < timeout + Duration::from_secs(5),
+        "took {:?}",
+        started.elapsed()
+    );
+}
