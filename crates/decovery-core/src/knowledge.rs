@@ -26,6 +26,9 @@ pub enum ClaimSource {
     Analysis,
     Agent,
     Import,
+    /// A value this version does not know; kept so the record is not lost.
+    #[serde(other)]
+    Other,
 }
 
 /// What a symbol names.
