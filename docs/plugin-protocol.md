@@ -21,7 +21,7 @@ Design background: `docs/design/0001-decovery-design.md`, sections 5.1 and 5.11 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocol":"decovery-plugin/1","host_version":"0.1.0"}}
 {"jsonrpc":"2.0","id":1,"result":{"name":"ghidra","version":"0.1.0","protocol":"decovery-plugin/1",
-  "capabilities":{"analyzer":{"version":1},"decompiler":{"version":1}}}}
+  "capabilities":{"analyzer":{"version":2},"decompiler":{"version":2}}}}
 ```
 
 `capabilities` maps a capability name to `{"version": <u32>}`. A capability version changes when its method
@@ -80,3 +80,70 @@ verifies it when the optional `blake3` package is installed (the standard librar
 ## Coarse calls
 
 Plugin calls are batches ("decompile these 200 functions"), not per-instruction round trips.
+
+## Capabilities `analyzer` v2 and `decompiler` v2
+
+Served by the Ghidra plugin (`plugins/ghidra`). Addresses are decovery address strings (`flat:0001A2B0`,
+`seg:1234:0010`); all regions of a program share one arch (`x86-flat-32`, `x86-real-16`). Per-item problems are
+warnings or per-function `error` entries; only malformed params or an unusable backend fail a call.
+
+### `analyzer/open`
+
+Params: `{program: {format, entry_points: [addr], regions: [{name, start, size, arch, permissions, blob}]},
+project_dir: string, program_hash: string, options?: {calling_convention?: string}}`.
+Result: `{functions: int, reused: bool}`, with `$/progress` while a program is built and analyzed.
+
+The Ghidra project is kept in `project_dir` next to `project.json`
+(`{"schema": 1, "program_hash", "ghidra_version", "calling_convention"}`). When that file matches the request, the
+saved program is reopened without analysis (`reused: true`); otherwise the old project is deleted (only its own
+files) and the program is rebuilt and analyzed. Ghidra rejects paths with a component that starts with a dot, so
+such a `project_dir` is replaced by `%LOCALAPPDATA%/decovery/ghidra/<blake3 of the absolute project_dir>` on
+Windows (`$XDG_CACHE_HOME/...` elsewhere, else the temp dir). `calling_convention` is a name from the compiler
+spec (for example `__cdecl`) or `__watcall`, which the plugin installs as a spec extension; it also becomes the
+default convention of every function whose applied signature names none.
+
+### `analyzer/functions`
+
+Params: `{}`. Result: `[{address, name, size}]`, ordered by address.
+
+### `analyzer/apply`
+
+Params: `{symbols: [{address, kind, name?, signature?, comment?, data_type?, locals: [{place, name,
+data_type?}], line_comments: [{address, text}]}], types_h: string, references: [{from, to, kind}]}`.
+Result: `{applied: int, warnings: [string]}`.
+
+- `kind` is `function`, `global` or `label`; `place` is `param:<n>` (1-based) or `stack:<offset>` (hex, may be
+  negative); `reg:` places are reported as warnings. Reference `kind` is `call` or `jump`.
+- `types_h` is parsed by Ghidra's C parser; when the whole text fails, each top-level declaration is parsed on its
+  own and every failing one becomes a warning. Structs whose fields carry `/* +0xN */` offset comments are packed
+  or laid out to match them.
+- What a previous apply set and the current knowledge no longer carries (labels, comments, signatures,
+  references) is taken back; functions without a knowledge name get the default name (`fun_0001A2B0`).
+- `applied` counts the symbols and references that went in without error.
+
+### `analyzer/export`
+
+Params: `{out_path: string}`. Result: `{path, blake3}` (blake3 of the written file).
+
+The file is UTF-8 JSON, written atomically, identical bytes for identical data:
+`{"schema": 1, "functions": [{start, end, body_size, name}], "calls": [{site, caller, callee}],
+"strings": [{address, text, users: [addr]}], "data_accesses": [{function, address, kind}]}`.
+`end` is inclusive; `name` is null when Ghidra has only a default name; `kind` is `read` or `write`. Order:
+functions by `start`, calls by (`caller`, `site`, `callee`), strings by `address` (users sorted), data accesses by
+(`function`, `address`, `kind`).
+
+### `decompiler/decompile`
+
+Params: `{addresses: [addr], out_dir: string}`. Result: `[{address, path?, error?, disassembly?: [[addr, text]]}]`
+in request order. The C code of each function goes to `out_dir/<address with : replaced by _>.c` (`path`). A
+function that fails (60 s decompiler timeout, no function there, unmappable address) carries `error`, plus its
+disassembly when the function exists. Progress is reported per function; a `$/cancel` takes effect between
+functions.
+
+### Error codes
+
+| Code | Meaning |
+|---|---|
+| `-32602` | invalid params, unmappable program description, unknown calling convention |
+| `-32010` | Ghidra unavailable (`GHIDRA_INSTALL_DIR` unset or wrong, pyghidra missing, project locked by another process) |
+| `-32011` | no program open (`analyzer/open` not called yet) |
