@@ -821,7 +821,7 @@ fn claim_after_refute_keeps_other_fields() {
     let s = &all[0];
     assert_eq!(
         (s.name.as_str(), s.source, s.confidence),
-        ("alpha2", ClaimSource::Agent, Confidence::Assumed)
+        ("alpha2", ClaimSource::Human, Confidence::Confirmed)
     );
     assert_eq!(s.comment, refuted.comment);
     assert_eq!(s.signature.as_deref(), Some("int alpha(int n)"));
@@ -844,4 +844,65 @@ fn rejects_default_name_of_other_address() {
     assert_eq!(symbols_bytes(d.path()), before);
     // its own default name is no conflict
     annotate(d.path(), &request("flat:00010100", name("fun_00010100"))).unwrap();
+}
+
+#[test]
+fn refuted_human_record_keeps_precedence() {
+    let d = workspace();
+    let at = "alpha";
+    annotate(d.path(), &request(at, comment("entry point"))).unwrap();
+    annotate(d.path(), &request("flat:00010050", comment("loop head"))).unwrap();
+    annotate(
+        d.path(),
+        &request(at, AnnotateAction::Signature("int alpha(int n)".into())),
+    )
+    .unwrap();
+    annotate(
+        d.path(),
+        &request(at, AnnotateAction::DataType("int".into())),
+    )
+    .unwrap();
+    annotate(d.path(), &request(at, local("param:1", "n"))).unwrap();
+    annotate(
+        d.path(),
+        &request(
+            at,
+            AnnotateAction::Refute {
+                reason: "wrong".into(),
+            },
+        ),
+    )
+    .unwrap();
+    let before = symbols_bytes(d.path());
+    assert_eq!(symbol_at(d.path(), 0x10010).confidence, Confidence::Refuted);
+    let at = "flat:00010010";
+    let attempts = [
+        agent(at, comment("agent comment")),
+        agent(at, AnnotateAction::Signature("void alpha(void)".into())),
+        agent(at, AnnotateAction::DataType("char".into())),
+        agent(at, local("param:1", "size")),
+        agent("flat:00010050", comment("agent loop")),
+    ];
+    for req in attempts {
+        let r = annotate(d.path(), &req).unwrap();
+        assert_eq!(r.data["changed"], false, "{}", r.data);
+        assert!(
+            r.data["warnings"][0].as_str().unwrap().contains("force"),
+            "{}",
+            r.data
+        );
+    }
+    assert_eq!(symbols_bytes(d.path()), before);
+    // a name claim by an agent keeps the human stamp and every carried text
+    let r = annotate(d.path(), &agent(at, name("alpha2"))).unwrap();
+    assert_eq!(r.data["changed"], true, "{}", r.data);
+    let s = symbol_at(d.path(), 0x10010);
+    assert_eq!(s.name, "alpha2");
+    assert_eq!(s.source, ClaimSource::Human);
+    assert_eq!(s.comment.as_deref(), Some("entry point"));
+    assert_eq!(s.signature.as_deref(), Some("int alpha(int n)"));
+    assert_eq!(s.data_type.as_deref(), Some("int"));
+    assert_eq!(s.locals.len(), 1);
+    assert_eq!(s.locals[0].name, "n");
+    assert_eq!(s.line_comments[0].text, "loop head");
 }
