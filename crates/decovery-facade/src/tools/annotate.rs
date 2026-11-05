@@ -15,6 +15,7 @@ use crate::session::default_name;
 use crate::{Change, FacadeError, OutputReport, Response, Session, resolve, write_affected};
 
 const LOCK_WAIT: Duration = Duration::from_secs(10);
+const MAX_NAME: usize = 200;
 const NO_ANALYSIS: &str = "no analysis; output not regenerated";
 const C_KEYWORDS: &[&str] = &[
     "auto",
@@ -111,7 +112,12 @@ pub fn annotate(root: &Path, request: &Annotation) -> Result<Response, FacadeErr
         }
         if analyzed {
             if let Some(change) = &applied.change {
-                output = regenerate(root, change, &lock)?;
+                match regenerate(root, change, &lock) {
+                    Ok(report) => output = report,
+                    Err(e) => applied.warnings.push(format!(
+                        "knowledge saved; output not regenerated: {e} (run `decovery analyze` or `decovery show`)"
+                    )),
+                }
             }
         } else {
             applied.warnings.push(NO_ANALYSIS.to_string());
@@ -227,6 +233,12 @@ fn non_empty(text: &str, what: &str) -> Result<(), FacadeError> {
 }
 
 fn check_name(name: &str) -> Result<(), FacadeError> {
+    if name.len() > MAX_NAME {
+        return Err(FacadeError::Invalid(format!(
+            "name is {} characters long; at most {MAX_NAME} are allowed",
+            name.len()
+        )));
+    }
     if !is_identifier(name) {
         return Err(FacadeError::Invalid(format!(
             "'{name}' is not a valid C identifier (rule [A-Za-z_][A-Za-z0-9_]*; ASCII only)"
@@ -248,6 +260,9 @@ fn check_signature(text: &str) -> Result<String, FacadeError> {
             "not a C prototype: {text:?} (example: int rate_item(Item *item))"
         ))
     };
+    if sig.contains(['\n', '\r']) {
+        return Err(bad());
+    }
     let open = sig.find('(').ok_or_else(bad)?;
     if open == 0 || sig[..open].contains(')') {
         return Err(bad());
@@ -394,7 +409,7 @@ fn apply(session: &mut Session, request: &Annotation) -> Result<Applied, FacadeE
             place,
             name,
             data_type,
-        } => set_local(session, &target, place, name, data_type.as_deref()),
+        } => set_local(session, request, &target, place, name, data_type.as_deref()),
         AnnotateAction::Refute { reason } => refute(session, request, &target, reason),
         _ => Err(FacadeError::Invalid("unsupported action".into())),
     }
@@ -420,14 +435,28 @@ fn is_active(s: &Symbol) -> bool {
     s.confidence != Confidence::Refuted
 }
 
-/// The record to claim on: the existing active one, or a fresh one that keeps the history of a refuted
-/// record at the same address. Returns its index.
-fn claim_slot(session: &mut Session, request: &Annotation, target: &Target) -> usize {
+/// The record to claim on at `at`: the existing active one, or a fresh one that keeps the history of a
+/// refuted record. A new record always takes the request's source and confidence; with `restamp` an
+/// existing unnamed record does too (Decomp: the claim goes with the name, an unnamed record has none).
+/// Returns its index.
+fn claim_slot(
+    session: &mut Session,
+    request: &Annotation,
+    at: Address,
+    kind: SymbolKind,
+    restamp: bool,
+) -> usize {
     let symbols = &mut session.workspace.symbols;
-    match index_of(symbols, target.at) {
-        Some(i) if is_active(&symbols[i]) => i,
+    match index_of(symbols, at) {
+        Some(i) if is_active(&symbols[i]) => {
+            if restamp && symbols[i].name.is_empty() {
+                symbols[i].source = request.source;
+                symbols[i].confidence = request.confidence;
+            }
+            i
+        }
         found => {
-            let mut fresh = Symbol::new(target.at, target.kind, "");
+            let mut fresh = Symbol::new(at, kind, "");
             fresh.source = request.source;
             fresh.confidence = request.confidence;
             if let Some(i) = found {
@@ -530,7 +559,7 @@ fn set_name(
             old.evidence = request.evidence.clone();
         }
     } else {
-        let i = claim_slot(session, request, target);
+        let i = claim_slot(session, request, at, target.kind, false);
         let s = &mut session.workspace.symbols[i];
         s.name = name.to_string();
         s.kind = target.kind;
@@ -570,16 +599,8 @@ fn set_comment(
     } else {
         target.kind
     };
+    let i = claim_slot(session, request, owner, kind, false);
     let symbols = &mut session.workspace.symbols;
-    let i = if let Some(i) = index_of(symbols, owner) {
-        i
-    } else {
-        let mut s = Symbol::new(owner, kind, "");
-        s.source = request.source;
-        s.confidence = request.confidence;
-        symbols.push(s);
-        symbols.len() - 1
-    };
     let s = &mut symbols[i];
     let changed = match line_at {
         Some(at) => {
@@ -692,7 +713,7 @@ fn set_claim_text(
             _ => {}
         }
     }
-    let i = claim_slot(session, request, target);
+    let i = claim_slot(session, request, at, target.kind, true);
     field.set(&mut session.workspace.symbols[i], value.clone());
     Ok(Applied::changed(
         at,
@@ -704,6 +725,7 @@ fn set_claim_text(
 
 fn set_local(
     session: &mut Session,
+    request: &Annotation,
     target: &Target,
     place: &str,
     name: &str,
@@ -711,13 +733,8 @@ fn set_local(
 ) -> Result<Applied, FacadeError> {
     let at = target.at;
     let new = LocalVariable::new(place, name, data_type.map(|t| t.trim().to_string()));
+    let i = claim_slot(session, request, at, SymbolKind::Function, true);
     let symbols = &mut session.workspace.symbols;
-    let i = if let Some(i) = index_of(symbols, at) {
-        i
-    } else {
-        symbols.push(Symbol::new(at, SymbolKind::Function, ""));
-        symbols.len() - 1
-    };
     let s = &mut symbols[i];
     if s.locals.contains(&new) {
         return Ok(Applied::unchanged(
