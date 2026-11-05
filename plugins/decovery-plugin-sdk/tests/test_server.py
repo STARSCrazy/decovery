@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import subprocess
 import sys
 import threading
 import unittest
@@ -143,6 +144,54 @@ class ServerTests(unittest.TestCase):
         plugin.method("a/x", capability_version=1)(lambda p, c: 1)
         with self.assertRaises(ValueError):
             plugin.method("a/y", capability_version=2)(lambda p, c: 1)
+
+
+# A plugin process whose handler touches C-runtime fd 0 the way JNI_CreateJavaVM does (`_setmode` on the standard
+# fds). The Windows C runtime holds a per-fd lock during a blocking read, so a server reading fd 0 itself would
+# block the handler until the host sends another line; the host waits for the answer first.
+STDIN_TOUCHING_PLUGIN = """
+import msvcrt, os, sys, time
+sys.path.insert(0, sys.argv[1])
+from decovery_plugin import Plugin
+plugin = Plugin("touch", "1")
+
+@plugin.method("touch/stdin")
+def touch(params, ctx):
+    time.sleep(0.5)  # like the JVM's startup: the server is back in its read of the next line
+    msvcrt.setmode(0, os.O_BINARY)
+    return "ok"
+
+plugin.serve()
+"""
+
+
+@unittest.skipUnless(sys.platform == "win32", "the C-runtime fd lock is a Windows behaviour")
+class StdioProcessTests(unittest.TestCase):
+    def test_handler_touching_stdin_fd_does_not_block_on_pending_read(self):
+        sdk = os.path.join(os.path.dirname(__file__), "..")
+        proc = subprocess.Popen(
+            [sys.executable, "-c", STDIN_TOUCHING_PLUGIN, sdk],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            encoding="utf-8",
+        )
+        try:
+            proc.stdin.write(json.dumps(req(1, "touch/stdin")) + "\n")
+            proc.stdin.flush()
+            answer = []
+            reader = threading.Thread(target=lambda: answer.append(proc.stdout.readline()), daemon=True)
+            reader.start()
+            reader.join(10)
+            self.assertTrue(answer, "no answer within 10 s: the handler blocked on the server's read of fd 0")
+            self.assertEqual(json.loads(answer[0])["result"], "ok")
+            proc.stdin.write(json.dumps(req(2, "shutdown")) + "\n")
+            proc.stdin.flush()
+            self.assertEqual(proc.wait(10), 0)
+        finally:
+            proc.kill()
+            proc.wait()
+            proc.stdin.close()
+            proc.stdout.close()
 
 
 if __name__ == "__main__":
