@@ -21,6 +21,9 @@ pub enum RebuildResult {
     Identical,
     Differs,
     Error,
+    /// A value this version does not know; kept so the record is not lost.
+    #[serde(other)]
+    Other,
 }
 
 /// The last rebuild of one function.
@@ -95,6 +98,9 @@ fn number_or_text<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u32>, D::Err
 pub enum ReferenceKind {
     Jump,
     Call,
+    /// A value this version does not know; kept so the record is not lost.
+    #[serde(other)]
+    Other,
 }
 
 /// A reference from one address to another that analysis alone cannot see.
@@ -267,6 +273,68 @@ kind = "call"
         assert_eq!(refs[0].evidence.as_deref(), Some("seen 16x"));
         assert_eq!(refs[1].kind, ReferenceKind::Call);
         assert_eq!(refs[1].source, None);
+    }
+
+    #[test]
+    fn rebuild_record_with_unknown_result_is_read() {
+        let dir = root_with(
+            REBUILD_FILE,
+            r#"schema = 1
+
+[[function]]
+address = "flat:00010010"
+name = "a"
+result = "identical"
+
+[[function]]
+address = "flat:00010020"
+name = "b"
+result = "exploded"
+
+[[function]]
+address = "flat:00010030"
+name = "c"
+result = "differs"
+"#,
+        );
+        let records = read_rebuild(dir.path()).unwrap();
+        let results: Vec<_> = records.iter().map(|r| r.result).collect();
+        assert_eq!(
+            results,
+            [
+                RebuildResult::Identical,
+                RebuildResult::Other,
+                RebuildResult::Differs
+            ]
+        );
+        assert_eq!(records[1].name, "b");
+    }
+
+    #[test]
+    fn reference_with_unknown_kind_and_source_is_read() {
+        let dir = root_with(
+            REFERENCES_FILE,
+            r#"schema = 1
+
+[[reference]]
+from = "flat:00000001"
+to = "flat:00000002"
+kind = "table"
+source = "oracle"
+
+[[reference]]
+from = "flat:00000003"
+to = "flat:00000004"
+kind = "call"
+source = "human"
+"#,
+        );
+        let refs = read_references(dir.path()).unwrap();
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].kind, ReferenceKind::Other);
+        assert_eq!(refs[0].source, Some(ClaimSource::Other));
+        assert_eq!(refs[1].kind, ReferenceKind::Call);
+        assert_eq!(refs[1].source, Some(ClaimSource::Human));
     }
 
     #[test]
