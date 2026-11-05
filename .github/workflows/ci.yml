@@ -34,6 +34,8 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+      - name: Emulator for unicorn-dos
+        run: pip install unicorn==2.1.1
       - name: Plugin tests
         run: |
           for d in plugins/*/; do

@@ -267,10 +267,10 @@ Linked into the binary, because they sit on hot paths, are small and stable, and
 | general-purpose Rust crates | `serde`, `toml`, `serde_json`, `clap`, `rmcp`, `tracing`, `rayon`, `blake3`, `thiserror` | MIT/Apache |
 
 **Not fixed: unicorn.** Unicorn 2 is GPL-2; linking it would make the binary GPL. The `Emulator` and the
-unicorn tool host therefore live in a separate GPL-2 provider binary (`decovery-unicorn`, in `plugins/`) spoken to
-over the plugin protocol. Calls are coarse (one per compile, one per batch of cases), so the process boundary
-costs little. Phase 0 also evaluates `icicle-emu` (Rust, permissive, SLEIGH-based) as an in-process alternative;
-switching would be an ADR.
+unicorn tool host therefore live in a separate GPL-2 provider, the Python plugin `plugins/unicorn-dos`
+(`unicorn==2.1.1` wheel, ADR 0004 amendment), spoken to over the plugin protocol. Calls are coarse (one per
+compile, one per batch of cases), so the process boundary costs little. Phase 0 also evaluates `icicle-emu`
+(Rust, permissive, SLEIGH-based) as an in-process alternative; switching would be an ADR.
 
 Everything else — Ghidra, IDA, Binary Ninja, rizin, dosbox-lab, decomp-permuter, m2c, objdiff-core, wibo, wine,
 original compilers — is reached through a contract as a plugin, an external process, or an optional feature.
@@ -416,7 +416,7 @@ decovery/
     decovery-cli/         binary `decovery`
     decovery-family-watcom/  (phase 4) Rust port of the Watcom models
   plugins/                out-of-process providers, each separately licensed/packaged
-    decovery-unicorn/     Rust, GPL-2: Emulator + unicorn tool host (DOS/extender; later Win32 console)
+    unicorn-dos/          Python, GPL-2.0: unicorn tool host (Phar Lap, real-mode DOS); later Emulator, Win32 console
     decovery-plugin-sdk/  Python: framing + dispatch for Python plugins
     ghidra/               Analyzer + Decompiler via pyghidra
     dosbox-lab/           Runtime + Runner via dosbox-lab

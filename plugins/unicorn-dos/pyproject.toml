@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "decovery-unicorn-dos"
+version = "0.1.0"
+description = "decovery plugin: runs original DOS compilers in the unicorn emulator (runner capability)"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "GPL-2.0-only"
+license-files = ["LICENSE"]
+dependencies = ["decovery-plugin", "unicorn==2.1.1"]
+
+[tool.setuptools]
+packages = ["decovery_unicorn_dos"]
