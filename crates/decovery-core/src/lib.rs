@@ -7,6 +7,7 @@ pub mod migrate;
 pub mod program;
 pub mod records;
 pub mod store;
+pub mod user_config;
 pub mod workspace;
 
 pub use address::{Address, AddressError, AddressInput};
@@ -27,6 +28,7 @@ pub use records::{
     read_references,
 };
 pub use store::{WorkspaceLock, write_atomic};
+pub use user_config::{UserConfig, read_user_config, read_user_config_file, user_config_path};
 pub use workspace::{
     AnalysisConfig, DetectedFact, LinkConfig, OutputConfig, PluginConfig, RebuildConfig,
     RuntimeBase, RuntimeConfig, SegmentConfig, TargetConfig, TargetFormat, UnpackedConfig,

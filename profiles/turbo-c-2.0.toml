@@ -1,0 +1,23 @@
+schema = 1
+id = "turbo-c-2.0"
+family = "turbo-c"
+language = "c"
+version = "2.0"
+bits = 16
+object_format = "omf"
+object_extension = "OBJ"
+runners = ["unicorn-dos", "dosbox-lab"]
+command = 'D:\TCC -c {flags} -ID:\INCLUDE {input}'
+prelude = []
+prologue = [0x55, 0x8B, 0xEC]
+padding = false
+fingerprint = ["TCC.EXE"]
+
+[decoration]
+function = "_{name}"
+data = "_{name}"
+
+[linker]
+command = 'D:\TLINK {flags} {library_dir}\{startup} {objects},{output},,{libraries}'
+library_dir = 'D:\LIB'
+output = "{name}.EXE"

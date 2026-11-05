@@ -52,8 +52,26 @@
             "profile": { "type": "string" },
             "libraries": { "type": "array", "items": { "type": "string" } },
             "flags": { "type": "string" },
-            "startup": { "type": "string" }
+            "startup": { "type": "string" },
+            "insert": { "type": "boolean" },
+            "stack": { "type": "integer", "minimum": 0 }
           }
+        },
+        "runners": { "type": "array", "items": { "type": "string" } },
+        "tool_dir": { "type": "string" },
+        "timeout_s": { "type": "integer", "minimum": 0 },
+        "file_flags": { "type": "object", "additionalProperties": { "type": "string" } },
+        "frames": { "type": "object", "additionalProperties": { "type": "string" } }
+      }
+    },
+    "plugins": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["command"],
+        "properties": {
+          "command": { "type": "array", "items": { "type": "string" } },
+          "env": { "type": "object", "additionalProperties": { "type": "string" } }
         }
       }
     },

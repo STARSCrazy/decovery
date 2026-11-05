@@ -62,7 +62,13 @@ pub fn run(request: &Request) -> Result<Outcome, String> {
     let object = read_omf(&bytes, &file_name)
         .map_err(|e| format!("cannot read object {}: {e}", object_path.display()))?;
 
-    let decoration = Decoration::watcom();
+    let decoration = ws
+        .config
+        .rebuild
+        .as_ref()
+        .and_then(|r| r.compiler.as_deref())
+        .and_then(|id| decovery_toolchain::profile(id).ok())
+        .map_or_else(Decoration::watcom, |p| p.decoration);
     let view = object
         .modules
         .iter()

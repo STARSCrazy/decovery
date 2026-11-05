@@ -480,21 +480,7 @@ pub fn write_plugin_entry(
     command: &[String],
     env: &BTreeMap<String, String>,
 ) -> Result<(), SetupError> {
-    let mut root: toml::Table = match std::fs::read_to_string(path) {
-        Ok(text) => text
-            .parse()
-            .map_err(|e| SetupError::Message(format!("cannot parse {}: {e}", path.display())))?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
-        Err(e) => return Err(io_err("cannot read", path, e)),
-    };
-    if let Some(schema) = root.remove("schema")
-        && schema.as_integer() != Some(1)
-    {
-        return fail(format!(
-            "{} has unsupported schema {schema}",
-            path.display()
-        ));
-    }
+    let mut root = read_user_table(path)?;
     let plugins = root
         .entry("plugins")
         .or_insert_with(|| toml::Value::Table(toml::Table::new()))
@@ -518,6 +504,48 @@ pub fn write_plugin_entry(
     plugins.insert(name.into(), toml::Value::Table(entry));
     let body = toml::to_string(&root).map_err(|e| SetupError::Message(e.to_string()))?;
     write_atomic(path, &format!("schema = 1\n\n{body}"))
+}
+
+/// Sets `[toolchains] "<profile>" = "<dir>"` in the user config, keeping everything else.
+pub fn write_toolchain_entry(path: &Path, profile: &str, dir: &Path) -> Result<(), SetupError> {
+    let mut root = read_user_table(path)?;
+    let toolchains = root
+        .entry("toolchains")
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| {
+            SetupError::Message(format!("`toolchains` in {} is not a table", path.display()))
+        })?;
+    toolchains.insert(profile.into(), toml::Value::String(path_str(dir)?));
+    let body = toml::to_string(&root).map_err(|e| SetupError::Message(e.to_string()))?;
+    write_atomic(
+        path,
+        &format!(
+            "schema = 1
+
+{body}"
+        ),
+    )
+}
+
+/// The user config as a table without its `schema` key; empty when the file does not exist.
+fn read_user_table(path: &Path) -> Result<toml::Table, SetupError> {
+    let mut root: toml::Table = match std::fs::read_to_string(path) {
+        Ok(text) => text
+            .parse()
+            .map_err(|e| SetupError::Message(format!("cannot parse {}: {e}", path.display())))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
+        Err(e) => return Err(io_err("cannot read", path, e)),
+    };
+    if let Some(schema) = root.remove("schema")
+        && schema.as_integer() != Some(1)
+    {
+        return fail(format!(
+            "{} has unsupported schema {schema}",
+            path.display()
+        ));
+    }
+    Ok(root)
 }
 
 /// Default install dir: `extern/` next to the repository containing `start`, if that exists, else

@@ -217,6 +217,20 @@ pub struct RebuildConfig {
     pub flags: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<LinkConfig>,
+    /// Runner ids to try in order; empty = the profile's own list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runners: Vec<String>,
+    /// Directory of the compiler; overrides the user config `[toolchains]` entry. Relative to the workspace root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_s: Option<u32>,
+    /// Extra compiler flags per source file name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub file_flags: BTreeMap<String, String>,
+    /// Frame (stack segment) bases by name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub frames: BTreeMap<String, Address>,
 }
 
 /// Linker settings of a rebuild.
@@ -231,6 +245,12 @@ pub struct LinkConfig {
     pub flags: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub startup: Option<String>,
+    /// Insert the rebuilt functions into the original image instead of linking a new one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub insert: Option<bool>,
+    /// Stack size in bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack: Option<u32>,
 }
 
 /// Runtime facts about the target.

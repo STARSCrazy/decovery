@@ -1,0 +1,26 @@
+schema = 1
+id = "watcom-9.5"
+family = "watcom"
+language = "c"
+version = "9.5"
+bits = 32
+object_format = "omf"
+object_extension = "OBJ"
+runners = ["unicorn-dos", "dosbox-lab"]
+command = "WCC386 -zq {flags} {input}"
+prelude = ['SET WATCOM=D:\', 'SET INCLUDE=D:\H', 'SET PATH=D:\BINW']
+prologue = []
+padding = true
+fingerprint = ["BINW/WCC386.EXE"]
+
+[decoration]
+function = "{name}_"
+data = "_{name}"
+
+[linker]
+command = "WLINK @{response}"
+library_dir = 'D:\LIB386'
+output = "{name}.EXE"
+
+[assembler]
+profile = "watcom-10.6"
