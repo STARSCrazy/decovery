@@ -139,6 +139,8 @@ enum Command {
         #[arg(long, default_value_t = 8000)]
         limit: usize,
     },
+    /// Serve the tools to AI agents over MCP on stdin/stdout (stdout carries only MCP frames).
+    Mcp,
     /// Install tools into `extern/` and register them in the user config.
     Setup {
         #[command(subcommand)]
@@ -384,6 +386,7 @@ fn main() -> ExitCode {
             offset,
             limit,
         } => finish(detail(&cli.workspace, &handle, offset, limit, cli.json)),
+        Command::Mcp => finish(decovery_mcp::serve_stdio(cli.workspace)),
         Command::Setup {
             what:
                 SetupCommand::Ghidra {

@@ -14,6 +14,7 @@ decovery-core = { path = "crates/decovery-core" }
 decovery-diff = { path = "crates/decovery-diff" }
 decovery-facade = { path = "crates/decovery-facade" }
 decovery-loaders = { path = "crates/decovery-loaders" }
+decovery-mcp = { path = "crates/decovery-mcp" }
 decovery-objects = { path = "crates/decovery-objects" }
 decovery-plugin = { path = "crates/decovery-plugin" }
 decovery-x86 = { path = "crates/decovery-x86" }
@@ -26,6 +27,8 @@ thiserror = "2"
 blake3 = "1"
 sha2 = "0.11"
 tempfile = "3"
+rmcp = { version = "3.8", default-features = false, features = ["server", "macros", "transport-io"] }
+tokio = { version = "1", default-features = false, features = ["rt", "sync"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
