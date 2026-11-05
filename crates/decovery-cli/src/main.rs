@@ -174,6 +174,16 @@ enum SetupCommand {
         #[arg(long, value_name = "DIR")]
         plugins_dir: Option<PathBuf>,
     },
+    /// Create a venv with the `unicorn-dos` plugin and unicorn, and write `[plugins.unicorn-dos]` into the
+    /// user config. Progress goes to stderr.
+    UnicornDos {
+        /// Install directory; default: `extern/` next to the repository, else beside the user config.
+        #[arg(long = "extern", value_name = "DIR")]
+        extern_dir: Option<PathBuf>,
+        /// Python 3.12 or newer used to create the venv; default: `DECOVERY_PYTHON`, else `python`.
+        #[arg(long, value_name = "EXE")]
+        python: Option<String>,
+    },
     /// Register the directory of a compiler (`[toolchains]` in the user config).
     Toolchain {
         /// Compiler profile id, e.g. `watcom-9.5`.
@@ -381,6 +391,9 @@ fn main() -> ExitCode {
             cli.json,
         )),
         Command::Setup {
+            what: SetupCommand::UnicornDos { extern_dir, python },
+        } => finish(setup_unicorn_dos(extern_dir, python, cli.json)),
+        Command::Setup {
             what: SetupCommand::Toolchain { profile, dir },
         } => finish(setup_toolchain(&profile, &dir, cli.json)),
     }
@@ -498,6 +511,49 @@ fn setup_ghidra(
             "config": report.config_path.display().to_string(),
             "ghidra_kept": report.ghidra_kept,
             "jdk_kept": report.jdk_kept,
+        }),
+    );
+    print_summary(&response, json)
+}
+
+fn setup_unicorn_dos(
+    extern_dir: Option<PathBuf>,
+    python: Option<String>,
+    json: bool,
+) -> Result<(), FacadeError> {
+    let invalid = |e: String| FacadeError::Invalid(e);
+    let platform = setup::Platform::current().map_err(invalid)?;
+    let config_path = decovery_facade::plugins::user_config_path().ok_or_else(|| {
+        invalid("cannot locate the user config dir (APPDATA / HOME unset)".into())
+    })?;
+    let cwd = std::env::current_dir().map_err(|e| invalid(e.to_string()))?;
+    let plugins_dir = setup::find_plugins_dir(&cwd).map_err(invalid)?;
+    let extern_dir = extern_dir.unwrap_or_else(|| setup::default_extern_dir(&cwd, &config_path));
+    let absolute = |p: PathBuf| std::path::absolute(&p).unwrap_or(p);
+    let options = setup::UnicornOptions {
+        extern_dir: absolute(extern_dir),
+        plugins_dir: absolute(plugins_dir),
+        python: python
+            .or_else(|| std::env::var("DECOVERY_PYTHON").ok())
+            .filter(|p| !p.is_empty())
+            .unwrap_or_else(|| "python".into()),
+        config_path,
+        platform,
+    };
+    let report = setup::run_unicorn_setup(&options, &setup::SystemRunner, &mut |line| {
+        eprintln!("{line}")
+    })
+    .map_err(|e| invalid(e.to_string()))?;
+    let response = Response::new(
+        format!(
+            "Plugin `unicorn-dos` installed in {}; registered in {}",
+            report.venv_python.display(),
+            report.config_path.display()
+        ),
+        serde_json::json!({
+            "venv_python": report.venv_python.display().to_string(),
+            "config": report.config_path.display().to_string(),
+            "venv_kept": report.venv_kept,
         }),
     );
     print_summary(&response, json)
