@@ -268,6 +268,7 @@ mod tests {
     #[test]
     fn embedded_profiles_parse() {
         assert_eq!(profiles().len(), EMBEDDED.len());
+        assert!(profiles().iter().all(|p| !p.padding));
         for (id, text) in EMBEDDED {
             assert!(text.contains("schema = 1"), "{id}");
             assert_eq!(profile(id).unwrap().id, id);

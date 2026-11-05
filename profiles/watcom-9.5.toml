@@ -10,7 +10,7 @@ runners = ["unicorn-dos", "dosbox-lab"]
 command = "WCC386 -zq {flags} {input}"
 prelude = ['SET WATCOM=D:\', 'SET INCLUDE=D:\H', 'SET PATH=D:\BINW']
 prologue = []
-padding = true
+padding = false
 fingerprint = ["BINW/WCC386.EXE"]
 
 [decoration]
