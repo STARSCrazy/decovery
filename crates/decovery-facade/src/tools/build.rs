@@ -13,8 +13,8 @@ use decovery_diff::{Blocker, Comparison, ModuleOptions, Placement, SymbolView, V
 use decovery_objects::{FunctionView, ObjectFile, functions, read_omf};
 use decovery_plugin::Progress;
 use decovery_toolchain::{
-    CheatFinding, CompiledFile, Profile, SourceJob, SourceSet, compile_planned, find_cheats,
-    find_sources, open_runners, plan_compile, rebuild_profile, stage_text,
+    CheatFinding, CompiledFile, Profile, SourceJob, SourceSet, compile_planned, definitions,
+    find_cheats, find_sources, open_runners, plan_compile, rebuild_profile, stage_text,
 };
 use serde_json::{Value, json};
 
@@ -35,9 +35,10 @@ pub const OBJECT_FORMAT: &str = "decovery-obj/1";
 
 static BUILD_COUNTER: AtomicU32 = AtomicU32::new(0);
 
-/// What to build: `files` (names in `src/`; empty = all sources), optionally reported for one `function` only.
-/// With `variants` the request compiles those candidate sources for `function` and ranks them instead; nothing is
-/// recorded then.
+/// What to build: `files` (names in `src/`; empty = all sources), optionally reported for one `function` only
+/// (a name or an address; without `files` its file is the one its rebuild record names, else the only source that
+/// defines it). With `variants` the request compiles those candidates (whole files or definitions of `function`)
+/// for `function` and ranks them instead; nothing is recorded then.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct BuildRequest {
@@ -460,7 +461,10 @@ pub(super) fn file_of_function(root: &Path, function: &str) -> Result<String, Fa
     let set = find_sources(&root.join(SOURCE_DIR), &[]).map_err(toolchain)?;
     let mut defining = Vec::new();
     for path in set.sources.iter().filter(|p| is_c(&file_name(p))) {
-        if defines_function(&read_text(path)?, function) {
+        if definitions(&read_text(path)?)
+            .iter()
+            .any(|d| d.name == function)
+        {
             defining.push(file_name(path));
         }
     }
@@ -474,35 +478,6 @@ pub(super) fn file_of_function(root: &Path, function: &str) -> Result<String, Fa
             defining.join(", ")
         ))),
     }
-}
-
-/// Whether `text` has a definition of the C function `name`: a line starting in column 0 with an identifier, holding
-/// `name(` and neither ending in `;` (a prototype) nor assigning (an initializer).
-fn defines_function(text: &str, name: &str) -> bool {
-    let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
-    text.lines().any(|line| {
-        if !line
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-            || line.trim_end().ends_with(';')
-            || line.contains('=')
-        {
-            return false;
-        }
-        let mut from = 0;
-        while let Some(found) = line[from..].find(name) {
-            let at = from + found;
-            let rest = &line[at + name.len()..];
-            if !line[..at].chars().next_back().is_some_and(ident)
-                && rest.trim_start().starts_with('(')
-            {
-                return true;
-            }
-            from = at + name.len();
-        }
-        false
-    })
 }
 
 /// Places every public function of the `objects` (id, name for hints, object) at its original: a function without

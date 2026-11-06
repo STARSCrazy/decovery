@@ -147,6 +147,109 @@ impl<'a> Rebuild<'a> {
     }
 }
 
+/// Whether `a` and `b`, the same function from two objects (a full and a shrunk source file), hold the same code
+/// (Decomp's `gleich` in `nachbau/einzeln.py`): equal bytes outside fixup fields, equal named references with
+/// their displacements, equal self-relative fields, and equal unnamed references into the own section relative to
+/// the function start (jump tables). Calls the compiler resolved inside the object without a fixup count as named
+/// references. Padding behind the function and a following function's jump table do not count: in a shrunk file
+/// another function follows. Texts and other functions lie elsewhere there, so field contents are not compared.
+pub fn same_code(a: &FunctionView<'_>, b: &FunctionView<'_>) -> bool {
+    match (CodeCore::of(a), CodeCore::of(b)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// What [`same_code`] compares of one function.
+#[derive(PartialEq, Eq)]
+struct CodeCore {
+    bytes: Vec<u8>,
+    gaps: BTreeSet<u32>,
+    refs: BTreeMap<u32, String>,
+    relative: BTreeSet<u32>,
+    addends: BTreeMap<u32, i64>,
+    /// Unnamed own-section fixups: (field, target, self-relative), both relative to the function start.
+    own: Vec<(i64, i64, bool)>,
+}
+
+impl CodeCore {
+    fn of(f: &FunctionView<'_>) -> Option<Self> {
+        let section = f.module.sections.get(f.section as usize)?;
+        let bits = u32::from(section.bits);
+        if bits != 16 && bits != 32 {
+            return None;
+        }
+        let width = bits / 8;
+        let rebuild = Rebuild::new(f);
+        let mut refs = rebuild.refs.clone();
+        let mut relative = rebuild.relative.clone();
+        let mut gaps = rebuild.gaps.clone();
+        for (field, name) in rebuild.internal_calls(width) {
+            refs.insert(field, name);
+            relative.insert(field);
+            gaps.extend(field..field + width);
+        }
+        let end = decode_detailed(
+            &rebuild.bytes,
+            bits,
+            0,
+            &DecodeOptions::new(gaps.clone(), true),
+        )
+        .iter()
+        .filter(|d| !d.is_padding())
+        .map(|d| d.offset + d.len)
+        .max()
+        .unwrap_or(0);
+        let bytes = rebuild
+            .bytes
+            .iter()
+            .take(end as usize)
+            .enumerate()
+            .map(|(k, &b)| if gaps.contains(&(k as u32)) { 0 } else { b })
+            .collect();
+        let start = i64::from(f.start);
+        let own = f
+            .relocs()
+            .filter(|r| r.offset - f.start < end)
+            .filter_map(|r| {
+                let RefTarget::Section { index, offset } = r.target else {
+                    return None;
+                };
+                if index != f.section {
+                    return None;
+                }
+                let field = section
+                    .data
+                    .get(r.offset as usize..)
+                    .map_or(&[][..], |d| &d[..d.len().min(usize::from(r.width))]);
+                let target = i64::from(offset) + signed(field);
+                let named = f
+                    .module
+                    .symbols
+                    .iter()
+                    .any(|s| s.section == f.section && i64::from(s.offset) == target);
+                (!named).then_some((
+                    i64::from(r.offset) - start,
+                    target - start,
+                    r.kind == RelocKind::Relative,
+                ))
+            })
+            .collect();
+        Some(CodeCore {
+            bytes,
+            gaps: gaps.range(..end).copied().collect(),
+            refs: refs.into_iter().filter(|&(k, _)| k < end).collect(),
+            relative: relative.range(..end).copied().collect(),
+            addends: rebuild
+                .addends
+                .into_iter()
+                .filter(|&(k, _)| k < end)
+                .collect(),
+            own,
+        })
+    }
+}
+
 /// Decomp's `_fuellung`: 1–3 zeros where the original has `90` everywhere, or the last zero run (up to 7).
 fn zero_padding(code: &[u8], original: &[u8], gaps: &BTreeSet<u32>) -> BTreeSet<u32> {
     let mut out = BTreeSet::new();

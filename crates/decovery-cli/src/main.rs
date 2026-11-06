@@ -142,8 +142,8 @@ enum Command {
     /// Compile the rebuild sources (`src/`), compare their functions with the original and record the results.
     /// Exit code 0 when every built function is identical, 1 when not (or a file failed), 2 on errors.
     /// Progress goes to stderr.
-    /// With `--variant`: compile candidate sources for `--function` instead and rank them (best first, nothing is
-    /// recorded); exit code 0 when the best is identical.
+    /// With `--variant` / `--function-source`: compile candidates for `--function` instead and rank them (best
+    /// first, nothing is recorded); exit code 0 when the best is identical.
     Build {
         /// Source files in `src/` (e.g. `ai.c`); default: all.
         files: Vec<String>,
@@ -154,6 +154,11 @@ enum Command {
         /// (repeatable, at most 64).
         #[arg(long = "variant", value_name = "FILE")]
         variant: Vec<PathBuf>,
+        /// Candidate definition of `--function` alone, spliced into its file and compiled in a file shrunk to what
+        /// the function needs when that gives the same code; UTF-8 or code page 437 (repeatable, at most 64 with
+        /// `--variant`).
+        #[arg(long = "function-source", value_name = "FILE")]
+        function_source: Vec<PathBuf>,
     },
     /// Page the content of a handle returned by another command.
     Detail {
@@ -415,7 +420,15 @@ fn main() -> ExitCode {
             files,
             function,
             variant,
-        } => match build(&cli.workspace, files, function, &variant, cli.json) {
+            function_source,
+        } => match build(
+            &cli.workspace,
+            files,
+            function,
+            &variant,
+            &function_source,
+            cli.json,
+        ) {
             Ok(true) => ExitCode::SUCCESS,
             Ok(false) => ExitCode::from(1),
             Err(e) => {
@@ -760,6 +773,7 @@ fn build(
     files: Vec<String>,
     function: Option<String>,
     variants: &[PathBuf],
+    function_sources: &[PathBuf],
     json: bool,
 ) -> Result<bool, FacadeError> {
     let progress = |p: Progress| {
@@ -770,19 +784,28 @@ fn build(
     let mut request = BuildRequest::default();
     request.files = files;
     request.function = function;
-    for path in variants {
+    // UTF-8 text, else code page 437 (what a DOS-era editor writes)
+    let read = |path: &Path| {
         let bytes = std::fs::read(path).map_err(|e| {
             FacadeError::Invalid(format!("cannot read variant {}: {e}", path.display()))
         })?;
-        // UTF-8 text, else code page 437 (what a DOS-era editor writes)
-        let source = String::from_utf8(bytes)
-            .unwrap_or_else(|e| decovery_toolchain::from_cp437(e.as_bytes()));
+        Ok::<_, FacadeError>(
+            String::from_utf8(bytes)
+                .unwrap_or_else(|e| decovery_toolchain::from_cp437(e.as_bytes())),
+        )
+    };
+    for path in variants {
         request
             .variants
-            .push(Variant::new(source).with_label(path.display().to_string()));
+            .push(Variant::new(read(path)?).with_label(path.display().to_string()));
+    }
+    for path in function_sources {
+        request
+            .variants
+            .push(Variant::function(read(path)?).with_label(path.display().to_string()));
     }
     let response = decovery_facade::build(workspace, &request, &progress)?;
-    if !variants.is_empty() {
+    if !request.variants.is_empty() {
         return print_variants(&response, json);
     }
     let d = &response.data;

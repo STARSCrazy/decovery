@@ -995,3 +995,218 @@ fn variants_compared_in_parallel_equal_the_same_variants_one_by_one() {
     );
     assert_eq!(together.data["timing"]["distinct"], 8);
 }
+
+// ---- function-level attempts (Task 18) ----
+
+fn function_request(function: &str, sources: &[&str]) -> BuildRequest {
+    let mut request = BuildRequest::default();
+    request.function = Some(function.to_string());
+    request.variants = sources.iter().map(|s| Variant::function(*s)).collect();
+    request
+}
+
+fn run_functions(f: &Fixture, function: &str, sources: &[&str]) -> Response {
+    build(f.root(), &function_request(function, sources), &|_| {}).unwrap()
+}
+
+/// The staged source of the job in directory `dir` (the fake runner keeps a copy).
+fn staged(f: &Fixture, dir: &str) -> String {
+    let bytes = std::fs::read(f.objects.path().join("sources").join(dir).join("A.C")).unwrap();
+    String::from_utf8(bytes).unwrap().replace("\r\n", "\n")
+}
+
+fn shrink_records(f: &Fixture) -> Vec<Value> {
+    let dir = f.root().join("cache/rebuild/shrink");
+    let mut records: Vec<Value> = std::fs::read_dir(dir)
+        .map(|d| {
+            d.map(|e| serde_json::from_slice(&std::fs::read(e.unwrap().path()).unwrap()).unwrap())
+                .collect()
+        })
+        .unwrap_or_default();
+    records.sort_by_key(|v| v.to_string());
+    records
+}
+
+#[test]
+fn function_variant_uses_shrunk_file() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    // the full file (validation) and the shrunk file (the attempt) give the same code for sub
+    f.write_obj("F001", &[("_add", ADD), ("_sub", SUB)]);
+    f.write_obj("V001", &[("_sub", SUB)]);
+    let response = run_functions(&f, "sub", &[SUB_SOURCE]);
+    assert_eq!(
+        f.log("requests.log"),
+        ["2"],
+        "validation and attempt in one request"
+    );
+    let mut calls = f.log("calls.log");
+    calls.sort();
+    assert_eq!(calls, ["F001/A.C", "V001/A.C"]);
+    let shrunk = staged(&f, "V001");
+    assert!(
+        shrunk.starts_with("int add(int a, int b);\n\n\n\n\nint sub(int a, int b)\n"),
+        "{shrunk}"
+    );
+    assert_eq!(staged(&f, "F001"), A_C);
+    let v = &response.data["variants"][0];
+    assert_eq!(v["verdict"], "identical", "{v}");
+    assert_eq!(v["shrunk"], true, "{v}");
+    assert_eq!(response.data["timing"]["shrink_checks"], 1);
+    let records = shrink_records(&f);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["schema"], 1);
+    assert_eq!(records[0]["valid"], true);
+    assert!(
+        records[0]["reason"].as_str().unwrap().contains("same code"),
+        "{}",
+        records[0]
+    );
+
+    // a function source that does not define the function is the variant's error, not the call's
+    let response = run_functions(&f, "sub", &["int add(int a, int b)\n{\n    return 0;\n}\n"]);
+    let v = &response.data["variants"][0];
+    assert_eq!(v["verdict"], "error");
+    let message = v["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("variant 1:") && message.contains("sub"),
+        "{message}"
+    );
+}
+
+#[test]
+fn invalid_shrink_falls_back_to_full_file() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    let mut other = SUB.to_vec();
+    other[6] = 0x33;
+    f.write_obj("F001", &[("_add", ADD), ("_sub", SUB)]);
+    f.write_obj("V001", &[("_sub", &other)]);
+    f.write_obj("F002", &[("_add", ADD), ("_sub", SUB)]);
+    f.write_obj("V002", &[("_sub", &other)]);
+    let second = SUB_SOURCE.replace("a - b;", "a - b; /* 2 */");
+    let response = run_functions(&f, "sub", &[SUB_SOURCE, &second]);
+    // variant 2 was compiled shrunk on speculation; after the check its full file follows in a second request
+    assert_eq!(f.log("requests.log"), ["3", "1"]);
+    for v in response.data["variants"].as_array().unwrap() {
+        assert_eq!(v["verdict"], "identical", "judged on the full file: {v}");
+        assert_eq!(v["shrunk"], false, "{v}");
+        assert!(
+            v["shrink_reason"]
+                .as_str()
+                .unwrap()
+                .contains("different code"),
+            "{v}"
+        );
+    }
+    assert_eq!(shrink_records(&f)[0]["valid"], false);
+    // the next attempt on the same file version compiles the full file only
+    let third = SUB_SOURCE.replace("a - b;", "a - b; /* 3 */");
+    let response = run_functions(&f, "sub", &[&third]);
+    assert_eq!(f.log("requests.log"), ["3", "1", "1"]);
+    assert_eq!(f.log("calls.log").last().unwrap(), "F001/A.C");
+    assert_eq!(response.data["variants"][0]["shrunk"], false);
+    assert_eq!(response.data["timing"]["shrink_checks"], 0);
+}
+
+#[test]
+fn shrink_check_is_cached_per_file_version() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    f.write_obj("F001", &[("_add", ADD), ("_sub", SUB)]);
+    f.write_obj("V001", &[("_sub", SUB)]);
+    run_functions(&f, "sub", &[SUB_SOURCE]);
+    assert_eq!(f.log("requests.log"), ["2"]);
+    // another body of the same function: the file version is the same, only the attempt is compiled
+    let changed = SUB_SOURCE.replace("a - b;", "a - b; /* again */");
+    let response = run_functions(&f, "sub", &[&changed]);
+    assert_eq!(f.log("requests.log"), ["2", "1"]);
+    assert_eq!(f.log("calls.log").last().unwrap(), "V001/A.C");
+    assert_eq!(response.data["variants"][0]["shrunk"], true);
+    assert_eq!(response.data["timing"]["shrink_checks"], 0);
+    // another file version (the rest of the file changed): checked again
+    f.write_source("a.c", &A_C.replace("a + b;", "a + b; /* changed */"));
+    let response = run_functions(&f, "sub", &[SUB_SOURCE]);
+    assert_eq!(response.data["timing"]["shrink_checks"], 1);
+    // the shrunk text has no body of add, so it is the first call's and comes from the object cache
+    assert_eq!(f.log("requests.log"), ["2", "1", "1"]);
+    assert_eq!(f.log("calls.log").last().unwrap(), "F001/A.C");
+    assert_eq!(shrink_records(&f).len(), 2);
+}
+
+#[test]
+fn function_and_file_variant_rank_alike() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    let mut worse = SUB.to_vec();
+    worse[6] = 0x33;
+    // variant 1: the whole file; variant 2: the same text as a function (its full file is variant 1's text)
+    f.write_obj("V001", &[("_add", ADD), ("_sub", SUB)]);
+    f.write_obj("V002", &[("_sub", SUB)]);
+    f.write_obj("V003", &[("_sub", &worse)]);
+    let mut request = function_request(
+        "sub",
+        &[
+            SUB_SOURCE,
+            "int sub(int a, int b)\n{\n    return b - a;\n}\n",
+        ],
+    );
+    request.variants.insert(0, Variant::new(A_C));
+    let response = build(f.root(), &request, &|_| {}).unwrap();
+    assert_eq!(f.log("requests.log"), ["3"], "equal texts compiled once");
+    assert_eq!(order(&response), [1, 2, 3]);
+    let v = response.data["variants"].as_array().unwrap();
+    assert_eq!(v[1]["shrunk"], true);
+    assert!(v[0].get("shrunk").is_none(), "{}", v[0]);
+    let judged = |v: &Value| {
+        let mut v = v.clone();
+        let object = v.as_object_mut().unwrap();
+        for key in ["index", "shrunk", "shrink_reason"] {
+            object.remove(key);
+        }
+        v
+    };
+    assert_eq!(judged(&v[0]), judged(&v[1]));
+    assert_eq!(v[0]["verdict"], "identical");
+    assert_eq!(v[2]["verdict"], "differs");
+    assert_eq!(response.data["best"], 1);
+}
+
+#[test]
+fn variant_needs_exactly_one_source() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    let mut both = Variant::new(A_C);
+    both.function_source = Some(SUB_SOURCE.to_string());
+    for variant in [both, Variant::default()] {
+        let mut request = function_request("sub", &[]);
+        request.variants = vec![Variant::new(A_C), variant];
+        let error = build(f.root(), &request, &|_| {}).unwrap_err();
+        assert!(
+            matches!(&error, FacadeError::Invalid(m)
+                if m.contains("variant 2") && m.contains("exactly one of source and function_source")),
+            "{error}"
+        );
+    }
+    assert!(f.log("requests.log").is_empty());
+}
+
+#[test]
+fn function_file_is_found_by_its_definition() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    // a prototype over two lines and a comment naming sub in column 0 are no definitions
+    f.write_source(
+        "b.c",
+        "/*\nsub(a, b) is defined in a.c\n*/\nint sub(int a,\n        int b);\n",
+    );
+    // a definition on one line with `=` inside is one
+    f.write_source("q.c", "int quick(void) { int x = 0; return x; }\n");
+    let mut request = BuildRequest::default();
+    request.function = Some("sub".to_string());
+    build(f.root(), &request, &|_| {}).unwrap();
+    assert_eq!(f.log("calls.log"), ["A.C"]);
+    request.function = Some("quick".to_string());
+    build(f.root(), &request, &|_| {}).unwrap();
+    assert_eq!(f.log("calls.log"), ["A.C", "Q.C"]);
+}

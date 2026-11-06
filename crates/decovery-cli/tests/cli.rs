@@ -538,6 +538,41 @@ fn build_variants_ranks_and_sets_exit_code() {
 }
 
 #[test]
+fn build_function_source_is_a_function_variant() {
+    let python = python_or_skip!();
+    let f = build_fixture::fixture(&python, "");
+    f.write_obj(
+        "F001",
+        &[("_add", build_fixture::ADD), ("_sub", build_fixture::SUB)],
+    );
+    f.write_obj("V001", &[("_sub", build_fixture::SUB)]);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sub.c");
+    std::fs::write(
+        &path,
+        "int sub(int a, int b)
+{
+    return a - b;
+}
+",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_decovery"))
+        .args(["build", "--function", "sub", "--json", "--workspace"])
+        .arg(f.root())
+        .arg("--function-source")
+        .arg(&path)
+        .output()
+        .expect("run decovery");
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let v = &value["data"]["variants"][0];
+    assert_eq!(v["verdict"], "identical", "{v}");
+    assert_eq!(v["shrunk"], true, "{v}");
+    assert_eq!(v["label"], path.display().to_string());
+}
+
+#[test]
 fn build_variant_file_may_be_code_page_437() {
     let python = python_or_skip!();
     let f = build_fixture::fixture(&python, "");

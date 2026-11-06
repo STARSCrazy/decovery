@@ -58,7 +58,7 @@ use std::collections::BTreeMap;
 use decovery_core::Address;
 use decovery_objects::FunctionView;
 
-pub use compare::{SharedFunctions, compare, compare_module, compare_module_with};
+pub use compare::{SharedFunctions, compare, compare_module, compare_module_with, same_code};
 
 /// The name of an address in the original, and whether it is only a default name (`fun_0001A2B0`).
 #[derive(Debug, Clone, PartialEq, Eq)]
