@@ -4,6 +4,8 @@
 //! `#pragma aux` without code (calling convention: `parm`, `modify`, `value`, `aborts` ...), comments, string
 //! literals and separate assembler files are allowed.
 
+use crate::shrink::definitions;
+
 /// What kind of shortcut a finding is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -40,13 +42,13 @@ pub struct CheatFinding {
     pub text: String,
 }
 
-fn is_word(b: u8) -> bool {
+pub(crate) fn is_word(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
 /// Replaces comments, string literals and character literals by spaces (newlines stay), keeping the length,
 /// so that braces and names inside them do not count.
-fn mask(text: &[u8]) -> Vec<u8> {
+pub(crate) fn mask(text: &[u8]) -> Vec<u8> {
     let mut out = text.to_vec();
     let n = text.len();
     let mut i = 0;
@@ -96,97 +98,6 @@ fn skip_space(m: &[u8], mut i: usize) -> usize {
     i
 }
 
-/// Bodies of top-level braces as (start, end, function name).
-fn function_ranges(m: &[u8]) -> Vec<(usize, usize, String)> {
-    let mut out = Vec::new();
-    let (mut depth, mut start) = (0usize, 0usize);
-    for (i, &b) in m.iter().enumerate() {
-        match b {
-            b'{' => {
-                if depth == 0 {
-                    start = i;
-                }
-                depth += 1;
-            }
-            b'}' if depth > 0 => {
-                depth -= 1;
-                if depth == 0
-                    && let Some(name) = name_before(m, start)
-                {
-                    out.push((start, i + 1, name));
-                }
-            }
-            _ => {}
-        }
-    }
-    out
-}
-
-/// True if `tail` (starting with `)`) is the end of a parameter list followed only by K&R declarations
-/// (`)` then any number of `<text without ;{}()>;`).
-fn is_knr_tail(tail: &[u8]) -> bool {
-    if tail.first() != Some(&b')') {
-        return false;
-    }
-    let rest = &tail[1..];
-    if rest.is_empty() {
-        return true;
-    }
-    if rest.last() != Some(&b';') {
-        return false;
-    }
-    rest[..rest.len() - 1]
-        .split(|&b| b == b';')
-        .all(|seg| !seg.is_empty() && !seg.iter().any(|b| b"{}()".contains(b)))
-}
-
-/// The function name before an opening body brace; `None` for struct, enum and initializer braces.
-fn name_before(m: &[u8], brace: usize) -> Option<String> {
-    // only look a bit back (quadratic otherwise); heads with K&R declarations stay short
-    let window = &m[brace.saturating_sub(600)..brace];
-    let mut head = window.trim_ascii_end();
-    if head.last() != Some(&b')') {
-        let j = head.iter().rposition(|&b| b == b')')?;
-        if head[j..].contains(&b';') && !is_knr_tail(head[j..].trim_ascii()) {
-            return None;
-        }
-        head = &head[..=j];
-    }
-    let mut depth = 0i32;
-    let mut i = head.len() as isize - 1;
-    while i >= 0 {
-        match head[i as usize] {
-            b')' => depth += 1,
-            b'(' => {
-                depth -= 1;
-                if depth == 0 {
-                    break;
-                }
-            }
-            _ => {}
-        }
-        i -= 1;
-    }
-    if i < 0 {
-        return None;
-    }
-    let before = &head[(i as usize).saturating_sub(100)..i as usize];
-    let before = before.trim_ascii_end();
-    let start = before
-        .iter()
-        .rposition(|&b| !is_word(b))
-        .map_or(0, |p| p + 1);
-    let name = &before[start..];
-    if name.is_empty() {
-        return None;
-    }
-    let name = String::from_utf8_lossy(name).into_owned();
-    if ["if", "while", "for", "switch", "return", "sizeof", "do"].contains(&name.as_str()) {
-        return None;
-    }
-    Some(name)
-}
-
 /// `#pragma aux` spans (start of line, end of text); a trailing `\` continues a pragma on the next line.
 fn pragma_spans(m: &[u8]) -> Vec<(usize, usize)> {
     let blank = |b: u8| b == b' ' || b == b'\t';
@@ -232,12 +143,12 @@ fn line_of(text: &[u8], pos: usize) -> u32 {
 pub fn find_cheats(source: &str) -> Vec<CheatFinding> {
     let text = source.as_bytes();
     let m = mask(text);
-    let ranges = function_ranges(&m);
+    let ranges = definitions(source);
     let function_at = |pos: usize| {
         ranges
             .iter()
-            .find(|(a, e, _)| *a <= pos && pos < *e)
-            .map(|(_, _, n)| n.clone())
+            .find(|d| d.brace <= pos && pos < d.end)
+            .map(|d| d.name.clone())
     };
     let mut found = Vec::new();
     let spans = pragma_spans(&m);

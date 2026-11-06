@@ -13,13 +13,15 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use std::time::Instant;
 
-use decovery_core::{Analysis, BlockerRecord, Program, VerdictId, Workspace};
-use decovery_diff::{Blocker, ModuleOptions, SharedFunctions};
-use decovery_objects::{ObjectFile, read_omf};
+use decovery_core::{
+    Analysis, BlockerRecord, Program, VerdictId, Workspace, read_rebuild, write_atomic,
+};
+use decovery_diff::{Blocker, ModuleOptions, SharedFunctions, same_code};
+use decovery_objects::{FunctionView, ObjectFile, functions, read_omf};
 use decovery_plugin::Progress;
 use decovery_toolchain::{
-    CheatFinding, Profile, SourceJob, SourceSet, find_cheats, find_sources, rebuild_profile,
-    to_dos_bytes,
+    CheatFinding, CompiledFile, Profile, SourceJob, SourceSet, definitions, find_cheats,
+    find_sources, rebuild_profile, shrink, splice_function, to_dos_bytes,
 };
 use rayon::prelude::*;
 use serde_json::{Value, json};
@@ -34,19 +36,32 @@ use crate::{FacadeError, KnowledgeView, Response};
 /// Most variants one `build` call compiles.
 pub const MAX_VARIANTS: usize = 64;
 
-/// A candidate source text for one function, compiled instead of the function's file (`build` with `variants`).
+/// A candidate for one function (`build` with `variants`): either a whole replacement of the function's file
+/// (`source`) or one definition of the function (`function_source`), which is spliced into the current file and
+/// compiled in a file shrunk to the function and what its code needs, when that gives the same code. Exactly one of
+/// the two is set.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Variant {
     pub label: Option<String>,
-    pub source: String,
+    pub source: Option<String>,
+    pub function_source: Option<String>,
 }
 
 impl Variant {
+    /// A whole replacement of the function's file.
     pub fn new(source: impl Into<String>) -> Self {
         Variant {
-            label: None,
-            source: source.into(),
+            source: Some(source.into()),
+            ..Variant::default()
+        }
+    }
+
+    /// One definition of the function.
+    pub fn function(function_source: impl Into<String>) -> Self {
+        Variant {
+            function_source: Some(function_source.into()),
+            ..Variant::default()
         }
     }
 
@@ -72,6 +87,8 @@ struct VariantResult {
     refs_wrong: u32,
     blockers: Vec<BlockerRecord>,
     message: Option<String>,
+    /// Function variants: whether the variant was compiled in the shrunk file, and why (not).
+    shrunk: Option<(bool, String)>,
 }
 
 impl VariantResult {
@@ -87,6 +104,7 @@ impl VariantResult {
             refs_wrong: 0,
             blockers: Vec::new(),
             message: Some(message),
+            shrunk: None,
         }
     }
 
@@ -116,6 +134,10 @@ impl VariantResult {
         if let Some(m) = &self.message {
             v["message"] = json!(m);
         }
+        if let Some((shrunk, reason)) = &self.shrunk {
+            v["shrunk"] = json!(shrunk);
+            v["shrink_reason"] = json!(reason);
+        }
         v
     }
 }
@@ -131,8 +153,8 @@ fn describe(index: usize, label: Option<&str>) -> String {
 /// A distinct staged text: the variants with this text share one directory, one compile and one comparison.
 struct Group {
     dir: String,
-    /// The first variant with this text.
-    first: usize,
+    /// The text with LF line ends, for the inline-assembly check.
+    text: String,
     bytes: Vec<u8>,
 }
 
@@ -294,15 +316,172 @@ impl Compare<'_> {
                 refs_wrong: m.refs_wrong,
                 blockers,
                 message,
+                shrunk: None,
             },
             warnings,
         )
     }
 }
 
-/// `build` with variants: compiles the candidate sources of `request.variants` for `request.function` (all cache
-/// misses in one runner request), compares the function of each variant's object with the original and ranks the
-/// variants. Records, kept objects and output files stay untouched.
+/// The shrink check results, relative to the workspace root: `<key>.json` per file version.
+pub const SHRINK_DIR: &str = "cache/rebuild/shrink";
+
+/// The distinct texts of a call, each with its own directory.
+#[derive(Default)]
+struct Texts {
+    groups: Vec<Group>,
+    seen: HashMap<blake3::Hash, usize>,
+}
+
+impl Texts {
+    /// The group of `text` (staged as `name`), a new one in `dir` when no other variant has this text.
+    fn add(&mut self, name: &str, text: &str, dir: String) -> Result<usize, String> {
+        let bytes = to_dos_bytes(name, text).map_err(|e| e.to_string())?;
+        let hash = blake3::hash(&bytes);
+        let groups = &mut self.groups;
+        Ok(*self.seen.entry(hash).or_insert_with(|| {
+            groups.push(Group {
+                dir,
+                text: text.to_string(),
+                bytes,
+            });
+            groups.len() - 1
+        }))
+    }
+}
+
+/// The C name of `function` (a name or an address): an address is named by its rebuild record.
+fn c_name_of(root: &Path, function: &str) -> Result<String, FacadeError> {
+    Ok(read_rebuild(root)?
+        .into_iter()
+        .find(|r| r.address.to_string() == function)
+        .map_or_else(|| function.to_string(), |r| r.name))
+}
+
+/// What one variant compiles.
+struct Attempt {
+    /// The whole file (LF line ends): the variant's source, or the file with the function spliced in.
+    full: String,
+    /// Function variants with something to drop: the shrunk file and the key of its check.
+    shrunk: Option<(String, String)>,
+}
+
+/// The key of the shrink check of a file version: blake3 of the spliced file without the body of `function`, the
+/// profile id and the flags. Every attempt at the function in this version of the rest of the file shares it.
+fn shrink_key(spliced: &str, function: &str, profile: &str, flags: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    match definitions(spliced).iter().find(|d| d.name == function) {
+        Some(d) => {
+            hasher.update(&spliced.as_bytes()[..d.brace]);
+            hasher.update(&spliced.as_bytes()[d.end..]);
+        }
+        None => {
+            hasher.update(spliced.as_bytes());
+        }
+    }
+    for part in [profile, flags] {
+        hasher.update(b"\0");
+        hasher.update(part.as_bytes());
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+/// A stored shrink check: (valid, reason).
+fn read_check(root: &Path, key: &str) -> Option<(bool, String)> {
+    let bytes = std::fs::read(root.join(SHRINK_DIR).join(format!("{key}.json"))).ok()?;
+    let v: Value = serde_json::from_slice(&bytes).ok()?;
+    (v.get("schema")?.as_u64()? == 1).then_some(())?;
+    Some((
+        v.get("valid")?.as_bool()?,
+        v.get("reason")?.as_str()?.to_string(),
+    ))
+}
+
+fn write_check(root: &Path, key: &str, valid: bool, reason: &str) -> Result<(), FacadeError> {
+    let path = root.join(SHRINK_DIR).join(format!("{key}.json"));
+    let text = serde_json::to_string_pretty(&json!({
+        "schema": 1,
+        "valid": valid,
+        "reason": reason,
+    }))
+    .map_err(|e| FacadeError::Invalid(e.to_string()))?
+        + "\n";
+    write_atomic(&path, text.as_bytes()).map_err(|source| FacadeError::Output { path, source })
+}
+
+/// The functions of `object` with the C name `function` (statics are local publics).
+fn function_in<'o>(
+    object: &'o ObjectFile,
+    profile: &Profile,
+    function: &str,
+) -> Vec<FunctionView<'o>> {
+    object
+        .modules
+        .iter()
+        .flat_map(functions)
+        .filter(|f| f.name == function || profile.decoration.undecorate(f.name) == function)
+        .collect()
+}
+
+/// Judges a shrink check from the objects of the full and the shrunk file: (valid, reason, store it). A full file
+/// that does not compile or lacks the function says nothing about the file version and is not stored.
+fn judge_check(
+    full: &CompiledFile,
+    shrunk: &CompiledFile,
+    dos_name: &str,
+    profile: &Profile,
+    function: &str,
+    dropped: usize,
+) -> (bool, String, bool) {
+    let read = |file: &CompiledFile| {
+        file.object
+            .as_ref()
+            .and_then(|bytes| read_omf(bytes, dos_name).ok())
+    };
+    let Some(full) = read(full) else {
+        return (false, "the full file does not compile".into(), false);
+    };
+    let Some(shrunk) = read(shrunk) else {
+        return (false, "the shrunk file does not compile".into(), true);
+    };
+    let (in_full, in_shrunk) = (
+        function_in(&full, profile, function),
+        function_in(&shrunk, profile, function),
+    );
+    let Some(a) = in_full.first() else {
+        return (
+            false,
+            format!("the object of the full file does not define {function}"),
+            false,
+        );
+    };
+    match in_shrunk.first() {
+        None => (
+            false,
+            format!("the object of the shrunk file does not define {function}"),
+            true,
+        ),
+        Some(b) if same_code(a, b) => (
+            true,
+            format!(
+                "same code, {dropped} function{} dropped",
+                if dropped == 1 { "" } else { "s" }
+            ),
+            true,
+        ),
+        Some(_) => (false, format!("different code for {function}"), true),
+    }
+}
+
+/// `build` with variants: compiles the candidates of `request.variants` for `request.function` (all cache misses in
+/// one runner request), compares the function of each variant's object with the original and ranks the variants.
+/// Records, kept objects and output files stay untouched.
+///
+/// A function variant is spliced into the current file. When the file can be shrunk, the shrunk file is compiled;
+/// whether it gives the function the same code as the full file is checked once per file version (key: the file
+/// without the function's body, profile and flags) by compiling both in the same request, and stored in
+/// [`SHRINK_DIR`]. When it does not, the variant is judged on the full file (a second request compiles the full
+/// files that were not compiled yet).
 pub(super) fn build_variants(
     root: &Path,
     request: &BuildRequest,
@@ -317,6 +496,14 @@ pub(super) fn build_variants(
             "at most {MAX_VARIANTS} variants per call, got {}",
             request.variants.len()
         )));
+    }
+    for (i, variant) in request.variants.iter().enumerate() {
+        if variant.source.is_some() == variant.function_source.is_some() {
+            return Err(FacadeError::Invalid(format!(
+                "{}: exactly one of source and function_source must be given",
+                describe(i + 1, variant.label.as_deref())
+            )));
+        }
     }
     if request.files.len() > 1 {
         return Err(FacadeError::Invalid(
@@ -335,13 +522,13 @@ pub(super) fn build_variants(
     let own = set
         .sources
         .iter()
-        .map(|p| file_name(p))
-        .find(|n| n.eq_ignore_ascii_case(&file));
-    let Some(file) = own.filter(|n| is_c(n)) else {
+        .find(|p| file_name(p).eq_ignore_ascii_case(&file));
+    let Some(own_path) = own.filter(|p| is_c(&file_name(p))) else {
         return Err(FacadeError::Invalid(format!(
             "{file} is not a C source in {SOURCE_DIR}/; the variants replace one"
         )));
     };
+    let file = file_name(own_path);
     let flags_of = |name: &str| {
         file_flags(&rebuild.file_flags, name)
             .cloned()
@@ -350,72 +537,199 @@ pub(super) fn build_variants(
     let flags = flags_of(&file);
     let dos_name = file.to_ascii_uppercase();
 
-    // one directory per distinct text
+    // what each variant compiles
     let count = request.variants.len();
     let mut errors: Vec<Option<String>> = vec![None; count];
-    let mut group_of: Vec<usize> = vec![0; count];
-    let mut groups: Vec<Group> = Vec::new();
-    let mut seen: HashMap<blake3::Hash, usize> = HashMap::new();
+    let mut attempts: Vec<Option<Attempt>> = Vec::with_capacity(count);
+    let function_variants = request.variants.iter().any(|v| v.function_source.is_some());
+    let (file_text, c_name) = if function_variants {
+        (
+            read_text(own_path)?.replace("\r\n", "\n"),
+            c_name_of(root, function)?,
+        )
+    } else {
+        (String::new(), String::new())
+    };
+    let mut shrink_state: Vec<Option<(bool, String)>> = vec![None; count];
+    let mut dropped_of: HashMap<String, usize> = HashMap::new();
     for (i, variant) in request.variants.iter().enumerate() {
-        match to_dos_bytes(&file, &variant.source) {
-            Err(e) => errors[i] = Some(e.to_string()),
-            Ok(bytes) => {
-                let hash = blake3::hash(&bytes);
-                let g = *seen.entry(hash).or_insert_with(|| {
-                    groups.push(Group {
-                        dir: format!("V{:03}", i + 1),
-                        first: i,
-                        bytes,
-                    });
-                    groups.len() - 1
-                });
-                group_of[i] = g;
+        let attempt = match (&variant.source, &variant.function_source) {
+            (Some(source), _) => Ok(Attempt {
+                full: source.replace("\r\n", "\n"),
+                shrunk: None,
+            }),
+            (None, Some(function_source)) => {
+                splice_function(&file_text, &c_name, &function_source.replace("\r\n", "\n"))
+                    .map(|spliced| match shrink(&spliced, &[c_name.as_str()]) {
+                        None => {
+                            shrink_state[i] = Some((false, "nothing to drop".into()));
+                            Attempt {
+                                full: spliced,
+                                shrunk: None,
+                            }
+                        }
+                        Some(shrunk) => {
+                            let key = shrink_key(&spliced, &c_name, &profile.id, &flags);
+                            dropped_of.insert(key.clone(), shrunk.dropped.len());
+                            Attempt {
+                                full: spliced,
+                                shrunk: Some((shrunk.text, key)),
+                            }
+                        }
+                    })
+                    .map_err(|e| e.to_string())
+            }
+            (None, None) => Err("no source".to_string()),
+        };
+        match attempt {
+            Ok(attempt) => attempts.push(Some(attempt)),
+            Err(e) => {
+                errors[i] = Some(e);
+                attempts.push(None);
             }
         }
     }
-    let run_dir = new_run_dir(root)?;
-    let headers = stage_headers(&set, &run_dir.0)?;
-    let output = |path: std::path::PathBuf| move |source| FacadeError::Output { path, source };
-    for group in &groups {
-        let dir = run_dir.0.join(&group.dir);
-        std::fs::create_dir_all(&dir).map_err(output(dir.clone()))?;
-        std::fs::write(dir.join(&dos_name), &group.bytes).map_err(output(dir.join(&dos_name)))?;
-        for header in headers.keys() {
-            std::fs::copy(run_dir.0.join(header), dir.join(header))
-                .map_err(output(dir.join(header)))?;
+    let known: HashMap<String, (bool, String)> = dropped_of
+        .keys()
+        .filter_map(|key| Some((key.clone(), read_check(root, key)?)))
+        .collect();
+
+    // one directory per distinct text: `V001` the text a variant is judged on first, `F001` its full file
+    let mut texts = Texts::default();
+    let add = |texts: &mut Texts, text: &str, dir: String| texts.add(&file, text, dir);
+    let mut ranked: Vec<usize> = vec![0; count];
+    // key -> (full group, shrunk group) of the first variant with the key, for every check this call makes
+    let mut checks: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    for (i, attempt) in attempts.iter().enumerate() {
+        let Some(attempt) = attempt else { continue };
+        let full_dir = || format!("F{:03}", i + 1);
+        let own_dir = format!("V{:03}", i + 1);
+        let chosen = match &attempt.shrunk {
+            None if request.variants[i].source.is_some() => add(&mut texts, &attempt.full, own_dir),
+            None => add(&mut texts, &attempt.full, full_dir()),
+            Some((text, key)) => match known.get(key) {
+                Some((valid, reason)) => {
+                    shrink_state[i] = Some((*valid, reason.clone()));
+                    if *valid {
+                        add(&mut texts, text, own_dir)
+                    } else {
+                        add(&mut texts, &attempt.full, full_dir())
+                    }
+                }
+                // unchecked: the shrunk file on speculation, and the full file once per key
+                None if checks.contains_key(key) => add(&mut texts, text, own_dir),
+                None => add(&mut texts, &attempt.full, full_dir()).and_then(|full| {
+                    let shrunk = add(&mut texts, text, own_dir)?;
+                    checks.insert(key.clone(), (full, shrunk));
+                    Ok(shrunk)
+                }),
+            },
+        };
+        match chosen {
+            Ok(g) => ranked[i] = g,
+            Err(e) => errors[i] = Some(e),
         }
     }
 
+    let run_dir = new_run_dir(root)?;
+    let headers = stage_headers(&set, &run_dir.0)?;
+    let output = |path: std::path::PathBuf| move |source| FacadeError::Output { path, source };
+    let stage = |groups: &[Group]| -> Result<(), FacadeError> {
+        for group in groups {
+            let dir = run_dir.0.join(&group.dir);
+            std::fs::create_dir_all(&dir).map_err(output(dir.clone()))?;
+            std::fs::write(dir.join(&dos_name), &group.bytes)
+                .map_err(output(dir.join(&dos_name)))?;
+            for header in headers.keys() {
+                std::fs::copy(run_dir.0.join(header), dir.join(header))
+                    .map_err(output(dir.join(header)))?;
+            }
+        }
+        Ok(())
+    };
     // compile: cache hits, then all misses in one runner request
     let compile_started = Instant::now();
-    let jobs_input: Vec<SourceJob> = groups
-        .iter()
-        .map(|g| SourceJob::new(dos_name.clone(), flags.clone()).in_dir(g.dir.clone()))
-        .collect::<Result<_, _>>()
-        .map_err(toolchain)?;
+    let compile = |groups: &[Group]| -> Result<Compiled, FacadeError> {
+        stage(groups)?;
+        let jobs_input: Vec<SourceJob> = groups
+            .iter()
+            .map(|g| SourceJob::new(dos_name.clone(), flags.clone()).in_dir(g.dir.clone()))
+            .collect::<Result<_, _>>()
+            .map_err(toolchain)?;
+        let compiled = compile_jobs(&ws, &profile, &jobs_input, &run_dir.0, progress)?;
+        if compiled.files.len() != groups.len() {
+            return Err(FacadeError::Invalid(format!(
+                "internal error: {} compile results for {} distinct texts",
+                compiled.files.len(),
+                groups.len()
+            )));
+        }
+        Ok(compiled)
+    };
     let Compiled {
-        files: compiled,
+        files: mut compiled,
         mut warnings,
         ..
-    } = compile_jobs(&ws, &profile, &jobs_input, &run_dir.0, progress)?;
-    drop(run_dir);
-    if compiled.len() != groups.len() {
-        return Err(FacadeError::Invalid(format!(
-            "internal error: {} compile results for {} distinct variants",
-            compiled.len(),
-            groups.len()
-        )));
+    } = compile(&texts.groups)?;
+
+    // the shrink checks of this call; an invalid shrunk file sends its variants to the full file
+    let mut decided: BTreeMap<String, (bool, String)> = BTreeMap::new();
+    for (key, &(full, shrunk)) in &checks {
+        let (valid, reason, store) = judge_check(
+            &compiled[full],
+            &compiled[shrunk],
+            &dos_name,
+            &profile,
+            &c_name,
+            dropped_of.get(key).copied().unwrap_or(0),
+        );
+        if store {
+            write_check(root, key, valid, &reason)?;
+        }
+        decided.insert(key.clone(), (valid, reason));
     }
+    let first_groups = texts.groups.len();
+    for (i, attempt) in attempts.iter().enumerate() {
+        let Some(Attempt {
+            full,
+            shrunk: Some((_, key)),
+        }) = attempt
+        else {
+            continue;
+        };
+        let Some((valid, reason)) = decided.get(key) else {
+            continue;
+        };
+        shrink_state[i] = Some((*valid, reason.clone()));
+        if !*valid && errors[i].is_none() {
+            match add(&mut texts, full, format!("F{:03}", i + 1)) {
+                Ok(g) => ranked[i] = g,
+                Err(e) => errors[i] = Some(e),
+            }
+        }
+    }
+    if texts.groups.len() > first_groups {
+        let more = compile(&texts.groups[first_groups..])?;
+        compiled.extend(more.files);
+        warnings.extend(more.warnings);
+    }
+    drop(run_dir);
+    let groups = texts.groups;
     let jobs = compiled.iter().filter(|c| !c.cached).count();
     let cached = compiled.len() - jobs;
     let compile_ms = ms(compile_started.elapsed());
 
-    // objects of the distinct variants
+    // objects of the distinct texts some variant is judged on
     let compare_started = Instant::now();
+    let judged: BTreeSet<usize> = (0..count)
+        .filter(|&i| errors[i].is_none())
+        .map(|i| ranked[i])
+        .collect();
     let mut group_errors: Vec<Option<String>> = vec![None; groups.len()];
     let mut objects: Vec<Option<ObjectFile>> = Vec::new();
     objects.resize_with(groups.len(), || None);
-    for (g, file) in compiled.iter().enumerate() {
+    for &g in &judged {
+        let file = &compiled[g];
         match &file.object {
             None => group_errors[g] = Some(failure_text(file)),
             Some(bytes) => match read_omf(bytes, &dos_name) {
@@ -477,10 +791,7 @@ pub(super) fn build_variants(
                     .enumerate()
                     .filter_map(|(g, object)| Some((g, object.as_ref()?)))
                     .for_each_with(sender, |sender, (g, object)| {
-                        let text = request.variants[groups[g].first]
-                            .source
-                            .replace("\r\n", "\n");
-                        let _ = sender.send((g, compare.run(object, &text)));
+                        let _ = sender.send((g, compare.run(object, &groups[g].text)));
                     });
             });
             for done in 1..=total {
@@ -506,7 +817,7 @@ pub(super) fn build_variants(
         let mut result = match &errors[i] {
             Some(error) => VariantResult::unchecked("error", format!("{name}: {error}")),
             None => {
-                let g = group_of[i];
+                let g = ranked[i];
                 match (&group_errors[g], &compared[g]) {
                     (Some(error), _) => {
                         VariantResult::unchecked("error", format!("{name}: {error}"))
@@ -521,6 +832,7 @@ pub(super) fn build_variants(
         };
         result.index = i + 1;
         result.label = variant.label.clone();
+        result.shrunk = shrink_state[i].clone();
         results.push(result);
     }
     results.sort_by_key(VariantResult::rank);
@@ -556,6 +868,7 @@ pub(super) fn build_variants(
                 "jobs": jobs,
                 "cached": cached,
                 "distinct": groups.len(),
+                "shrink_checks": checks.len(),
             },
         }),
     ))

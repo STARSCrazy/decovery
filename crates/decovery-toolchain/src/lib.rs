@@ -8,6 +8,7 @@ mod error;
 mod profile;
 mod runner;
 mod schedule;
+mod shrink;
 mod staging;
 
 pub use build::{
@@ -22,6 +23,7 @@ pub use runner::{
     RunnerError, open_runners, run_with_fallback, run_with_fallback_reporting,
 };
 pub use schedule::{JobSlots, SlotGuard, default_jobs, global_slots, set_global_jobs};
+pub use shrink::{Definition, Shrunk, definitions, shrink, splice_function};
 pub use staging::{SourceSet, find_sources, stage, stage_text, to_dos_bytes};
 
 pub use error::ToolchainError;

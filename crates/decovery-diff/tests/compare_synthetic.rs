@@ -7,6 +7,7 @@ use decovery_core::{
 };
 use decovery_diff::{
     Blocker, CompareOptions, Comparison, Decoration, NameAt, SymbolView, Verdict, compare,
+    same_code,
 };
 use decovery_objects::{
     Frame, ObjReloc, ObjSymbol, ObjectModule, RefTarget, Section, SectionKind, functions,
@@ -373,4 +374,31 @@ fn decoration_strips_watcom_affixes() {
     assert_eq!(d.undecorate("_timer"), "timer");
     assert_eq!(d.undecorate("_"), "_");
     assert_eq!(d.undecorate("plain"), "plain");
+}
+
+#[test]
+fn same_code_ignores_fixup_fields() {
+    // mov eax,[g]; call h; ret
+    let code = |field: u8, call: u8, tail: &[u8]| {
+        let mut v = vec![0xA1, field, field, 0, 0, 0xE8, call, call, 0, 0, 0xC3];
+        v.extend_from_slice(tail);
+        v
+    };
+    let refs = |g: &str| vec![abs(1, g), rel(6, "h_")];
+    let full = module(&code(0, 0, &[]), refs("g_"));
+    let fs = functions(&full);
+    // shrunk: strings and other functions lie elsewhere (other field contents), padding follows the function
+    let shrunk = module(&code(0x34, 0x12, &[0x90, 0x90, 0x90]), refs("g_"));
+    assert!(same_code(&fs[0], &functions(&shrunk)[0]));
+    // another named reference
+    let other_ref = module(&code(0, 0, &[]), refs("k_"));
+    assert!(!same_code(&fs[0], &functions(&other_ref)[0]));
+    // another byte outside the fields
+    let mut bytes = code(0, 0, &[]);
+    bytes[10] = 0xCB;
+    let other_byte = module(&bytes, refs("g_"));
+    assert!(!same_code(&fs[0], &functions(&other_byte)[0]));
+    // a self-relative field where the other has an absolute one
+    let other_kind = module(&code(0, 0, &[]), vec![abs(1, "g_"), abs(6, "h_")]);
+    assert!(!same_code(&fs[0], &functions(&other_kind)[0]));
 }

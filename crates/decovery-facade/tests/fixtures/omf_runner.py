@@ -3,7 +3,8 @@
 For a job whose last command line ends with `X.C` (any extension) it copies `X.OBJ` from the directory in
 FAKE_OMF_DIR into the C mount (after a `CD D` line: `D.OBJ` into the directory D of the C mount, as `X.OBJ`) and exits 0; without that file it prints an error and exits 1. Every compiled job
 appends its source name to `calls.log` and its `SET TMP=` directory (and whether it exists) to `tmp.log`, every
-call appends its job count to `requests.log` (all in FAKE_OMF_DIR).
+call appends its job count to `requests.log` (all in FAKE_OMF_DIR). The staged source of every job is copied to
+`sources/<D>/<X.C>` (`sources/<X.C>` without a `CD` line) in FAKE_OMF_DIR.
 
 With FAKE_NOT_RUN_ONCE=1 the first call with more than one job answers only its first job; the others come back
 `failed` with "job not run: ..." like the dosbox-lab runner after a hang.
@@ -38,6 +39,11 @@ def run_job(job, c_root):
     source = job["commands"][-1].split()[-1]
     stem = source.rsplit(".", 1)[0]
     append("calls.log", f"{cd}/{source}" if cd else source)
+    copy_dir = os.path.join(OBJECTS, "sources", cd or "")
+    os.makedirs(copy_dir, exist_ok=True)
+    staged = os.path.join(c_root, cd or "", source)
+    if os.path.isfile(staged):
+        shutil.copyfile(staged, os.path.join(copy_dir, source))
     # a job in a directory (a variant) is served the object named like the directory: V001.OBJ
     obj = os.path.join(OBJECTS, (cd or stem) + ".OBJ")
     if not os.path.isfile(obj):
