@@ -15,6 +15,8 @@ use crate::workspace::SCHEMA;
 enum F {
     /// Copied unchanged.
     Copy,
+    /// Integer; Decomp wrote some as text (`"0x4c"`, `"12"`), which is parsed.
+    Number,
     /// Free text: a string copied unchanged and counted.
     Text,
     /// Array of free-text strings.
@@ -128,7 +130,7 @@ static REBUILD_FUNCTION: Node = Node {
         ("datum", "date", F::Copy),
         ("ausrichtung", "alignment", F::Copy),
         ("fuellbytes", "padding_bytes", F::Copy),
-        ("erste_abweichung", "first_difference", F::Copy),
+        ("erste_abweichung", "first_difference", F::Number),
         ("diagnose", "diagnoses", F::EnumList(DIAGNOSES)),
         ("gleichwertig", "equivalence", F::Sub(&EQUIVALENCE)),
     ],
@@ -367,6 +369,21 @@ fn enum_text(text: &str, table: &[(&str, &str)], path: &str, cx: &mut Ctx) -> St
 fn convert_field(value: Value, path: &str, kind: &F, cx: &mut Ctx) -> Option<Value> {
     match kind {
         F::Copy => Some(value),
+        F::Number => match value {
+            Value::Integer(_) => Some(value),
+            Value::String(text) => {
+                let t = text.trim();
+                let parsed = match t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+                    Some(hex) => i64::from_str_radix(hex, 16),
+                    None => t.parse(),
+                };
+                match parsed {
+                    Ok(n) => Some(Value::Integer(n)),
+                    Err(_) => mismatch(path, "an integer", cx),
+                }
+            }
+            _ => mismatch(path, "an integer", cx),
+        },
         F::Text => match value {
             Value::String(_) => {
                 cx.texts += 1;
@@ -481,6 +498,7 @@ verweise_falsch = 1
 verweise_ungeprueft = 3
 befehle_abweichend = 0
 datum = "2026-10-30"
+erste_abweichung = "0x4c"
 diagnose = ["operanden-tausch", "neu"]
 [funktion.gleichwertig]
 urteil = "gleichwertig_getestet"
@@ -503,6 +521,7 @@ zauber = 1
         assert_eq!(f["refs_unchecked"].as_integer(), Some(3));
         assert_eq!(f["instructions_differing"].as_integer(), Some(0));
         assert_eq!(f["differing"].as_integer(), Some(2));
+        assert_eq!(f["first_difference"].as_integer(), Some(0x4c));
         assert_eq!(f["diagnoses"][0].as_str(), Some("operand-swap"));
         assert_eq!(f["diagnoses"][1].as_str(), Some("neu"));
         let e = &f["equivalence"];
