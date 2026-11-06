@@ -7,11 +7,16 @@ The package is imported lazily, so this module loads without it; it is exercised
 
 from __future__ import annotations
 
+import inspect
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 BACKEND_UNAVAILABLE = -32010
+
+# `watch(stdout so far)` returns True to stop the session (status `timeout`).
+Watch = Callable[[str], bool]
 
 
 class BackendError(Exception):
@@ -41,12 +46,22 @@ class BatchResult:
 
 class Backend(ABC):
     @abstractmethod
-    def run_batch(self, mounts: list[MountSpec], command: str, timeout_s: float) -> BatchResult:
-        """Runs `command` in one headless DOS session. The first mount is the current drive."""
+    def run_batch(
+        self, mounts: list[MountSpec], command: str, timeout_s: float, watch: Watch | None = None
+    ) -> BatchResult:
+        """Runs `command` in one headless DOS session, at most `timeout_s`. The first mount is the current drive.
+        While it runs, `watch` gets the console output so far; when it returns True, the session is stopped and the
+        result has status `timeout`."""
 
 
 class DosboxLabBackend(Backend):
-    def run_batch(self, mounts: list[MountSpec], command: str, timeout_s: float) -> BatchResult:
+    """`dosbox_lab.run_batch` with `watch` (the output while it grows) and `snapshot=False` (the host snapshots its
+    files itself). Needs a dosbox-lab whose `run_batch` takes `watch` (see README.md); `stopped` (the watch ended the
+    session) is reported as `timeout`."""
+
+    def run_batch(
+        self, mounts: list[MountSpec], command: str, timeout_s: float, watch: Watch | None = None
+    ) -> BatchResult:
         try:
             import dosbox_lab
         except ImportError as exc:
@@ -54,11 +69,19 @@ class DosboxLabBackend(Backend):
                 BACKEND_UNAVAILABLE,
                 f"dosbox-lab is not installed ({exc}); run `decovery setup dosbox-lab --package <dir>`",
             ) from exc
+        if "watch" not in inspect.signature(dosbox_lab.run_batch).parameters:
+            raise BackendError(
+                BACKEND_UNAVAILABLE,
+                "dosbox-lab is too old: its run_batch has no `watch` (per-job time limits need it); update the "
+                "package and run `decovery setup dosbox-lab --package <dir>`",
+            )
         try:
             result = dosbox_lab.run_batch(
                 [dosbox_lab.Mount(m.drive, str(m.path), cdrom=m.read_only) for m in mounts],
                 command,
                 timeout_s=timeout_s,
+                watch=watch,
+                snapshot=False,
             )
         except dosbox_lab.DmcpError as exc:
             if "emulator not found" in exc.message:
@@ -69,4 +92,5 @@ class DosboxLabBackend(Backend):
             stdout = Path(stdout_path).read_bytes().decode("cp437")
         else:
             stdout = result.get("stdout_text") or ""
-        return BatchResult(result["status"], stdout, result.get("error"))
+        status = "timeout" if result["status"] == "stopped" else result["status"]
+        return BatchResult(status, stdout, result.get("error"))

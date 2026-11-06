@@ -4,6 +4,11 @@ A request's jobs are split over up to `max_parallel` DOSBox instances that run a
 most, fewer when the free memory does not hold that many, and no more than the request's `options.jobs`). Larger jobs
 (`cost`) go first, each to the instance with the least work so far. Every instance runs its jobs in one batch file
 `NB<k>.BAT` with its own TMP directory `C:\\NBT<k>`; the results are merged in job order.
+
+A job's result does not depend on which jobs share its instance: each job starts in the root of the current drive
+with errorlevel 0 and gets back the environment variables it changed, and its time limit is its own (`timeout_s`,
+measured from its begin marker while the session runs). When a job does not end in time (or DOSBox fails), the
+session stops; the jobs it did not reach answer `failed` with "job not run", which the host submits once more.
 """
 
 from __future__ import annotations
@@ -11,6 +16,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
@@ -49,8 +55,13 @@ MEMORY_PER_INSTANCE_MB = 256
 # the previous job left behind.
 ZERO_PROGRAM = bytes.fromhex("B8004CCD21")
 ZERO_NAME = "ZERO.COM"
+# Added to a session's backstop limit (`timeout_s` x its jobs) for DOSBox to start; the per-job limit is enforced by
+# watching the output. The host's call budget is `timeout_s` x jobs + 30 s.
+SESSION_SLACK_S = 10
+SAVED = "DECOVERY_SAVED"  # prefix of the variables that keep a job's environment to restore after it
 
-# Commands the shell runs itself: no CALL and no errorlevel check (they leave the errorlevel of the last program).
+# Commands the shell runs itself: no CALL and no errorlevel check (they leave the errorlevel of the last program). A
+# program started inside an `IF` or `FOR` line gets no errorlevel check either.
 INTERNAL = frozenset(
     "SET ECHO REM CD CHDIR PATH PAUSE VER VOL DIR MD MKDIR RD RMDIR DEL ERASE COPY REN RENAME TYPE CLS DATE TIME "
     "IF FOR".split()
@@ -59,14 +70,40 @@ INTERNAL = frozenset(
 # name (TYPE.EXE), digits to a longer name (MD5SUM).
 _WORD = re.compile(r"([A-Za-z]+)(?=$|[\s/\\;,=+<>|])")
 _DRIVE = re.compile(r"[A-Za-z]:\s*$")
-_FLOW = re.compile(r"(GOTO(?=$|[\s:])|:)", re.IGNORECASE)  # would jump in or out of the generated batch file
+_DOT = re.compile(r"(ECHO|CD|CHDIR)\.", re.IGNORECASE)  # `ECHO.` prints an empty line, `CD..` goes up
+# would jump in or out of the generated batch file: a label, or GOTO at the start or inside an IF/FOR line
+_FLOW = re.compile(r"(GOTO(?=$|[\s:])|:)", re.IGNORECASE)
+_GOTO = re.compile(r"(?<![A-Za-z0-9_])GOTO(?![A-Za-z0-9_])", re.IGNORECASE)
+_SET = re.compile(r"SET\s+([^=\s]+)\s*=", re.IGNORECASE)
 _MARKER = re.compile(r"DECOVERY-(JOB-(\d+)-END|JOB-(\d+)|EXIT-(\d+)-FAILED)")
 
 
 def _is_internal(line: str) -> bool:
     text = line.lstrip("@ \t")
     word = _WORD.match(text)
-    return bool(_DRIVE.match(text)) or (word is not None and word.group(1).upper() in INTERNAL)
+    return (
+        bool(_DRIVE.match(text))
+        or bool(_DOT.match(text))
+        or (word is not None and word.group(1).upper() in INTERNAL)
+    )
+
+
+def _jumps(line: str) -> bool:
+    text = line.lstrip("@ \t")
+    if _FLOW.match(text):
+        return True
+    word = _WORD.match(text)
+    return word is not None and word.group(1).upper() in ("IF", "FOR") and _GOTO.search(text) is not None
+
+
+def _set_names(commands: list[str]) -> list[str]:
+    """The variables a job's `SET` lines change, upper case, in first-use order."""
+    names: list[str] = []
+    for line in commands:
+        match = _SET.match(line.lstrip("@ \t"))
+        if match and match.group(1).upper() not in names:
+            names.append(match.group(1).upper())
+    return names
 
 
 def free_memory_mb() -> int | None:
@@ -122,14 +159,19 @@ def split_jobs(costs: list[int], instances: int) -> list[list[int]]:
 def build_script(
     jobs: list[list[str]], current_drive: str, numbers: list[int] | None = None, tmp_dir: str | None = None
 ) -> str:
-    """The batch file for `jobs` (numbered `numbers`, default 0, 1, ...). Per job: a begin marker, with `tmp_dir`
-    `SET TMP=<current>:\\<tmp_dir>` and the errorlevel reset (`<tmp_dir>\\ZERO.COM`), its lines, then
-    `DECOVERY-JOB-<i>-END`. After a program line, `IF ERRORLEVEL 1 GOTO F<i>` jumps to a shared ladder that echoes
-    `DECOVERY-EXIT-<code>-FAILED` with the exact errorlevel and continues with the next job (`SET DJ=<i>` remembers
-    which one)."""
+    """The batch file for `jobs` (numbered `numbers`, default 0, 1, ...). Per job: a begin marker, the root of the
+    current drive, the values of the variables the job sets (and `TMP`) saved, with `tmp_dir` `SET TMP=<current>:\\
+    <tmp_dir>` and the errorlevel reset (`<tmp_dir>\\ZERO.COM`), its lines, then `DECOVERY-JOB-<i>-END`. After a
+    program line, `IF ERRORLEVEL 1 GOTO F<i>` jumps to a shared ladder that echoes `DECOVERY-EXIT-<code>-FAILED` with
+    the exact errorlevel and continues at `:N<i>` (`SET DJ=<i>` remembers which one), where the saved variables are
+    restored on both paths."""
     out = ["@ECHO OFF"]
     for i, commands in zip(numbers if numbers is not None else range(len(jobs)), jobs):
+        names = _set_names(commands)
+        if tmp_dir is not None and "TMP" not in names:
+            names.insert(0, "TMP")
         out += [f"@ECHO DECOVERY-JOB-{i}", f"{current_drive}:", "CD \\"]
+        out += [f"SET {SAVED}{k}=%{name}%" for k, name in enumerate(names)]
         if tmp_dir is not None:
             out += [f"SET TMP={current_drive}:\\{tmp_dir}", f"{current_drive}:\\{tmp_dir}\\{ZERO_NAME}"]
         for line in commands:
@@ -138,6 +180,9 @@ def build_script(
             else:
                 out += [f"CALL {line}", f"IF ERRORLEVEL 1 GOTO F{i}"]
         out += [f"@ECHO DECOVERY-JOB-{i}-END", f"GOTO N{i}", f":F{i}", f"SET DJ={i}", "GOTO LADDER", f":N{i}"]
+        for k, name in enumerate(names):
+            out += [f"SET {name}=%{SAVED}{k}%", f"SET {SAVED}{k}="]
+        out.append("SET DJ=")
     out.append("GOTO FINISH")
     out.append(":LADDER")
     out += [f"IF ERRORLEVEL {code} GOTO E{code}" for code in range(255, 1, -1)]
@@ -211,7 +256,7 @@ def _parse(params: Any) -> tuple[list[MountSpec], str, float, list[list[str]], l
             for command in commands:
                 if "\r" in command or "\n" in command:
                     raise TypeError("'jobs[].commands' (line break in a command)")
-                if _FLOW.match(command.lstrip("@ \t")):
+                if _jumps(command):
                     raise TypeError(f"'jobs[].commands' (GOTO and labels are not supported: {command!r})")
                 try:
                     command.encode("cp437")
@@ -227,19 +272,41 @@ def _parse(params: Any) -> tuple[list[MountSpec], str, float, list[list[str]], l
     return [current_mount, *mounts.values()], current.upper(), float(timeout_s), jobs, costs, share
 
 
-def _outcome(job: dict[str, Any], batch: BatchResult, timeout_s: float, count: int, total_s: float) -> dict | None:
-    """The outcome of one job of a batch of `count` jobs; a job the batch did not reach is `None`."""
+class _Watch:
+    """Called by the backend with the session's output so far: notes when each job's begin marker appears and stops
+    the session when the running job has run longer than `timeout_s`, or when the request is cancelled."""
+
+    def __init__(self, timeout_s: float, clock: Callable[[], float], ctx: Context):
+        self.timeout_s = timeout_s
+        self.clock = clock
+        self.ctx = ctx
+        self.position = 0
+        self.running: int | None = None
+        self.since = 0.0
+
+    def __call__(self, stdout: str) -> bool:
+        now = self.clock()
+        complete = stdout.rfind("\n") + 1  # markers are whole lines
+        for match in _MARKER.finditer(stdout, self.position, complete):
+            if match.group(3) is not None:
+                self.running, self.since = int(match.group(3)), now
+            else:
+                self.running = None
+        self.position = max(self.position, complete)
+        if self.ctx.cancelled:
+            return True
+        return self.running is not None and now - self.since > self.timeout_s
+
+
+def _outcome(job: dict[str, Any], batch: BatchResult, timeout_s: float) -> dict:
+    """The outcome of one job of a session; nothing in it depends on the other jobs of the session."""
     if job["exit_code"] is not None:
         outcome = {"status": "done", "exit_code": job["exit_code"], "message": None}
     elif not job["started"]:
-        return None
+        message = f"job not run: its DOSBox session stopped before it ({batch.message or batch.status})"
+        outcome = {"status": "failed", "exit_code": None, "message": message}
     elif batch.status == "timeout":
-        outcome = {
-            "status": "timeout",
-            "exit_code": None,
-            "message": f"no end after {timeout_s:g} s per job: the batch of {count} jobs did not end within "
-            f"{total_s:g} s while this job ran",
-        }
+        outcome = {"status": "timeout", "exit_code": None, "message": f"no end after {timeout_s:g} s"}
     else:
         detail = batch.message or f"batch {batch.status}"
         outcome = {"status": "failed", "exit_code": None, "message": f"job did not end: {detail}"}
@@ -271,46 +338,36 @@ class _Instance:
         self.script.unlink(missing_ok=True)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def run(self, backend_factory: Callable[[], Backend], jobs: list[tuple[int, list[str]]], ctx: Context) -> dict:
-        """Outcomes by job number. When a batch stops in a job (timeout, crash), the jobs it did not reach run again
-        in a new session; a batch that reaches none of its jobs ends the instance."""
-        outcomes: dict[int, dict] = {}
-        pending = jobs
-        reason = ""
-        while pending:
-            numbers = [n for n, _ in pending]
-            total_s = self.timeout_s * len(pending)
-            text = build_script([c for _, c in pending], self.current, numbers, self.tmp_name)
-            self.script.write_bytes(text.encode("cp437"))
-            try:
-                batch = backend_factory().run_batch(self.mounts, self.script_name, total_s)
-            except BackendError as exc:
-                raise RpcError(exc.code, exc.message) from exc
-            finally:
-                self.script.unlink(missing_ok=True)
-            parsed = parse_output(batch.stdout, max(numbers) + 1)
-            later = []
-            for n, commands in pending:
-                outcome = _outcome(parsed[n], batch, self.timeout_s, len(pending), total_s)
-                if outcome is None:
-                    later.append((n, commands))
-                else:
-                    outcomes[n] = outcome
-            if len(later) == len(pending):
-                reason = f"batch {batch.status}" + (f": {batch.message}" if batch.message else "")
-                break
-            pending = later
-            if pending and ctx.cancelled:
-                reason = "cancelled"
-                break
-        for n, _ in pending:
-            message = f"job not run: {reason}"
-            outcomes.setdefault(n, {"status": "failed", "exit_code": None, "stdout": "", "message": message})
-        return outcomes
+    def run(
+        self,
+        backend_factory: Callable[[], Backend],
+        jobs: list[tuple[int, list[str]]],
+        clock: Callable[[], float],
+        ctx: Context,
+    ) -> dict:
+        """Outcomes by job number, from one DOSBox session. Each job may run `timeout_s` from its begin marker; the
+        session as a whole is bounded by `timeout_s` x its jobs + `SESSION_SLACK_S` (DOSBox start-up), which stays
+        within the host's call budget for any number of instances."""
+        numbers = [n for n, _ in jobs]
+        text = build_script([c for _, c in jobs], self.current, numbers, self.tmp_name)
+        self.script.write_bytes(text.encode("cp437"))
+        limit = self.timeout_s * len(jobs) + SESSION_SLACK_S
+        try:
+            watch = _Watch(self.timeout_s, clock, ctx)
+            batch = backend_factory().run_batch(self.mounts, self.script_name, limit, watch)
+        except BackendError as exc:
+            raise RpcError(exc.code, exc.message) from exc
+        finally:
+            self.script.unlink(missing_ok=True)
+        parsed = parse_output(batch.stdout, max(numbers) + 1)
+        return {n: _outcome(parsed[n], batch, self.timeout_s) for n in numbers}
 
 
-def build_plugin(backend_factory: Callable[[], Backend] = DosboxLabBackend) -> Plugin:
-    """The dosbox-lab plugin. `backend_factory` is called once per batch (one DOSBox session)."""
+def build_plugin(
+    backend_factory: Callable[[], Backend] = DosboxLabBackend, clock: Callable[[], float] = time.monotonic
+) -> Plugin:
+    """The dosbox-lab plugin. `backend_factory` is called once per batch (one DOSBox session); `clock` measures the
+    jobs' run time (tests pass the fake backend's clock)."""
     plugin = Plugin("dosbox-lab", __version__)
     instances = max_instances()
     plugin.set_limits("runner", max_parallel=instances, memory_per_instance_mb=MEMORY_PER_INSTANCE_MB)
@@ -329,7 +386,7 @@ def build_plugin(backend_factory: Callable[[], Backend] = DosboxLabBackend) -> P
                 claimed.append(worker)
             with ThreadPoolExecutor(len(workers)) as threads:  # each thread waits for its DOSBox process
                 futures = [
-                    threads.submit(worker.run, backend_factory, [(i, commands[i]) for i in part], ctx)
+                    threads.submit(worker.run, backend_factory, [(i, commands[i]) for i in part], clock, ctx)
                     for worker, part in zip(workers, split)
                 ]
                 merged: dict[int, dict] = {}
