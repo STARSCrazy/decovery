@@ -1,13 +1,14 @@
 //! Table-driven conversion of the Decomp knowledge files that have no typed decovery model yet:
-//! `nachbau.toml`, `nachbau-programm.toml`, `laufzeit.toml` and `verweise.toml`.
+//! the rebuild records, rebuild program, runs and references files (names in `decomp_format::files`).
 //!
-//! Each file kind is described by a [`Node`] tree: German key, English key, and how the value is treated.
+//! Each file kind is described by a [`Node`] tree: Decomp key, English key, and how the value is treated.
 //! Keys that are not in the tree are reported through [`Tbl::finish`]; nothing is dropped silently.
 
 use std::path::Path;
 
 use toml::{Table, Value};
 
+use super::decomp_format::files;
 use super::{Ctx, MigrateError, Tbl, read, translate_address};
 use crate::workspace::SCHEMA;
 
@@ -282,20 +283,20 @@ static REFERENCES: Node = Node {
     fields: &[("verweis", "reference", F::Subs(&REFERENCE))],
 };
 
-/// The four file kinds, by Decomp file name under `wissen/`.
+/// The four file kinds, by Decomp file name in its knowledge directory.
 pub(super) const FILES: [(&str, &str); 4] = [
-    ("nachbau.toml", "knowledge/rebuild.toml"),
-    ("nachbau-programm.toml", "knowledge/rebuild-program.toml"),
-    ("laufzeit.toml", "knowledge/runs.toml"),
-    ("verweise.toml", "knowledge/references.toml"),
+    (files::REBUILD_RECORDS, "knowledge/rebuild.toml"),
+    (files::REBUILD_PROGRAM, "knowledge/rebuild-program.toml"),
+    (files::RUN_RECORDS, "knowledge/runs.toml"),
+    (files::REFERENCES, "knowledge/references.toml"),
 ];
 
 /// Reads `path` and returns the converted TOML text with `schema = 1`.
 pub(super) fn convert_file(kind: &str, path: &Path, cx: &mut Ctx) -> Result<String, MigrateError> {
     let root = match kind {
-        "nachbau.toml" => &REBUILD,
-        "nachbau-programm.toml" => &REBUILD_PROGRAM,
-        "laufzeit.toml" => &RUNS,
+        files::REBUILD_RECORDS => &REBUILD,
+        files::REBUILD_PROGRAM => &REBUILD_PROGRAM,
+        files::RUN_RECORDS => &RUNS,
         _ => &REFERENCES,
     };
     let text = read(path)?;
@@ -320,11 +321,11 @@ pub(super) fn convert_file(kind: &str, path: &Path, cx: &mut Ctx) -> Result<Stri
 
 fn convert_table(mut t: Tbl, node: &Node, cx: &mut Ctx) -> Table {
     let mut out = Table::new();
-    for (german, english, kind) in node.fields {
-        let Some(value) = t.map.remove(*german) else {
+    for (decomp_key, english, kind) in node.fields {
+        let Some(value) = t.map.remove(*decomp_key) else {
             continue;
         };
-        let path = t.key(german);
+        let path = t.key(decomp_key);
         if let Some(v) = convert_field(value, &path, kind, cx) {
             out.insert((*english).to_string(), v);
         }
@@ -357,8 +358,8 @@ fn mixed_text(text: &str, path: &str, cx: &mut Ctx) -> String {
 }
 
 fn enum_text(text: &str, table: &[(&str, &str)], path: &str, cx: &mut Ctx) -> String {
-    match table.iter().find(|(de, _)| *de == text) {
-        Some((_, en)) => (*en).to_string(),
+    match table.iter().find(|(decomp_id, _)| *decomp_id == text) {
+        Some((_, id)) => (*id).to_string(),
         None => {
             cx.unmapped.insert(format!("{path}={text}"));
             text.to_string()

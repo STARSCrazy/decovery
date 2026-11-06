@@ -5,6 +5,7 @@
 //! [`MigrationReport::untranslated_texts`].
 
 mod analysis_import;
+mod decomp_format;
 mod knowledge;
 mod layout;
 
@@ -21,6 +22,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use toml::Value;
+
+use self::decomp_format::{dirs, files, keys, values};
 
 use crate::address::Address;
 use crate::knowledge::{
@@ -229,10 +232,10 @@ impl Tbl {
     }
 }
 
-/// `[nachbau.optionen_je_datei]`: source file name to extra flags.
+/// Decomp's per-file flags table: source file name to extra flags.
 fn file_flags(n: &mut Tbl, cx: &mut Ctx) -> std::collections::BTreeMap<String, String> {
     let mut out = std::collections::BTreeMap::new();
-    if let Some(mut t) = n.table("optionen_je_datei", cx) {
+    if let Some(mut t) = n.table(keys::FILE_FLAGS, cx) {
         let keys: Vec<String> = t.map.keys().cloned().collect();
         for k in keys {
             if let Some(v) = t.string(&k, cx) {
@@ -268,31 +271,31 @@ fn require_address(key: &str, text: &str) -> Result<Address, MigrateError> {
 
 fn map_source(text: &str) -> Option<ClaimSource> {
     Some(match text {
-        "mensch" => ClaimSource::Human,
-        "ki" => ClaimSource::Agent,
-        "signatur" => ClaimSource::Signature,
-        "laufzeit" => ClaimSource::Runtime,
-        "aehnlich" => ClaimSource::Similarity,
+        values::SOURCE_HUMAN => ClaimSource::Human,
+        values::SOURCE_AGENT => ClaimSource::Agent,
+        values::SOURCE_SIGNATURE => ClaimSource::Signature,
+        values::SOURCE_RUNTIME => ClaimSource::Runtime,
+        values::SOURCE_SIMILARITY => ClaimSource::Similarity,
         "import" => ClaimSource::Import,
-        "engine" => ClaimSource::Analysis,
+        values::SOURCE_ANALYSIS => ClaimSource::Analysis,
         _ => return None,
     })
 }
 
 fn map_confidence(text: &str) -> Option<Confidence> {
     Some(match text {
-        "belegt" => Confidence::Confirmed,
-        "vermutet" => Confidence::Assumed,
-        "widerlegt" => Confidence::Refuted,
+        values::CONFIDENCE_CONFIRMED => Confidence::Confirmed,
+        values::CONFIDENCE_ASSUMED => Confidence::Assumed,
+        values::CONFIDENCE_REFUTED => Confidence::Refuted,
         _ => return None,
     })
 }
 
 fn map_kind(text: &str) -> Option<SymbolKind> {
     Some(match text {
-        "funktion" => SymbolKind::Function,
+        values::KIND_FUNCTION => SymbolKind::Function,
         "global" | "variable" => SymbolKind::Global,
-        "marke" | "label" => SymbolKind::Label,
+        values::KIND_LABEL | "label" => SymbolKind::Label,
         _ => return None,
     })
 }
@@ -303,7 +306,7 @@ fn map_detected_kind(text: &str) -> Option<&'static str> {
         "packer" => "packer",
         "extender" => "extender",
         "compiler" => "compiler",
-        "aufrufart" => "calling-convention",
+        values::DETECTED_CALLING_CONVENTION => "calling-convention",
         _ => return None,
     })
 }
@@ -369,10 +372,10 @@ fn parse_refuted(text: &str) -> RefutedClaim {
 /// Migrates the Decomp workspace at `from` into `to` (created if missing).
 pub fn migrate_decomp(from: &Path, to: &Path) -> Result<MigrationReport, MigrateError> {
     let mut cx = Ctx::default();
-    let config_text = read(&from.join("decomp.toml"))?;
+    let config_text = read(&from.join(files::CONFIG))?;
     let table: toml::Table =
         toml::from_str(&config_text).map_err(|source| MigrateError::Parse {
-            path: from.join("decomp.toml"),
+            path: from.join(files::CONFIG),
             source: Box::new(source),
         })?;
     let config = convert_config(table, &mut cx)?;
@@ -381,9 +384,9 @@ pub fn migrate_decomp(from: &Path, to: &Path) -> Result<MigrationReport, Migrate
     let mut config = config;
     layout::plan_target(&mut config.target.file, from, &mut copies, &mut cx);
 
-    let wissen = from.join("wissen");
+    let knowledge_dir = from.join(dirs::KNOWLEDGE);
     let mut symbols = Vec::new();
-    let symbols_src = wissen.join("symbole.toml");
+    let symbols_src = knowledge_dir.join(files::SYMBOLS);
     if symbols_src.is_file() {
         let text = read(&symbols_src)?;
         let table: toml::Table = toml::from_str(&text).map_err(|source| MigrateError::Parse {
@@ -392,27 +395,30 @@ pub fn migrate_decomp(from: &Path, to: &Path) -> Result<MigrationReport, Migrate
         })?;
         symbols = convert_symbols(table, &mut cx)?;
     }
-    let types = read_optional(&wissen.join("typen.h"))?;
-    let notes = read_optional(&wissen.join("notizen.md"))?;
+    let types = read_optional(&knowledge_dir.join(files::TYPES))?;
+    let notes = read_optional(&knowledge_dir.join(files::NOTES))?;
 
     let mut extra: Vec<(String, String)> = Vec::new();
-    for (german, english) in knowledge::FILES {
-        let path = wissen.join(german);
+    for (decomp_name, english) in knowledge::FILES {
+        let path = knowledge_dir.join(decomp_name);
         if path.is_file() {
             extra.push((
                 english.to_string(),
-                knowledge::convert_file(german, &path, &mut cx)?,
+                knowledge::convert_file(decomp_name, &path, &mut cx)?,
             ));
         }
     }
-    if wissen.join("laufzeit").is_dir() {
-        copies.add(wissen.join("laufzeit"), "knowledge/runs");
+    if knowledge_dir.join(dirs::RUNS).is_dir() {
+        copies.add(knowledge_dir.join(dirs::RUNS), "knowledge/runs");
     }
-    for name in markdown_files(&wissen)? {
+    for name in markdown_files(&knowledge_dir)? {
         match name.as_str() {
-            "notizen.md" => {}
-            "programmierstil.md" => copies.add(wissen.join(&name), "knowledge/style.md"),
-            _ => copies.add(wissen.join(&name), format!("knowledge/reports/{name}")),
+            files::NOTES => {}
+            files::STYLE => copies.add(knowledge_dir.join(&name), "knowledge/style.md"),
+            _ => copies.add(
+                knowledge_dir.join(&name),
+                format!("knowledge/reports/{name}"),
+            ),
         }
     }
     layout::plan_trees(from, &mut copies, &mut cx)?;
@@ -518,28 +524,33 @@ fn write(path: &Path, content: &str) -> Result<(), MigrateError> {
 /// Files and folders of the Decomp workspace that have no counterpart are listed, not ignored.
 fn report_leftover_files(from: &Path, cx: &mut Ctx) -> Result<(), MigrateError> {
     const ROOT_KNOWN: [&str; 8] = [
-        "decomp.toml",
-        "wissen",
-        "ausgabe",
-        "cache",
-        "spiel",
-        "nachbau",
+        files::CONFIG,
+        dirs::KNOWLEDGE,
+        dirs::OUTPUT,
+        dirs::CACHE,
+        dirs::GAME,
+        dirs::REBUILD,
         ".gitignore",
         ".git",
     ];
-    const WISSEN_KNOWN: [&str; 8] = [
-        "symbole.toml",
-        "typen.h",
-        "notizen.md",
-        "nachbau.toml",
-        "nachbau-programm.toml",
-        "laufzeit.toml",
-        "laufzeit",
-        "verweise.toml",
+    const KNOWLEDGE_KNOWN: [&str; 8] = [
+        files::SYMBOLS,
+        files::TYPES,
+        files::NOTES,
+        files::REBUILD_RECORDS,
+        files::REBUILD_PROGRAM,
+        files::RUN_RECORDS,
+        dirs::RUNS,
+        files::REFERENCES,
     ];
+    let knowledge_prefix = format!("{}/", dirs::KNOWLEDGE);
     for (dir, known, prefix) in [
         (from.to_path_buf(), &ROOT_KNOWN[..], ""),
-        (from.join("wissen"), &WISSEN_KNOWN[..], "wissen/"),
+        (
+            from.join(dirs::KNOWLEDGE),
+            &KNOWLEDGE_KNOWN[..],
+            knowledge_prefix.as_str(),
+        ),
     ] {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
@@ -561,32 +572,34 @@ fn convert_config(table: toml::Table, cx: &mut Ctx) -> Result<WorkspaceConfig, M
         path: String::new(),
         map: table,
     };
-    let mut ziel = root
-        .table("ziel", cx)
-        .ok_or_else(|| MigrateError::Missing("ziel".into()))?;
-    let file = ziel.require_string("datei", cx)?;
-    let sha256 = ziel.require_string("sha256", cx)?;
-    let format_text = ziel.require_string("format", cx)?;
+    let mut target_table = root
+        .table(keys::TARGET, cx)
+        .ok_or_else(|| MigrateError::Missing(keys::TARGET.into()))?;
+    let file = target_table.require_string(keys::FILE, cx)?;
+    let sha256 = target_table.require_string("sha256", cx)?;
+    let format_text = target_table.require_string("format", cx)?;
     let format = match format_text.as_str() {
         "mz" => TargetFormat::Mz,
         "com" => TargetFormat::Com,
         "le" => TargetFormat::Le,
-        "flach32" => TargetFormat::Flat32,
+        values::FORMAT_FLAT32 => TargetFormat::Flat32,
         _ => return Err(MigrateError::UnsupportedFormat(format_text)),
     };
-    let processor = ziel.require_string("prozessor", cx)?;
+    let processor = target_table.require_string(keys::PROCESSOR, cx)?;
     let mut segments = Vec::new();
-    for mut s in ziel.tables("segment", cx) {
+    for mut s in target_table.tables("segment", cx) {
         let name = s.require_string("name", cx)?;
         let start_text = s.require_string("start", cx)?;
         let start = require_address(&s.key("start"), &start_text)?;
-        let length = s.require_uint("laenge", cx)?;
-        let file_offset = s.uint("datei_offset", cx);
-        let file_length = s.uint("datei_laenge", cx);
-        let permissions = s.string("rechte", cx).unwrap_or_else(|| "rwx".into());
+        let length = s.require_uint(keys::LENGTH, cx)?;
+        let file_offset = s.uint(keys::FILE_OFFSET, cx);
+        let file_length = s.uint(keys::FILE_LENGTH, cx);
+        let permissions = s
+            .string(keys::PERMISSIONS, cx)
+            .unwrap_or_else(|| "rwx".into());
         if permissions.is_empty() || !permissions.chars().all(|c| matches!(c, 'r' | 'w' | 'x')) {
             cx.unmapped
-                .insert(format!("{}={permissions}", s.key("rechte")));
+                .insert(format!("{}={permissions}", s.key(keys::PERMISSIONS)));
         }
         s.finish(cx);
         segments.push(SegmentConfig {
@@ -598,7 +611,7 @@ fn convert_config(table: toml::Table, cx: &mut Ctx) -> Result<WorkspaceConfig, M
             permissions,
         });
     }
-    ziel.finish(cx);
+    target_table.finish(cx);
     let target = TargetConfig {
         file,
         sha256,
@@ -608,52 +621,55 @@ fn convert_config(table: toml::Table, cx: &mut Ctx) -> Result<WorkspaceConfig, M
     };
 
     let mut analysis = AnalysisConfig::default();
-    if let Some(mut a) = root.table("analyse", cx) {
-        analysis.prologues = a.strings("prologe", cx);
-        analysis.calling_convention = a.string("aufrufart", cx);
+    if let Some(mut a) = root.table(keys::ANALYSIS, cx) {
+        analysis.prologues = a.strings(keys::PROLOGUES, cx);
+        analysis.calling_convention = a.string(keys::CALLING_CONVENTION, cx);
         a.finish(cx);
     }
 
     let mut output = OutputConfig::default();
-    if let Some(mut a) = root.table("ausgabe", cx) {
-        if let Some(v) = a.boolean("versionieren", cx) {
+    if let Some(mut a) = root.table(keys::OUTPUT, cx) {
+        if let Some(v) = a.boolean(keys::VERSIONED, cx) {
             output.versioned = v;
         }
         a.finish(cx);
     }
 
     let mut detected = Vec::new();
-    for mut e in root.tables("erkennung", cx) {
-        let kind_text = e.require_string("art", cx)?;
+    for mut e in root.tables(keys::DETECTION, cx) {
+        let kind_text = e.require_string(keys::KIND, cx)?;
         let kind = map_detected_kind(&kind_text)
             .map(str::to_string)
             .unwrap_or_else(|| {
-                cx.unmapped.insert(format!("erkennung.art={kind_text}"));
+                cx.unmapped
+                    .insert(format!("{}.{}={kind_text}", keys::DETECTION, keys::KIND));
                 kind_text.clone()
             });
-        let value = match e.map.remove("wert") {
+        let value = match e.map.remove(keys::VALUE) {
             None => None,
             Some(Value::String(s)) => Some(s),
             Some(Value::Integer(i)) => Some(i.to_string()),
             Some(Value::Boolean(b)) => Some(b.to_string()),
             Some(_) => {
-                e.mismatch("wert", "a scalar", cx);
+                e.mismatch(keys::VALUE, "a scalar", cx);
                 None
             }
         };
-        let conf_text = e.string("sicherheit", cx);
+        let conf_text = e.string(keys::CONFIDENCE, cx);
         let confidence = match conf_text.as_deref() {
             None => Confidence::Assumed,
             Some(t) => map_confidence(t).unwrap_or_else(|| {
-                cx.unmapped.insert(format!("erkennung.sicherheit={t}"));
+                cx.unmapped
+                    .insert(format!("{}.{}={t}", keys::DETECTION, keys::CONFIDENCE));
                 Confidence::Assumed
             }),
         };
-        let evidence = e.text("beleg", cx);
-        let source = e.string("quelle", cx).map(|q| match q.as_str() {
-            "gepackt" => "packed".to_string(),
+        let evidence = e.text(keys::EVIDENCE, cx);
+        let source = e.string(keys::SOURCE, cx).map(|q| match q.as_str() {
+            values::DETECTED_SOURCE_PACKED => "packed".to_string(),
             _ => {
-                cx.unmapped.insert(format!("erkennung.quelle={q}"));
+                cx.unmapped
+                    .insert(format!("{}.{}={q}", keys::DETECTION, keys::SOURCE));
                 q
             }
         });
@@ -667,12 +683,13 @@ fn convert_config(table: toml::Table, cx: &mut Ctx) -> Result<WorkspaceConfig, M
         });
     }
 
-    let unpacked = match root.table("entpackt", cx) {
+    let unpacked = match root.table(keys::UNPACKED, cx) {
         Some(mut u) => {
             let packer = u.require_string("packer", cx)?;
             let sha = u.require_string("sha256", cx)?;
-            let entry_text = u.require_string("einsprung", cx)?;
-            let entry = require_address("entpackt.einsprung", &entry_text)?;
+            let entry_text = u.require_string(keys::ENTRY, cx)?;
+            let entry =
+                require_address(&format!("{}.{}", keys::UNPACKED, keys::ENTRY), &entry_text)?;
             u.finish(cx);
             Some(UnpackedConfig {
                 packer,
@@ -683,19 +700,19 @@ fn convert_config(table: toml::Table, cx: &mut Ctx) -> Result<WorkspaceConfig, M
         None => None,
     };
 
-    let runtime = match root.table("laufzeit", cx) {
+    let runtime = match root.table(keys::RUNTIME, cx) {
         Some(mut l) => {
             let mut bases = Vec::new();
-            for mut b in l.tables("basis", cx) {
+            for mut b in l.tables(keys::BASES, cx) {
                 let segment = b.require_string("segment", cx)?;
-                let text = b.require_string("basis_linear", cx)?;
+                let text = b.require_string(keys::LINEAR_BASE, cx)?;
                 let digits = text
                     .strip_prefix("0x")
                     .or_else(|| text.strip_prefix("0X"))
                     .unwrap_or(&text);
                 let linear_base =
                     u32::from_str_radix(digits, 16).map_err(|_| MigrateError::Invalid {
-                        key: b.key("basis_linear"),
+                        key: b.key(keys::LINEAR_BASE),
                         value: text.clone(),
                     })?;
                 b.finish(cx);
@@ -710,22 +727,22 @@ fn convert_config(table: toml::Table, cx: &mut Ctx) -> Result<WorkspaceConfig, M
         None => None,
     };
 
-    let rebuild = match root.table("nachbau", cx) {
+    let rebuild = match root.table(keys::REBUILD, cx) {
         Some(mut n) => {
             let mut r = RebuildConfig {
                 compiler: n.string("compiler", cx),
-                flags: n.string("optionen", cx),
+                flags: n.string(keys::FLAGS, cx),
                 file_flags: file_flags(&mut n, cx),
                 ..RebuildConfig::default()
             };
-            if let Some(mut l) = n.table("linken", cx) {
+            if let Some(mut l) = n.table(keys::LINK, cx) {
                 r.link = Some(LinkConfig {
-                    profile: l.string("profil", cx),
-                    libraries: l.strings("bibliotheken", cx),
-                    flags: l.string("optionen", cx),
-                    startup: l.string("start", cx),
-                    insert: l.boolean("einsetzen", cx),
-                    stack: l.uint("stapel", cx).and_then(|v| u32::try_from(v).ok()),
+                    profile: l.string(keys::PROFILE, cx),
+                    libraries: l.strings(keys::LIBRARIES, cx),
+                    flags: l.string(keys::FLAGS, cx),
+                    startup: l.string(keys::STARTUP, cx),
+                    insert: l.boolean(keys::INSERT, cx),
+                    stack: l.uint(keys::STACK, cx).and_then(|v| u32::try_from(v).ok()),
                 });
                 l.finish(cx);
             }
@@ -755,7 +772,7 @@ fn convert_symbols(table: toml::Table, cx: &mut Ctx) -> Result<Vec<Symbol>, Migr
         map: table,
     };
     let mut symbols = Vec::new();
-    for mut s in root.tables("symbol", cx) {
+    for mut s in root.tables(keys::SYMBOL, cx) {
         symbols.push(convert_symbol(&mut s, cx)?);
         s.finish(cx);
     }
@@ -765,45 +782,48 @@ fn convert_symbols(table: toml::Table, cx: &mut Ctx) -> Result<Vec<Symbol>, Migr
 }
 
 fn convert_symbol(s: &mut Tbl, cx: &mut Ctx) -> Result<Symbol, MigrateError> {
-    let addr_text = s.require_string("adresse", cx)?;
-    let address = require_address("symbol.adresse", &addr_text)?;
-    let kind = match s.string("art", cx) {
+    let addr_text = s.require_string(keys::ADDRESS, cx)?;
+    let address = require_address(&format!("{}.{}", keys::SYMBOL, keys::ADDRESS), &addr_text)?;
+    let kind = match s.string(keys::KIND, cx) {
         None => SymbolKind::Function,
         Some(t) => map_kind(&t).unwrap_or_else(|| {
-            cx.unmapped.insert(format!("symbol.art={t}"));
+            cx.unmapped
+                .insert(format!("{}.{}={t}", keys::SYMBOL, keys::KIND));
             SymbolKind::Other
         }),
     };
     let name = s.string("name", cx).unwrap_or_default();
     let mut symbol = Symbol::new(address, kind, name);
-    symbol.signature = s.string("signatur", cx);
-    symbol.comment = s.text("kommentar", cx);
-    symbol.source = match s.string("quelle", cx) {
+    symbol.signature = s.string(keys::SIGNATURE, cx);
+    symbol.comment = s.text(keys::COMMENT, cx);
+    symbol.source = match s.string(keys::SOURCE, cx) {
         None => ClaimSource::Human,
         Some(t) => map_source(&t).unwrap_or_else(|| {
-            cx.unmapped.insert(format!("symbol.quelle={t}"));
+            cx.unmapped
+                .insert(format!("{}.{}={t}", keys::SYMBOL, keys::SOURCE));
             ClaimSource::Import
         }),
     };
-    symbol.confidence = match s.string("sicherheit", cx) {
+    symbol.confidence = match s.string(keys::CONFIDENCE, cx) {
         None => Confidence::Assumed,
         Some(t) => map_confidence(&t).unwrap_or_else(|| {
-            cx.unmapped.insert(format!("symbol.sicherheit={t}"));
+            cx.unmapped
+                .insert(format!("{}.{}={t}", keys::SYMBOL, keys::CONFIDENCE));
             Confidence::Assumed
         }),
     };
-    symbol.evidence = s.text("beleg", cx);
-    for text in s.strings("widerlegt_frueher", cx) {
+    symbol.evidence = s.text(keys::EVIDENCE, cx);
+    for text in s.strings(keys::REFUTED_EARLIER, cx) {
         cx.texts += 1;
         symbol.refuted.push(parse_refuted(&text));
     }
-    symbol.data_type = s.string("typ", cx);
-    symbol.size = s.uint("groesse", cx);
-    symbol.library = s.string("bibliothek", cx);
-    for mut l in s.tables("lokal", cx) {
-        let place = l.require_string("platz", cx)?;
+    symbol.data_type = s.string(keys::DATA_TYPE, cx);
+    symbol.size = s.uint(keys::SIZE, cx);
+    symbol.library = s.string(keys::LIBRARY, cx);
+    for mut l in s.tables(keys::LOCAL, cx) {
+        let place = l.require_string(keys::PLACE, cx)?;
         let name = l.require_string("name", cx)?;
-        let data_type = l.string("typ", cx);
+        let data_type = l.string(keys::DATA_TYPE, cx);
         l.finish(cx);
         symbol.locals.push(LocalVariable {
             place,
@@ -811,18 +831,25 @@ fn convert_symbol(s: &mut Tbl, cx: &mut Ctx) -> Result<Symbol, MigrateError> {
             data_type,
         });
     }
-    for mut c in s.tables("zeilenkommentar", cx) {
-        let at = c.require_string("adresse", cx)?;
-        let address = require_address("symbol.zeilenkommentar.adresse", &at)?;
+    for mut c in s.tables(keys::LINE_COMMENT, cx) {
+        let at = c.require_string(keys::ADDRESS, cx)?;
+        let address = require_address(
+            &format!("{}.{}.{}", keys::SYMBOL, keys::LINE_COMMENT, keys::ADDRESS),
+            &at,
+        )?;
         let text = match c.text("text", cx) {
             Some(t) => t,
             None => return Err(MigrateError::Missing(c.key("text"))),
         };
-        let source = match c.string("quelle", cx) {
+        let source = match c.string(keys::SOURCE, cx) {
             None => ClaimSource::Human,
             Some(t) => map_source(&t).unwrap_or_else(|| {
-                cx.unmapped
-                    .insert(format!("symbol.zeilenkommentar.quelle={t}"));
+                cx.unmapped.insert(format!(
+                    "{}.{}.{}={t}",
+                    keys::SYMBOL,
+                    keys::LINE_COMMENT,
+                    keys::SOURCE
+                ));
                 ClaimSource::Import
             }),
         };
@@ -1121,7 +1148,7 @@ foo = 1
     }
 
     #[test]
-    fn absolute_target_path_is_kept_and_spiel_is_skipped() {
+    fn absolute_target_path_is_kept_and_game_dir_is_skipped() {
         let config = MINIMAL.replace("spiel/PROGRAM.EXE", "D:/games/PROGRAM.EXE");
         let (from, to) = setup(&config, None);
         std::fs::create_dir_all(from.path().join("spiel")).unwrap();
