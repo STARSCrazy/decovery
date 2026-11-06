@@ -11,14 +11,16 @@ use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
 use std::sync::mpsc::Receiver;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use decovery_core::{PluginConfig, UserConfig, Workspace, plugin_config};
 use decovery_plugin::{CallOptions, CancelToken, PluginError, PluginHost};
 use serde::Deserialize;
 use serde_json::{Value, json};
+
+use crate::schedule::{JobSlots, global_slots};
 
 /// Capability name and version of the runner contract.
 const CAPABILITY: &str = "runner";
@@ -57,11 +59,22 @@ pub struct RunJob {
     pub commands: Vec<String>,
     /// File names on drive `C:` the job must produce.
     pub expected: Vec<String>,
+    /// Relative size of the job (source bytes): runners start larger jobs first. 0 = unknown.
+    pub cost: u64,
 }
 
 impl RunJob {
     pub fn new(commands: Vec<String>, expected: Vec<String>) -> Self {
-        RunJob { commands, expected }
+        RunJob {
+            commands,
+            expected,
+            cost: 0,
+        }
+    }
+
+    pub fn with_cost(mut self, cost: u64) -> Self {
+        self.cost = cost;
+        self
     }
 }
 
@@ -290,10 +303,13 @@ fn run_checked(
     Ok(outcomes)
 }
 
-/// A runner served by a plugin with capability `runner` v1.
+/// A runner served by a plugin with capability `runner` v1. A request runs at most as many jobs at once as the
+/// plugin declares (`max_parallel`) and the job slots it takes allow (the process-wide `--jobs` limit).
 pub struct PluginRunner {
     name: String,
     host: Mutex<Option<PluginHost>>,
+    max_parallel: u32,
+    slots: Arc<JobSlots>,
 }
 
 impl PluginRunner {
@@ -320,10 +336,19 @@ impl PluginRunner {
                 found.map_or_else(|| "none".to_string(), |v| format!("v{v}"))
             )));
         }
+        let max_parallel = host.info().limits(CAPABILITY).max_parallel;
         Ok(PluginRunner {
             name: name.to_string(),
             host: Mutex::new(Some(host)),
+            max_parallel,
+            slots: global_slots(),
         })
+    }
+
+    /// Takes job slots from `slots` instead of the process-wide ones.
+    pub fn with_slots(mut self, slots: Arc<JobSlots>) -> Self {
+        self.slots = slots;
+        self
     }
 
     fn call(
@@ -335,6 +360,8 @@ impl PluginRunner {
         let host = guard
             .as_ref()
             .ok_or_else(|| RunnerError::Unavailable(format!("{}: shut down", self.name)))?;
+        let jobs = u32::try_from(request.jobs.len()).unwrap_or(u32::MAX);
+        let share = self.slots.acquire(self.max_parallel.min(jobs));
         let params = json!({
             "mounts": request.mounts.iter().map(|m| json!({
                 "drive": m.drive.to_string(),
@@ -343,9 +370,10 @@ impl PluginRunner {
             })).collect::<Vec<_>>(),
             "current_drive": "C",
             "timeout_s": request.timeout.as_secs_f64(),
-            "jobs": request.jobs.iter().map(|j| json!({"commands": j.commands})).collect::<Vec<_>>(),
+            "options": {"jobs": share.count()},
+            "jobs": request.jobs.iter().map(|j| json!({"commands": j.commands, "cost": j.cost})).collect::<Vec<_>>(),
         });
-        let jobs = u32::try_from(request.jobs.len()).unwrap_or(u32::MAX);
+        // a hang in every job must still end within the call: the per-job limit times the jobs, as if serial
         let timeout = request
             .timeout
             .saturating_mul(jobs)

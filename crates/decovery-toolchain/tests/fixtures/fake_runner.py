@@ -2,7 +2,9 @@
 
 Job commands: `WRITE <NAME> <text>` writes a file into the C mount, `EXIT <n>` sets the exit code,
 `SLEEP <s>` waits (a job over the timeout ends with status `timeout`), `UNSUPPORTED` answers error -32020
-before any job runs (so does every call when FAKE_REFUSE_ALL=1), `ECHO <text>` appends a line to stdout.
+before any job runs (so does every call when FAKE_REFUSE_ALL=1), `ECHO <text>` appends a line to stdout,
+`SHARE` appends `share=<options.jobs>`, `COST` appends `cost=<the job's cost>`. FAKE_MAX_PARALLEL=<n> declares
+`max_parallel` for the runner capability.
 """
 import os
 import sys
@@ -16,9 +18,11 @@ from decovery_plugin import Plugin, RpcError  # noqa: E402
 RUNNER_UNSUPPORTED = -32020
 
 plugin = Plugin("fake-runner", "0.0.1")
+if os.environ.get("FAKE_MAX_PARALLEL"):
+    plugin.set_limits("runner", max_parallel=int(os.environ["FAKE_MAX_PARALLEL"]))
 
 
-def run_job(job, mounts, timeout_s, ctx):
+def run_job(job, mounts, timeout_s, ctx, options):
     stdout = []
     exit_code = 0
     deadline = time.monotonic() + timeout_s
@@ -31,6 +35,10 @@ def run_job(job, mounts, timeout_s, ctx):
                 f.write(text)
         elif word == "EXIT":
             exit_code = int(rest)
+        elif word == "SHARE":
+            stdout.append(f"share={options.get('jobs')}")
+        elif word == "COST":
+            stdout.append(f"cost={job.get('cost')}")
         elif word == "ECHO":
             stdout.append(rest + "\r\n")
         elif word == "SLEEP":
@@ -55,7 +63,8 @@ def run(params, ctx):
     if refuse or any(c.strip() == "UNSUPPORTED" for job in jobs for c in job["commands"]):
         raise RpcError(RUNNER_UNSUPPORTED, "program not supported by fake runner")
     mounts = {m["drive"]: m["path"] for m in params["mounts"]}
-    return {"jobs": [run_job(j, mounts, params["timeout_s"], ctx) for j in jobs]}
+    options = params.get("options") or {}
+    return {"jobs": [run_job(j, mounts, params["timeout_s"], ctx, options) for j in jobs]}
 
 
 plugin.serve()

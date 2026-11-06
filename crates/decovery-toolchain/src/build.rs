@@ -1,8 +1,11 @@
 //! Compiling the staged sources of a build: object cache first, then all misses in one runner request, so that a
-//! runner pool (the emulator) runs them on all cores (design 5.13).
+//! runner pool (the emulator) runs them on all cores (design 5.13). [`plan_compile`] reads every input once (tool
+//! fingerprint, sources, headers, cached objects); [`compile_planned`] runs what the cache cannot serve.
 
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, SystemTime};
 
 use decovery_core::{Workspace, read_user_config};
 use decovery_plugin::CancelToken;
@@ -31,25 +34,55 @@ pub struct CompiledFile {
     pub cached: bool,
 }
 
+/// Size and modification time of each fingerprint file: a fingerprint is hashed again only when one changed.
+type FileStamps = Vec<(u64, Option<SystemTime>)>;
+
+/// Fingerprints computed in this process, by tool directory and file list, with the stamps they were hashed at.
+type FingerprintMemo = HashMap<(PathBuf, Vec<String>), (FileStamps, String)>;
+
+static FINGERPRINTS: Mutex<Option<FingerprintMemo>> = Mutex::new(None);
+
 /// blake3 over the profile's fingerprint files (name and bytes), hex. A missing file is an error: the directory
-/// does not hold this compiler.
+/// does not hold this compiler. The files (compiler binaries, megabytes) are hashed once per process; later calls
+/// only compare their size and modification time.
 pub fn tool_fingerprint(profile: &Profile, dir: &Path) -> Result<String, ToolchainError> {
+    let missing = |name: &str| {
+        ToolchainError::Invalid(format!(
+            "toolchain {}: {} does not contain {name}",
+            profile.id,
+            dir.display()
+        ))
+    };
+    let mut stamps: FileStamps = Vec::new();
+    for name in &profile.fingerprint {
+        let meta = std::fs::metadata(dir.join(name)).map_err(|_| missing(name))?;
+        stamps.push((meta.len(), meta.modified().ok()));
+    }
+    let key = (dir.to_path_buf(), profile.fingerprint.clone());
+    if let Some((known, hash)) = FINGERPRINTS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+        .and_then(|m| m.get(&key))
+        && *known == stamps
+    {
+        return Ok(hash.clone());
+    }
     let mut hasher = blake3::Hasher::new();
     for name in &profile.fingerprint {
-        let path = dir.join(name);
-        let bytes = std::fs::read(&path).map_err(|_| {
-            ToolchainError::Invalid(format!(
-                "toolchain {}: {} does not contain {name}",
-                profile.id,
-                dir.display()
-            ))
-        })?;
+        let bytes = std::fs::read(dir.join(name)).map_err(|_| missing(name))?;
         hasher.update(&(name.len() as u64).to_le_bytes());
         hasher.update(name.as_bytes());
         hasher.update(&(bytes.len() as u64).to_le_bytes());
         hasher.update(&bytes);
     }
-    Ok(hasher.finalize().to_hex().to_string())
+    let hash = hasher.finalize().to_hex().to_string();
+    FINGERPRINTS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get_or_insert_with(HashMap::new)
+        .insert(key, (stamps, hash.clone()));
+    Ok(hash)
 }
 
 /// A job the runner never started because an earlier job of the same request ended the session (dosbox-lab runs
@@ -112,63 +145,76 @@ fn failure(outcome: &JobOutcome, object: &str) -> String {
     }
 }
 
-/// Tool directory, fingerprint and object cache keys of the staged `sources`, in order.
-struct Keys {
+/// The staged `sources` of one build with everything read once: tool directory and fingerprint, object cache keys,
+/// cached objects and source sizes. [`compile_planned`] consumes it.
+#[derive(Debug)]
+pub struct CompilePlan {
     dir: PathBuf,
+    sources: Vec<(String, String)>,
     keys: Vec<String>,
+    /// The cached object per source, if any.
+    cached: Vec<Option<Vec<u8>>>,
+    /// Size in bytes per source: the job's cost (larger compiles start first).
+    sizes: Vec<u64>,
+    /// blake3 of every staged source and header read, by DOS name.
+    inputs: BTreeMap<String, String>,
     cache: ObjectCache,
 }
 
-fn cache_keys(
+impl CompilePlan {
+    /// How many sources the object cache cannot serve, i.e. how many compile jobs [`compile_planned`] runs; lets the
+    /// caller skip starting a runner.
+    pub fn misses(&self) -> usize {
+        self.cached.iter().filter(|c| c.is_none()).count()
+    }
+
+    /// blake3 (hex) of each staged source and header the plan read, by DOS name.
+    pub fn input_hashes(&self) -> &BTreeMap<String, String> {
+        &self.inputs
+    }
+}
+
+/// Reads the inputs of compiling the staged `sources` (DOS name, flags) in `build_dir` once: the tool fingerprint
+/// (hashed once per process), every source and header, and the cached objects.
+pub fn plan_compile(
     ws: &Workspace,
     profile: &Profile,
     sources: &[(String, String)],
     build_dir: &Path,
-) -> Result<Keys, ToolchainError> {
+) -> Result<CompilePlan, ToolchainError> {
     let user = read_user_config().map_err(|e| ToolchainError::Invalid(e.to_string()))?;
     let dir = tool_dir(profile, ws.config.rebuild.as_ref(), &user, &ws.root)?;
     let fingerprint = tool_fingerprint(profile, &dir)?;
     let headers = staged_headers(build_dir)?;
-    let keys = sources
+    let cache = ObjectCache::open(&ws.root);
+    let mut inputs: BTreeMap<String, String> = headers
         .iter()
-        .map(|(name, flags)| {
-            let line = profile.compile_line(flags, name);
-            let source = read(&build_dir.join(name))?;
-            Ok(ObjectCache::key(
-                profile,
-                &line,
-                &source,
-                &headers,
-                &fingerprint,
-            ))
-        })
-        .collect::<Result<_, ToolchainError>>()?;
-    Ok(Keys {
+        .map(|(name, bytes)| (name.clone(), blake3::hash(bytes).to_hex().to_string()))
+        .collect();
+    let mut keys = Vec::new();
+    let mut cached = Vec::new();
+    let mut sizes = Vec::new();
+    for (name, flags) in sources {
+        let line = profile.compile_line(flags, name);
+        let source = read(&build_dir.join(name))?;
+        inputs.insert(name.clone(), blake3::hash(&source).to_hex().to_string());
+        let key = ObjectCache::key(profile, &line, &source, &headers, &fingerprint);
+        cached.push(cache.get(&key));
+        keys.push(key);
+        sizes.push(source.len() as u64);
+    }
+    Ok(CompilePlan {
         dir,
+        sources: sources.to_vec(),
         keys,
-        cache: ObjectCache::open(&ws.root),
+        cached,
+        sizes,
+        inputs,
+        cache,
     })
 }
 
-/// How many of the staged `sources` the object cache cannot serve, i.e. how many compile jobs [`compile`] would
-/// run; lets the caller skip starting a runner.
-pub fn cache_misses(
-    ws: &Workspace,
-    profile: &Profile,
-    sources: &[(String, String)],
-    build_dir: &Path,
-) -> Result<usize, ToolchainError> {
-    let k = cache_keys(ws, profile, sources, build_dir)?;
-    Ok(k.keys
-        .iter()
-        .filter(|key| k.cache.get(key).is_none())
-        .count())
-}
-
-/// Compiles the staged `sources` (DOS name, flags) in `build_dir`. Objects come from the object cache when the
-/// inputs are unchanged; all others are compiled in one runner request, one job per source. Jobs the runner did
-/// not start ([`is_job_not_run`]) are submitted once more. Returns one [`CompiledFile`] per source, in order, and
-/// the runners' warnings.
+/// Compiles the staged `sources` (DOS name, flags) in `build_dir`: [`plan_compile`], then [`compile_planned`].
 pub fn compile(
     ws: &Workspace,
     profile: &Profile,
@@ -177,14 +223,36 @@ pub fn compile(
     runners: &[Box<dyn Runner>],
     cancel: Option<CancelToken>,
 ) -> Result<(Vec<CompiledFile>, Vec<String>), ToolchainError> {
+    let plan = plan_compile(ws, profile, sources, build_dir)?;
+    compile_planned(ws, profile, plan, build_dir, runners, cancel)
+}
+
+/// Compiles what `plan` could not take from the object cache, in one runner request, one job per source (its cost
+/// the source size, so runners start the largest first). Jobs the runner did not start ([`is_job_not_run`]) are
+/// submitted once more. Returns one [`CompiledFile`] per source, in order, and the runners' warnings.
+pub fn compile_planned(
+    ws: &Workspace,
+    profile: &Profile,
+    plan: CompilePlan,
+    build_dir: &Path,
+    runners: &[Box<dyn Runner>],
+    cancel: Option<CancelToken>,
+) -> Result<(Vec<CompiledFile>, Vec<String>), ToolchainError> {
     let rebuild = ws.config.rebuild.as_ref();
-    let Keys { dir, keys, cache } = cache_keys(ws, profile, sources, build_dir)?;
+    let CompilePlan {
+        dir,
+        sources,
+        keys,
+        cached,
+        sizes,
+        cache,
+        ..
+    } = plan;
 
     let mut files: Vec<CompiledFile> = Vec::new();
     let mut misses: Vec<(usize, String, RunJob)> = Vec::new();
-    for (i, ((name, flags), key)) in sources.iter().zip(keys).enumerate() {
+    for (i, (((name, flags), key), object)) in sources.iter().zip(keys).zip(cached).enumerate() {
         let line = profile.compile_line(flags, name);
-        let object = cache.get(&key);
         let cached = object.is_some();
         files.push(CompiledFile {
             file: name.clone(),
@@ -207,7 +275,7 @@ pub fn compile(
             misses.push((
                 i,
                 key,
-                RunJob::new(commands, vec![profile.object_name(name)]),
+                RunJob::new(commands, vec![profile.object_name(name)]).with_cost(sizes[i]),
             ));
         }
     }
@@ -305,8 +373,27 @@ mod tests {
         }
     }
 
-    #[test]
-    fn unreadable_object_fails_only_its_file() {
+    /// Records the jobs of every request; answers like [`ClaimsSuccess`].
+    #[derive(Default, Clone)]
+    struct Records(std::sync::Arc<std::sync::Mutex<Vec<Vec<RunJob>>>>);
+
+    impl Runner for Records {
+        fn name(&self) -> &str {
+            "records"
+        }
+
+        fn run(
+            &self,
+            request: &RunRequest,
+            cancel: Option<CancelToken>,
+        ) -> Result<Vec<JobOutcome>, RunnerError> {
+            self.0.lock().unwrap().push(request.jobs.clone());
+            ClaimsSuccess.run(request, cancel)
+        }
+    }
+
+    /// A Turbo C workspace with a fake TCC.EXE and a build directory: (root, workspace, build directory).
+    fn turbo_c_workspace() -> (tempfile::TempDir, Workspace, PathBuf) {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(root.path().join("tools")).unwrap();
         std::fs::write(root.path().join("tools/TCC.EXE"), b"fake").unwrap();
@@ -319,6 +406,79 @@ mod tests {
         let ws = Workspace::open(root.path()).unwrap();
         let build = root.path().join("build");
         std::fs::create_dir_all(&build).unwrap();
+        (root, ws, build)
+    }
+
+    #[test]
+    fn cache_keys_computed_once() {
+        let (root, ws, build) = turbo_c_workspace();
+        std::fs::write(build.join("A.C"), b"int a;\r\n").unwrap();
+        std::fs::write(build.join("B.H"), b"int b;\r\n").unwrap();
+        let profile = crate::profile("turbo-c-2.0").unwrap();
+        let sources = [("A.C".to_string(), String::new())];
+        let plan = plan_compile(&ws, &profile, &sources, &build).unwrap();
+        assert_eq!(plan.misses(), 1);
+        assert_eq!(
+            plan.input_hashes().keys().collect::<Vec<_>>(),
+            ["A.C", "B.H"]
+        );
+        assert_eq!(
+            plan.input_hashes()["A.C"],
+            blake3::hash(b"int a;\r\n").to_hex().to_string()
+        );
+
+        // compile_planned runs the plan's misses with the plan's keys: one request, one job
+        let records = Records::default();
+        let runners: Vec<Box<dyn Runner>> = vec![Box::new(records.clone())];
+        let (files, _) = compile_planned(&ws, &profile, plan, &build, &runners, None).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(records.0.lock().unwrap().len(), 1);
+
+        // the fingerprint files are hashed once per process: other bytes with the same size and modification time
+        // are not read again, a new modification time is
+        let tools = root.path().join("tools");
+        let tool = tools.join("TCC.EXE");
+        let before = tool_fingerprint(&profile, &tools).unwrap();
+        let modified = std::fs::metadata(&tool).unwrap().modified().unwrap();
+        std::fs::write(&tool, b"FAKE").unwrap();
+        let touch = |at: SystemTime| {
+            std::fs::File::options()
+                .write(true)
+                .open(&tool)
+                .unwrap()
+                .set_modified(at)
+                .unwrap();
+        };
+        touch(modified);
+        assert_eq!(tool_fingerprint(&profile, &tools).unwrap(), before);
+        touch(modified + Duration::from_secs(2));
+        assert_ne!(tool_fingerprint(&profile, &tools).unwrap(), before);
+    }
+
+    #[test]
+    fn compile_jobs_carry_source_size_as_cost() {
+        let (_root, ws, build) = turbo_c_workspace();
+        std::fs::write(build.join("A.C"), b"int a;\r\n").unwrap();
+        std::fs::write(build.join("B.C"), vec![b' '; 300]).unwrap();
+        let profile = crate::profile("turbo-c-2.0").unwrap();
+        let sources = [
+            ("A.C".to_string(), String::new()),
+            ("B.C".to_string(), String::new()),
+        ];
+        let records = Records::default();
+        let runners: Vec<Box<dyn Runner>> = vec![Box::new(records.clone())];
+        compile(&ws, &profile, &sources, &build, &runners, None).unwrap();
+        let requests = records.0.lock().unwrap();
+        assert_eq!(requests.len(), 1, "all misses in one request");
+        assert_eq!(
+            requests[0].iter().map(|j| j.cost).collect::<Vec<_>>(),
+            [8, 300]
+        );
+    }
+
+    #[test]
+    fn unreadable_object_fails_only_its_file() {
+        let (_root, ws, build) = turbo_c_workspace();
         std::fs::write(build.join("A.C"), b"int a;\r\n").unwrap();
         let profile = crate::profile("turbo-c-2.0").unwrap();
         let runners: Vec<Box<dyn Runner>> = vec![Box::new(ClaimsSuccess)];

@@ -29,7 +29,8 @@ decovery analyze                                   # re-run the analyzer plugin 
 decovery mcp                                       # the same commands as MCP tools over stdio
 ```
 
-Every command takes `--workspace <dir>` (default: the current directory) and `--json`.
+Every command takes `--workspace <dir>` (default: the current directory), `--json` and `--jobs <n>` (most compile
+jobs in flight at once over all runners; default: the number of logical cores).
 
 ## Building
 

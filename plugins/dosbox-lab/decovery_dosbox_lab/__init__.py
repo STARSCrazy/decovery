@@ -1,8 +1,17 @@
-"""decovery plugin running original DOS compilers in dosbox-lab (capability `runner` v1). See README.md."""
+"""decovery plugin running original DOS compilers in dosbox-lab (capability `runner` v1). See README.md.
+
+A request's jobs are split over up to `max_parallel` DOSBox instances that run at the same time (one per core at
+most, fewer when the free memory does not hold that many, and no more than the request's `options.jobs`). Larger jobs
+(`cost`) go first, each to the instance with the least work so far. Every instance runs its jobs in one batch file
+`NB<k>.BAT` with its own TMP directory `C:\\NBT<k>`; the results are merged in job order.
+"""
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
 
@@ -17,36 +26,112 @@ from .backend import (
     MountSpec,
 )
 
-__all__ = ["BACKEND_UNAVAILABLE", "Backend", "BatchResult", "MountSpec", "build_plugin"]
+__all__ = [
+    "BACKEND_UNAVAILABLE",
+    "MEMORY_PER_INSTANCE_MB",
+    "Backend",
+    "BatchResult",
+    "MountSpec",
+    "build_plugin",
+    "build_script",
+    "max_instances",
+    "parse_output",
+    "split_jobs",
+]
 
 __version__ = "0.1.0"
 
 RUNNER_VERSION = 1
 INVALID_PARAMS = -32602
-BATCH_NAME = "NB.BAT"
+# Memory of one headless DOSBox-X process with the default 16 MB guest (`cycles=max` keeps one core busy).
+MEMORY_PER_INSTANCE_MB = 256
+# A program that only ends with exit code 0 (MOV AX,4C00h; INT 21h): run before each job, it resets the errorlevel
+# the previous job left behind.
+ZERO_PROGRAM = bytes.fromhex("B8004CCD21")
+ZERO_NAME = "ZERO.COM"
 
 # Commands the shell runs itself: no CALL and no errorlevel check (they leave the errorlevel of the last program).
 INTERNAL = frozenset(
-    "SET ECHO REM CD CHDIR PATH PAUSE VER VOL DIR MD MKDIR RD RMDIR DEL ERASE COPY REN RENAME TYPE CLS DATE TIME".split()
+    "SET ECHO REM CD CHDIR PATH PAUSE VER VOL DIR MD MKDIR RD RMDIR DEL ERASE COPY REN RENAME TYPE CLS DATE TIME "
+    "IF FOR".split()
 )
-_WORD = re.compile(r"[A-Za-z]+")
+# An internal command is a whole word: followed by the end, white space or a delimiter; `.` belongs to a program
+# name (TYPE.EXE), digits to a longer name (MD5SUM).
+_WORD = re.compile(r"([A-Za-z]+)(?=$|[\s/\\;,=+<>|])")
 _DRIVE = re.compile(r"[A-Za-z]:\s*$")
+_FLOW = re.compile(r"(GOTO(?=$|[\s:])|:)", re.IGNORECASE)  # would jump in or out of the generated batch file
 _MARKER = re.compile(r"DECOVERY-(JOB-(\d+)-END|JOB-(\d+)|EXIT-(\d+)-FAILED)")
 
 
 def _is_internal(line: str) -> bool:
     text = line.lstrip("@ \t")
     word = _WORD.match(text)
-    return bool(_DRIVE.match(text)) or (word is not None and word.group().upper() in INTERNAL)
+    return bool(_DRIVE.match(text)) or (word is not None and word.group(1).upper() in INTERNAL)
 
 
-def build_script(jobs: list[list[str]], current_drive: str) -> str:
-    """The batch file for all jobs. Per job: a begin marker, its lines, then `DECOVERY-JOB-<i>-END`. After a
-    program line, `IF ERRORLEVEL 1 GOTO F<i>` jumps to a shared ladder that echoes `DECOVERY-EXIT-<code>-FAILED`
-    with the exact errorlevel and continues with the next job (`SET DJ=<i>` remembers which one)."""
+def free_memory_mb() -> int | None:
+    """Available physical memory in MB, or None when the platform does not tell."""
+    if os.name == "nt":
+        import ctypes
+
+        class MemoryStatus(ctypes.Structure):
+            _fields_ = [
+                ("length", ctypes.c_ulong),
+                ("memory_load", ctypes.c_ulong),
+                ("total_phys", ctypes.c_ulonglong),
+                ("avail_phys", ctypes.c_ulonglong),
+                ("total_page_file", ctypes.c_ulonglong),
+                ("avail_page_file", ctypes.c_ulonglong),
+                ("total_virtual", ctypes.c_ulonglong),
+                ("avail_virtual", ctypes.c_ulonglong),
+                ("avail_extended_virtual", ctypes.c_ulonglong),
+            ]
+
+        status = MemoryStatus()
+        status.length = ctypes.sizeof(MemoryStatus)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return None
+        return int(status.avail_phys // (1024 * 1024))
+    try:
+        return int(os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") // (1024 * 1024))
+    except (ValueError, OSError, AttributeError):
+        return None
+
+
+def max_instances() -> int:
+    """DOSBox instances that may run at once: one per logical core, as many as the free memory holds."""
+    count = os.cpu_count() or 1
+    free = free_memory_mb()
+    if free is not None:
+        count = min(count, free // MEMORY_PER_INSTANCE_MB)
+    return max(1, count)
+
+
+def split_jobs(costs: list[int], instances: int) -> list[list[int]]:
+    """Job indices per instance: larger cost first, each job to the instance with the least cost so far (then the
+    fewest jobs). Every instance gets at least one job when there are enough."""
+    loads = [(0, 0, k) for k in range(max(1, min(instances, len(costs))))]
+    split: list[list[int]] = [[] for _ in loads]
+    for i in sorted(range(len(costs)), key=lambda i: -costs[i]):
+        load, count, k = min(loads)
+        split[k].append(i)
+        loads[k] = (load + costs[i], count + 1, k)
+    return split
+
+
+def build_script(
+    jobs: list[list[str]], current_drive: str, numbers: list[int] | None = None, tmp_dir: str | None = None
+) -> str:
+    """The batch file for `jobs` (numbered `numbers`, default 0, 1, ...). Per job: a begin marker, with `tmp_dir`
+    `SET TMP=<current>:\\<tmp_dir>` and the errorlevel reset (`<tmp_dir>\\ZERO.COM`), its lines, then
+    `DECOVERY-JOB-<i>-END`. After a program line, `IF ERRORLEVEL 1 GOTO F<i>` jumps to a shared ladder that echoes
+    `DECOVERY-EXIT-<code>-FAILED` with the exact errorlevel and continues with the next job (`SET DJ=<i>` remembers
+    which one)."""
     out = ["@ECHO OFF"]
-    for i, commands in enumerate(jobs):
+    for i, commands in zip(numbers if numbers is not None else range(len(jobs)), jobs):
         out += [f"@ECHO DECOVERY-JOB-{i}", f"{current_drive}:", "CD \\"]
+        if tmp_dir is not None:
+            out += [f"SET TMP={current_drive}:\\{tmp_dir}", f"{current_drive}:\\{tmp_dir}\\{ZERO_NAME}"]
         for line in commands:
             if _is_internal(line):
                 out.append(line)
@@ -94,7 +179,7 @@ def parse_output(stdout: str, count: int) -> list[dict[str, Any]]:
     return jobs
 
 
-def _parse(params: Any) -> tuple[list[MountSpec], str, float, list[list[str]]]:
+def _parse(params: Any) -> tuple[list[MountSpec], str, float, list[list[str]], list[int], int | None]:
     try:
         mounts: dict[str, MountSpec] = {}
         for mount in params["mounts"]:
@@ -114,69 +199,145 @@ def _parse(params: Any) -> tuple[list[MountSpec], str, float, list[list[str]]]:
         if isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float)) or timeout_s <= 0:
             raise TypeError("'timeout_s'")
         jobs = []
+        costs = []
         for job in params["jobs"]:
             commands = job["commands"]
             if not isinstance(commands, list) or not all(isinstance(c, str) for c in commands):
                 raise TypeError("'jobs[].commands'")
+            cost = job.get("cost", 0)
+            if isinstance(cost, bool) or not isinstance(cost, int) or cost < 0:
+                raise TypeError("'jobs[].cost'")
+            costs.append(cost)
             for command in commands:
                 if "\r" in command or "\n" in command:
                     raise TypeError("'jobs[].commands' (line break in a command)")
+                if _FLOW.match(command.lstrip("@ \t")):
+                    raise TypeError(f"'jobs[].commands' (GOTO and labels are not supported: {command!r})")
                 try:
                     command.encode("cp437")
                 except UnicodeEncodeError:
                     raise TypeError(f"'jobs[].commands' (character outside code page 437: {command!r})") from None
             jobs.append(commands)
+        share = (params.get("options") or {}).get("jobs")
+        if share is not None and (isinstance(share, bool) or not isinstance(share, int) or share < 1):
+            raise TypeError("'options.jobs'")
     except (KeyError, TypeError, AttributeError) as exc:
         raise RpcError(INVALID_PARAMS, f"invalid runner/run params: missing or malformed {exc}") from exc
     current_mount = mounts.pop(current.upper())
-    return [current_mount, *mounts.values()], current.upper(), float(timeout_s), jobs
+    return [current_mount, *mounts.values()], current.upper(), float(timeout_s), jobs, costs, share
 
 
-def _outcomes(jobs: list[dict[str, Any]], batch: BatchResult, timeout_s: float, total_s: float) -> list[dict]:
-    results = []
-    stopped_in: int | None = None
-    for i, job in enumerate(jobs):
-        if job["exit_code"] is not None:
-            outcome = {"status": "done", "exit_code": job["exit_code"], "message": None}
-        elif batch.status == "timeout" and job["started"]:
-            stopped_in = i
-            outcome = {
-                "status": "timeout",
-                "exit_code": None,
-                "message": f"no end after {timeout_s:g} s per job (batch limit {total_s:g} s)",
-            }
-        elif job["started"]:
-            stopped_in = i
-            detail = batch.message or f"batch {batch.status}"
-            outcome = {"status": "failed", "exit_code": None, "message": f"job did not end: {detail}"}
-        else:
-            reason = f"batch stopped in job {stopped_in}" if stopped_in is not None else f"batch {batch.status}"
-            outcome = {"status": "failed", "exit_code": None, "message": f"job not run: {reason}"}
-        outcome["stdout"] = job["stdout"]
-        results.append(outcome)
-    return results
+def _outcome(job: dict[str, Any], batch: BatchResult, timeout_s: float, count: int, total_s: float) -> dict | None:
+    """The outcome of one job of a batch of `count` jobs; a job the batch did not reach is `None`."""
+    if job["exit_code"] is not None:
+        outcome = {"status": "done", "exit_code": job["exit_code"], "message": None}
+    elif not job["started"]:
+        return None
+    elif batch.status == "timeout":
+        outcome = {
+            "status": "timeout",
+            "exit_code": None,
+            "message": f"no end after {timeout_s:g} s per job: the batch of {count} jobs did not end within "
+            f"{total_s:g} s while this job ran",
+        }
+    else:
+        detail = batch.message or f"batch {batch.status}"
+        outcome = {"status": "failed", "exit_code": None, "message": f"job did not end: {detail}"}
+    outcome["stdout"] = job["stdout"]
+    return outcome
+
+
+class _Instance:
+    """One DOSBox instance's share of a request: its batch file, its TMP directory and its jobs."""
+
+    def __init__(self, number: int, mounts: list[MountSpec], current: str, timeout_s: float):
+        self.mounts = mounts
+        self.current = current
+        self.timeout_s = timeout_s
+        self.script_name = f"NB{number}.BAT"
+        self.tmp_name = f"NBT{number}"
+        self.script = mounts[0].path / self.script_name
+        self.tmp = mounts[0].path / self.tmp_name
+
+    def claim(self) -> None:
+        """Creates the TMP directory with the errorlevel reset program; refuses to touch existing files."""
+        for path in (self.script, self.tmp):
+            if path.exists():
+                raise RpcError(INVALID_PARAMS, f"invalid runner/run params: {path} already exists")
+        self.tmp.mkdir()
+        (self.tmp / ZERO_NAME).write_bytes(ZERO_PROGRAM)
+
+    def release(self) -> None:
+        self.script.unlink(missing_ok=True)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def run(self, backend_factory: Callable[[], Backend], jobs: list[tuple[int, list[str]]], ctx: Context) -> dict:
+        """Outcomes by job number. When a batch stops in a job (timeout, crash), the jobs it did not reach run again
+        in a new session; a batch that reaches none of its jobs ends the instance."""
+        outcomes: dict[int, dict] = {}
+        pending = jobs
+        reason = ""
+        while pending:
+            numbers = [n for n, _ in pending]
+            total_s = self.timeout_s * len(pending)
+            text = build_script([c for _, c in pending], self.current, numbers, self.tmp_name)
+            self.script.write_bytes(text.encode("cp437"))
+            try:
+                batch = backend_factory().run_batch(self.mounts, self.script_name, total_s)
+            except BackendError as exc:
+                raise RpcError(exc.code, exc.message) from exc
+            finally:
+                self.script.unlink(missing_ok=True)
+            parsed = parse_output(batch.stdout, max(numbers) + 1)
+            later = []
+            for n, commands in pending:
+                outcome = _outcome(parsed[n], batch, self.timeout_s, len(pending), total_s)
+                if outcome is None:
+                    later.append((n, commands))
+                else:
+                    outcomes[n] = outcome
+            if len(later) == len(pending):
+                reason = f"batch {batch.status}" + (f": {batch.message}" if batch.message else "")
+                break
+            pending = later
+            if pending and ctx.cancelled:
+                reason = "cancelled"
+                break
+        for n, _ in pending:
+            message = f"job not run: {reason}"
+            outcomes.setdefault(n, {"status": "failed", "exit_code": None, "stdout": "", "message": message})
+        return outcomes
 
 
 def build_plugin(backend_factory: Callable[[], Backend] = DosboxLabBackend) -> Plugin:
-    """The dosbox-lab plugin. `backend_factory` is called once per request."""
+    """The dosbox-lab plugin. `backend_factory` is called once per batch (one DOSBox session)."""
     plugin = Plugin("dosbox-lab", __version__)
+    instances = max_instances()
+    plugin.set_limits("runner", max_parallel=instances, memory_per_instance_mb=MEMORY_PER_INSTANCE_MB)
 
     @plugin.method("runner/run", capability_version=RUNNER_VERSION)
     def run(params: dict, ctx: Context) -> dict:
-        mounts, current, timeout_s, commands = _parse(params)
+        mounts, current, timeout_s, commands, costs, share = _parse(params)
         if not commands:
             return {"jobs": []}
-        script = mounts[0].path / BATCH_NAME
-        if script.exists():
-            raise RpcError(INVALID_PARAMS, f"invalid runner/run params: {script} already exists")
-        total_s = timeout_s * len(commands)
-        script.write_bytes(build_script(commands, current).encode("cp437"))
+        split = split_jobs(costs, min(instances, share or instances))
+        workers = [_Instance(k, mounts, current, timeout_s) for k in range(len(split))]
+        claimed: list[_Instance] = []
         try:
-            batch = backend_factory().run_batch(mounts, BATCH_NAME, total_s)
-        except BackendError as exc:
-            raise RpcError(exc.code, exc.message) from exc
+            for worker in workers:
+                worker.claim()
+                claimed.append(worker)
+            with ThreadPoolExecutor(len(workers)) as threads:  # each thread waits for its DOSBox process
+                futures = [
+                    threads.submit(worker.run, backend_factory, [(i, commands[i]) for i in part], ctx)
+                    for worker, part in zip(workers, split)
+                ]
+                merged: dict[int, dict] = {}
+                for future in futures:
+                    merged.update(future.result())
         finally:
-            script.unlink(missing_ok=True)
-        return {"jobs": _outcomes(parse_output(batch.stdout, len(commands)), batch, timeout_s, total_s)}
+            for worker in claimed:
+                worker.release()
+        return {"jobs": [merged[i] for i in range(len(commands))]}
 
     return plugin

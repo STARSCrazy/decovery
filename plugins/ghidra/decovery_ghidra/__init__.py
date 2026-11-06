@@ -19,6 +19,8 @@ __version__ = "0.2.0"
 
 ANALYZER_VERSION = 2
 DECOMPILER_VERSION = 2
+# One program and one decompiler per plugin process; a JVM with Ghidra and a small program needs about this much.
+JVM_MEMORY_MB = 2048
 
 INVALID_PARAMS = -32602
 NOT_OPENED = -32011
@@ -36,6 +38,8 @@ def _io_error(exc: OSError) -> RpcError:
 def build_plugin(backend_factory: Callable[[], Backend] = GhidraBackend) -> Plugin:
     """The Ghidra plugin; `backend_factory` is called once per `analyzer/open` (tests inject a fake)."""
     plugin = Plugin("ghidra", __version__)
+    for capability in ("analyzer", "decompiler"):
+        plugin.set_limits(capability, max_parallel=1, memory_per_instance_mb=JVM_MEMORY_MB)
     session: dict[str, Any] = {"backend": None, "arch": None, "calling_convention": None}
     # The SDK runs requests on worker threads; one Ghidra program is used by one request at a time.
     lock = threading.RLock()

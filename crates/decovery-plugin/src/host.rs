@@ -159,6 +159,7 @@ impl PluginHost {
                 version: String::new(),
                 protocol: String::new(),
                 capabilities: Default::default(),
+                limits: Default::default(),
             },
         };
         match host.handshake() {

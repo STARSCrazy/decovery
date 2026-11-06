@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.join(HERE, "..", "..", "..", "..", "plugins", "decove
 from decovery_plugin import Plugin  # noqa: E402
 
 plugin = Plugin("echo", "0.0.1")
+plugin.set_limits("echo", max_parallel=3, memory_per_instance_mb=64)
 
 
 @plugin.method("echo/ping", capability_version=1)

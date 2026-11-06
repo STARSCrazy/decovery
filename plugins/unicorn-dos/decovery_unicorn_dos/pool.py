@@ -1,8 +1,13 @@
-"""Runs jobs: in a pool of worker processes (spawned, default 8, `DECOVERY_UNICORN_PARALLEL`), each keeping one
-reused machine per program, or in-process with machines from a factory (tests).
+"""Runs jobs: in a pool of worker processes (spawned, one per logical core unless `DECOVERY_UNICORN_PARALLEL` says
+otherwise), each keeping one reused machine per program, or in-process with machines from a factory (tests).
+
+The pool is created on first use and kept for the life of the plugin process; a request runs at most its share of
+jobs at once (`options.jobs` of `runner/run`), larger jobs (`cost`) first, so the largest one does not finish last.
+Worker processes start on demand, so a request with a small share starts only that many. A worker's standard output
+goes to the standard error: a printing worker cannot corrupt the protocol stream.
 
 A job is a dict: `drives` {letter: path}, `read_only` [letters], `current` drive, `timeout_s`, `steps` (from
-`batch.plan`). Its outcome has the `runner/run` shape: `status`, `exit_code`, `stdout`, `message`.
+`batch.plan`), optionally `cost`. Its outcome has the `runner/run` shape: `status`, `exit_code`, `stdout`, `message`.
 
 A worker process that dies (a crash inside unicorn) breaks the whole pool and with it every job still pending. Those
 jobs run once more, each in a fresh process of its own, so only a job that breaks again is reported as failed.
@@ -14,9 +19,10 @@ from __future__ import annotations
 
 import multiprocessing
 import os
+import sys
 import threading
 import time
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, ThreadPoolExecutor, wait
 from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 from typing import Any, Callable
@@ -24,15 +30,24 @@ from typing import Any, Callable
 from .dosfs import DosFs
 from .errors import EmulatorError, EmulatorTimeout
 
-PARALLEL = 8
 MAX_MACHINES = 4
+# Memory of one worker: about 47 MB peak working set measured with the Watcom 9.5 compiler loaded (unicorn maps the
+# guest memory lazily), plus room for a second machine.
+MEMORY_PER_WORKER_MB = 64
 
 
 def parallel() -> int:
+    """Worker processes of the pool: the number of logical cores, or `DECOVERY_UNICORN_PARALLEL`."""
+    cores = os.cpu_count() or 1
     try:
-        return max(1, int(os.environ.get("DECOVERY_UNICORN_PARALLEL") or PARALLEL))
+        return max(1, int(os.environ.get("DECOVERY_UNICORN_PARALLEL") or cores))
     except ValueError:
-        return PARALLEL
+        return cores
+
+
+def _cost(job: dict) -> int:
+    cost = job.get("cost", 0)
+    return cost if isinstance(cost, int) and not isinstance(cost, bool) else 0
 
 
 def _outcome(status: str, exit_code: int | None, stdout: list[str], message: str | None) -> dict:
@@ -145,12 +160,21 @@ def run_job(job: dict) -> dict:
     return execute_job(job, _CACHE.get)
 
 
+def quiet_stdout() -> None:
+    """Worker initializer: the standard output (Python's and fd 1, which native code writes to) becomes the
+    standard error."""
+    sys.stdout.flush()
+    os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
+    sys.stdout = sys.stderr
+
+
 def _spawn(workers: int) -> ProcessPoolExecutor:
-    return ProcessPoolExecutor(workers, mp_context=multiprocessing.get_context("spawn"))
+    return ProcessPoolExecutor(workers, mp_context=multiprocessing.get_context("spawn"), initializer=quiet_stdout)
 
 
 class JobPool:
-    """Spawn-based process pool, started on first use and kept for later calls."""
+    """Spawn-based process pool, started on first use and kept for later calls; `workers` defaults to
+    `parallel()`."""
 
     def __init__(self, workers: int | None = None, worker: Callable[[dict], dict] = run_job):
         self.workers = workers or parallel()
@@ -170,24 +194,40 @@ class JobPool:
                 self._pool = None
         pool.shutdown(wait=False, cancel_futures=True)
 
-    def run(self, jobs: list[dict]) -> list[dict]:
+    def run(self, jobs: list[dict], parallel: int | None = None) -> list[dict]:
+        """Outcomes in job order. At most `parallel` jobs (default: all workers) run at once, larger `cost` first."""
+        limit = max(1, min(parallel or self.workers, self.workers))
+        order = sorted(range(len(jobs)), key=lambda i: -_cost(jobs[i]))  # stable: equal costs keep job order
+        outcomes: list[dict | None] = [None] * len(jobs)
         pool = self._get()
-        futures = [pool.submit(self.worker, job) for job in jobs]
-        outcomes: list[dict | None] = []
-        for future in futures:
-            try:
-                outcomes.append(future.result())
-            except BrokenProcessPool:
-                outcomes.append(None)  # this job or another one killed the pool
-            except Exception as e:  # a bug in the worker must not lose the other jobs
-                outcomes.append(_worker_failed(e))
-        unfinished = [i for i, outcome in enumerate(outcomes) if outcome is None]
+        in_flight: dict[Future, int] = {}
+        position = 0
+        broken = False
+        while True:
+            while not broken and position < len(order) and len(in_flight) < limit:
+                try:
+                    in_flight[pool.submit(self.worker, jobs[order[position]])] = order[position]
+                    position += 1
+                except BrokenProcessPool:
+                    broken = True  # the rest runs alone below
+            if not in_flight:
+                break
+            done, _ = wait(in_flight, return_when=FIRST_COMPLETED)
+            for future in done:
+                i = in_flight.pop(future)
+                try:
+                    outcomes[i] = future.result()
+                except BrokenProcessPool:
+                    broken = True  # this job or another one killed the pool
+                except Exception as e:  # a bug in the worker must not lose the other jobs
+                    outcomes[i] = _worker_failed(e)
+        unfinished = [i for i in order if outcomes[i] is None]
         if unfinished:
             self._discard(pool)
-            with ThreadPoolExecutor(min(self.workers, len(unfinished))) as threads:
+            with ThreadPoolExecutor(min(limit, len(unfinished))) as threads:
                 for i, outcome in zip(unfinished, threads.map(self._alone, [jobs[i] for i in unfinished])):
                     outcomes[i] = outcome
-        return outcomes
+        return outcomes  # type: ignore[return-value]
 
     def _alone(self, job: dict) -> dict:
         """Run one job again in a fresh process of its own: if it dies once more, nothing else is lost."""

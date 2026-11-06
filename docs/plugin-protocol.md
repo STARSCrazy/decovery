@@ -24,8 +24,19 @@ Design background: `docs/design/0001-decovery-design.md`, sections 5.1 and 5.11 
   "capabilities":{"analyzer":{"version":2},"decompiler":{"version":2}}}}
 ```
 
-`capabilities` maps a capability name to `{"version": <u32>}`. A capability version changes when its method
-set or message shapes change incompatibly. The host refuses a plugin whose `protocol` differs from its own.
+`capabilities` maps a capability name to `{"version": <u32>, "limits"?: {"max_parallel": <u32>,
+"memory_per_instance_mb": <u32> | null}}`. A capability version changes when its method set or message shapes
+change incompatibly. The host refuses a plugin whose `protocol` differs from its own.
+
+`limits` declares how many jobs of the capability the plugin runs at once (`max_parallel`, at least 1) and how
+much memory one running instance needs (`memory_per_instance_mb`, null when negligible or unknown). A capability
+without `limits` runs one job at a time. The host keeps the jobs it has in flight within each provider's
+`max_parallel` and their sum within its global limit (`--jobs`, default: the number of logical cores), and tells
+the plugin its share per request (`options.jobs` of `runner/run`).
+
+```json
+"capabilities": {"runner": {"version": 1, "limits": {"max_parallel": 16, "memory_per_instance_mb": null}}}
+```
 
 `shutdown` (no params) answers `null`. The plugin then stops reading and exits; the host closes stdin and kills
 the process after a grace period.
@@ -160,8 +171,11 @@ the tool directory (read-only).
 
 ### `runner/run`
 
-Params: `{mounts: [{drive, path, writable}], current_drive: "C", timeout_s, jobs: [{commands: [string]}]}`.
-`path` is an absolute host directory, `timeout_s` applies to each job. Each job is a DOS session of its own: its
+Params: `{mounts: [{drive, path, writable}], current_drive: "C", timeout_s, options?: {jobs?},
+jobs: [{commands: [string], cost?}]}`. `path` is an absolute host directory, `timeout_s` applies to each job.
+`options.jobs` is the most jobs of this request the plugin may run at once (the host's share of its global limit;
+absent = the plugin's `max_parallel`). `cost` is the relative size of a job (the host sends the source size in
+bytes; absent = 0): a plugin starts larger jobs first, so the largest job does not finish last. Each job is a DOS session of its own: its
 command lines run one after another, a `SET NAME=value` line sets the environment for the following lines of the
 same job, and the job ends at the first line with a non-zero exit code. The host rejects command lines over 126
 characters before calling, so the plugin never sees them.
