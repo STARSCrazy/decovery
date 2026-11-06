@@ -13,8 +13,8 @@ repository), and writes `[plugins.dosbox-lab]`. The DOSBox executable is not par
 (dosbox-lab's `build.ps1`) or point `DOSBOX_LAB_EXE` at it. Without the package or the executable, `runner/run`
 answers error `-32010`.
 
-Needs a dosbox-lab whose `run_batch` takes `watch` and `snapshot` (dosbox-lab branch `decovery-batch`, commit
-fbd1a1c or later); with an older package `runner/run` answers `-32010` ("dosbox-lab is too old").
+Needs a dosbox-lab whose `run_batch` takes the `watch` and `snapshot` arguments; with an older package
+`runner/run` answers `-32010` ("dosbox-lab is too old").
 
 ## How a request runs
 
