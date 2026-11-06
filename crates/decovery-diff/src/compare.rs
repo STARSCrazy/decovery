@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use decovery_core::{Address, Program, RelocKind, Relocation};
 use decovery_objects::{FunctionView, ObjReloc, ObjectModule, RefTarget, functions};
 use decovery_x86::{DecodeOptions, decode_detailed, internal_calls, padding_positions};
+use rayon::prelude::*;
 
 use crate::anchors::{Anchors, Condition, FLAT, Outcome, SectionKey, frame_name};
 use crate::instructions::{self, Naming, Side};
@@ -240,10 +241,10 @@ pub fn compare_module(
     options: &ModuleOptions,
 ) -> ModuleComparison {
     let mut modules: Vec<&ObjectModule> = Vec::new();
-    let prepared: Vec<Prepared> = placements
+    let module_of: Vec<usize> = placements
         .iter()
         .map(|p| {
-            let module = match modules
+            match modules
                 .iter()
                 .position(|m| std::ptr::eq(*m, p.function.module))
             {
@@ -252,9 +253,14 @@ pub fn compare_module(
                     modules.push(p.function.module);
                     modules.len() - 1
                 }
-            };
-            prepare(p, module, program, symbols, decoration, options.padding)
+            }
         })
+        .collect();
+    // both passes are per function and independent; rayon keeps the order
+    let prepared: Vec<Prepared> = placements
+        .par_iter()
+        .zip(module_of.par_iter())
+        .map(|(p, &module)| prepare(p, module, program, symbols, decoration, options.padding))
         .collect();
     let conditions = prepared
         .iter()
@@ -269,7 +275,10 @@ pub fn compare_module(
         })
         .flatten();
     let anchors = Anchors::collect(conditions, &modules, &options.frames, program);
-    let functions = prepared.into_iter().map(|p| p.finish(&anchors)).collect();
+    let functions = prepared
+        .into_par_iter()
+        .map(|p| p.finish(&anchors))
+        .collect();
     ModuleComparison {
         functions,
         anchors: anchors.list(&modules),

@@ -34,8 +34,46 @@
             "type": "string"
           },
           "result": {
-            "type": "string",
-            "description": "identical, differs"
+            "enum": [
+              "identical",
+              "differs",
+              "error"
+            ],
+            "description": "Decomp's byte rule: identical when no byte and no reference differs"
+          },
+          "verdict": {
+            "enum": [
+              "identical",
+              "equivalent",
+              "differs",
+              "unchecked"
+            ],
+            "description": "decovery's verdict"
+          },
+          "blockers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string"
+                },
+                "at": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "count": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "message": {
+            "type": "string"
           },
           "bytes": {
             "type": "integer",
@@ -81,13 +119,18 @@
             "type": "string"
           },
           "first_difference": {
-            "type": "string"
+            "type": "integer",
+            "minimum": 0
           },
           "diagnoses": {
             "type": "array",
             "items": {
               "type": "string"
             }
+          },
+          "code_hash": {
+            "type": "string",
+            "description": "blake3 of the function's bytes in the object, 16 hex characters"
           },
           "equivalence": {
             "type": "object",

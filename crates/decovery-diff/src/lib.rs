@@ -73,8 +73,9 @@ impl NameAt {
     }
 }
 
-/// What the knowledge base says about names in the original program (undecorated C names).
-pub trait SymbolView {
+/// What the knowledge base says about names in the original program (undecorated C names). `Sync`, because
+/// [`compare_module`] compares the functions in parallel.
+pub trait SymbolView: Sync {
     /// The name at `at`; `None` is treated like a default name that matches nothing.
     fn name_at(&self, at: Address) -> Option<NameAt>;
     /// Where `name` lives in the original.
@@ -188,6 +189,42 @@ pub enum Blocker {
     },
     /// The original bytes of the function's range are not in the program.
     OriginalUnavailable,
+    /// The source of the function contains inline assembly, `_emit` or machine code in `#pragma aux`; byte
+    /// equality does not count as a rebuild.
+    InlineAssembly,
+}
+
+impl Blocker {
+    /// The serialized kind (`bytes-differ`, `wrong-absolute-ref`, ...).
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Blocker::BytesDiffer { .. } => "bytes-differ",
+            Blocker::UncheckedRef { .. } => "unchecked-ref",
+            Blocker::WrongAbsoluteRef { .. } => "wrong-absolute-ref",
+            Blocker::WrongRelativeRef { .. } => "wrong-relative-ref",
+            Blocker::InstructionsDiffer { .. } => "instructions-differ",
+            Blocker::OriginalUnavailable => "original-unavailable",
+            Blocker::InlineAssembly => "inline-assembly",
+        }
+    }
+
+    /// The offset in the function, for kinds that have one.
+    pub fn at(&self) -> Option<u32> {
+        match *self {
+            Blocker::UncheckedRef { at }
+            | Blocker::WrongAbsoluteRef { at }
+            | Blocker::WrongRelativeRef { at } => Some(at),
+            _ => None,
+        }
+    }
+
+    /// The count, for kinds that have one.
+    pub fn count(&self) -> Option<u32> {
+        match *self {
+            Blocker::BytesDiffer { count } | Blocker::InstructionsDiffer { count } => Some(count),
+            _ => None,
+        }
+    }
 }
 
 /// Decomp's numbers for a comparison.

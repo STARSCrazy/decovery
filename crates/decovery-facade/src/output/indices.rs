@@ -2,7 +2,9 @@
 
 use std::collections::BTreeMap;
 
-use decovery_core::{AccessKind, Address, ClaimSource, Confidence, RebuildResult};
+use decovery_core::{
+    AccessKind, Address, ClaimSource, Confidence, RebuildRecord, RebuildResult, VerdictId,
+};
 use serde::{Deserialize, Serialize};
 
 use super::{Context, OUTPUT_DIR, access_rank, files, header::kebab, sort_accesses};
@@ -34,10 +36,10 @@ pub struct StatusCounts {
 /// Counts naming and rebuild state of the session's functions.
 pub fn status_counts(session: &Session) -> StatusCounts {
     let mut c = StatusCounts::default();
-    let rebuild: std::collections::HashMap<Address, RebuildResult> = session
+    let rebuild: std::collections::HashMap<Address, Tally> = session
         .rebuild
         .iter()
-        .map(|r| (r.address, r.result))
+        .map(|r| (r.address, tally(r)))
         .collect();
     for f in &session.analysis.functions {
         c.functions += 1;
@@ -51,14 +53,39 @@ pub fn status_counts(session: &Session) -> StatusCounts {
         }
         match rebuild.get(&f.start) {
             None => c.rebuild_not_tried += 1,
-            Some(RebuildResult::Identical) => c.rebuild_identical += 1,
-            Some(RebuildResult::Differs) => c.rebuild_differs += 1,
-            Some(RebuildResult::Error) => c.rebuild_error += 1,
-            Some(_) => {}
+            Some(Tally::Identical) => c.rebuild_identical += 1,
+            Some(Tally::Differs) => c.rebuild_differs += 1,
+            Some(Tally::Error) => c.rebuild_error += 1,
+            Some(Tally::Unknown) => {}
         }
     }
     c.assumed = c.named - c.confirmed;
     c
+}
+
+/// Where a rebuild record is counted.
+enum Tally {
+    Identical,
+    Differs,
+    Error,
+    Unknown,
+}
+
+/// decovery's verdict when the record has one, else Decomp's result. An equivalent function counts as differing
+/// (its bytes differ); an unchecked one as an error.
+fn tally(r: &RebuildRecord) -> Tally {
+    match r.verdict {
+        Some(VerdictId::Identical) => Tally::Identical,
+        Some(VerdictId::Equivalent | VerdictId::Differs) => Tally::Differs,
+        Some(VerdictId::Unchecked) => Tally::Error,
+        Some(_) => Tally::Unknown,
+        None => match r.result {
+            RebuildResult::Identical => Tally::Identical,
+            RebuildResult::Differs => Tally::Differs,
+            RebuildResult::Error => Tally::Error,
+            _ => Tally::Unknown,
+        },
+    }
 }
 
 /// Rewrites `index.md`, `calls.json`, `strings.md`, `globals.md` and `status.json` (unchanged files stay).

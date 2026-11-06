@@ -38,6 +38,8 @@ pub enum Change {
     Symbol { at: Address },
     /// `types.h` changed.
     Types,
+    /// The rebuild records of these functions changed (added, replaced or removed).
+    Rebuild { addresses: Vec<Address> },
 }
 
 /// How many function files were written and how many stale ones removed.

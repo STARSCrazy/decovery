@@ -77,6 +77,17 @@ pub fn write_affected(
                 emit_function(&cx, start, &mut report)?;
             }
         }
+        Change::Rebuild { addresses } => {
+            // a rebuild changes no names, so no file is renamed: only the content is written
+            for &start in addresses {
+                if let Some(f) = cx.index.function_at(start) {
+                    let path = root.join(relative_path(session, start, &cx.display_name(start)));
+                    if write_if_changed(&path, &render(&cx, f)?)? {
+                        report.written += 1;
+                    }
+                }
+            }
+        }
     }
     super::indices::write_indices(&cx)?;
     Ok(report)
@@ -276,12 +287,13 @@ fn read_dir(dir: &Path) -> Result<Vec<std::fs::DirEntry>, FacadeError> {
     }
 }
 
-/// `.c` files directly in `dir`.
+/// `.c` files directly in `dir` (the entry's own file type, no extra metadata query per file).
 fn c_files_in(dir: &Path) -> Result<Vec<PathBuf>, FacadeError> {
     Ok(read_dir(dir)?
         .into_iter()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
         .map(|e| e.path())
-        .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "c"))
+        .filter(|p| p.extension().is_some_and(|x| x == "c"))
         .collect())
 }
 
