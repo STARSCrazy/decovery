@@ -689,7 +689,11 @@ fn native_job(
 fn kill_tree(child: &mut std::process::Child) {
     let pid = child.id().to_string();
     let mut killer = if cfg!(windows) {
-        let mut c = Command::new("taskkill");
+        let mut c = Command::new(
+            std::env::var_os("SystemRoot")
+                .map(|root| Path::new(&root).join("System32").join("taskkill.exe"))
+                .unwrap_or_else(|| "taskkill".into()),
+        );
         c.args(["/PID", &pid, "/T", "/F"]);
         c
     } else {

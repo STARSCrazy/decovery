@@ -241,21 +241,7 @@ pub fn compare_module(
     options: &ModuleOptions,
 ) -> ModuleComparison {
     let mut modules: Vec<&ObjectModule> = Vec::new();
-    let module_of: Vec<usize> = placements
-        .iter()
-        .map(|p| {
-            match modules
-                .iter()
-                .position(|m| std::ptr::eq(*m, p.function.module))
-            {
-                Some(i) => i,
-                None => {
-                    modules.push(p.function.module);
-                    modules.len() - 1
-                }
-            }
-        })
-        .collect();
+    let module_of = module_indices(placements, &mut modules);
     // both passes are per function and independent; rayon keeps the order
     let prepared: Vec<Prepared> = placements
         .par_iter()
@@ -274,6 +260,125 @@ pub fn compare_module(
             Outcome::Decided(_) => None,
         })
         .flatten();
+    let anchors = Anchors::collect(conditions, &modules, &options.frames, program);
+    let functions = prepared
+        .into_par_iter()
+        .map(|p| p.finish(&anchors))
+        .collect();
+    ModuleComparison {
+        functions,
+        anchors: anchors.list(&modules),
+        warnings: anchors.warnings.clone(),
+    }
+}
+
+/// The index in `modules` of the module of each placement; modules not in `modules` yet are appended.
+fn module_indices<'a>(
+    placements: &[Placement<'a>],
+    modules: &mut Vec<&'a ObjectModule>,
+) -> Vec<usize> {
+    placements
+        .iter()
+        .map(|p| {
+            match modules
+                .iter()
+                .position(|m| std::ptr::eq(*m, p.function.module))
+            {
+                Some(i) => i,
+                None => {
+                    modules.push(p.function.module);
+                    modules.len() - 1
+                }
+            }
+        })
+        .collect()
+}
+
+/// Placements prepared once for many comparisons that differ only in their own placements (a variant of one function
+/// judged together with the unchanged functions of the other objects): the first pass of [`compare_module`] over
+/// them, kept as what it contributes to the anchors. See [`compare_module_with`].
+pub struct SharedFunctions<'a> {
+    modules: Vec<&'a ObjectModule>,
+    /// Where each placement is and what its fields ask of the anchors.
+    entries: Vec<(Address, Vec<Condition>)>,
+}
+
+impl<'a> SharedFunctions<'a> {
+    /// Runs the first pass over `placements`; `options` and the other arguments must be those of the comparisons
+    /// they are used in.
+    pub fn new(
+        placements: &[Placement<'a>],
+        program: &Program,
+        symbols: &dyn SymbolView,
+        decoration: &Decoration,
+        options: &ModuleOptions,
+    ) -> Self {
+        let mut modules: Vec<&ObjectModule> = Vec::new();
+        let module_of = module_indices(placements, &mut modules);
+        let entries = placements
+            .par_iter()
+            .zip(module_of.par_iter())
+            .map(|(p, &module)| {
+                let conditions =
+                    match prepare(p, module, program, symbols, decoration, options.padding) {
+                        Prepared::Pending { fields, .. } => fields
+                            .into_iter()
+                            .filter_map(|f| match f.outcome {
+                                Outcome::Anchored(c) => Some(c),
+                                Outcome::Decided(_) => None,
+                            })
+                            .flatten()
+                            .collect(),
+                        Prepared::Done(_) => Vec::new(),
+                    };
+                (p.at, conditions)
+            })
+            .collect();
+        SharedFunctions { modules, entries }
+    }
+}
+
+/// [`compare_module`] over `own` together with `shared`: the anchors are agreed on by the fields of both, the result
+/// holds the comparisons of `own` only (`ModuleComparison::functions` parallels `own`). A shared function at the
+/// address of an own placement is left out, as [`compare_module`] would have placed only the first of two functions
+/// at one address. The verdicts, blockers and metrics of the `own` functions are those of [`compare_module`] over
+/// `own` followed by the shared placements; the shared functions are not prepared again.
+pub fn compare_module_with(
+    own: &[Placement<'_>],
+    shared: &SharedFunctions<'_>,
+    program: &Program,
+    symbols: &dyn SymbolView,
+    decoration: &Decoration,
+    options: &ModuleOptions,
+) -> ModuleComparison {
+    // the shared modules come first, so their conditions can be used as they are
+    let mut modules: Vec<&ObjectModule> = shared.modules.clone();
+    let module_of = module_indices(own, &mut modules);
+    let prepared: Vec<Prepared> = own
+        .par_iter()
+        .zip(module_of.par_iter())
+        .map(|(p, &module)| prepare(p, module, program, symbols, decoration, options.padding))
+        .collect();
+    let own_at: BTreeSet<Address> = own.iter().map(|p| p.at).collect();
+    let conditions = prepared
+        .iter()
+        .filter_map(|p| match p {
+            Prepared::Pending { fields, .. } => Some(fields),
+            Prepared::Done(_) => None,
+        })
+        .flatten()
+        .filter_map(|field| match &field.outcome {
+            Outcome::Anchored(c) => Some(c),
+            Outcome::Decided(_) => None,
+        })
+        .flatten()
+        .chain(
+            shared
+                .entries
+                .iter()
+                .filter(|(at, _)| !own_at.contains(at))
+                .flat_map(|(_, conditions)| conditions.iter()),
+        );
     let anchors = Anchors::collect(conditions, &modules, &options.frames, program);
     let functions = prepared
         .into_par_iter()

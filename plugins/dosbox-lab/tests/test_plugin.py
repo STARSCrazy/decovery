@@ -353,6 +353,26 @@ class InstanceTest(unittest.TestCase):
         self.assertEqual(calls[0]["tmp_files"], ["ZERO.COM"])
         self.assertEqual(sorted(p.name for p in ws.c.iterdir()), [])  # scripts and TMP directories removed
 
+    def test_no_instance_runs_more_rounds_than_the_host_counts(self):
+        from decovery_dosbox_lab import HOST_SLACK_S
+
+        # one huge job and many small ones: by cost alone one instance would get six of the seven jobs
+        costs = [1000, 1, 1, 1, 1, 1, 1]
+        for instances in (1, 2, 3, 7, 12):
+            split = split_jobs(costs, instances)
+            cap = -(-len(costs) // min(instances, len(costs)))
+            self.assertEqual(sorted(i for part in split for i in part), list(range(7)))
+            self.assertLessEqual(max(len(part) for part in split), cap, (instances, split))
+        ws = Workspace(self)
+        backend = ScriptBackend(delay=0)
+        timeout_s = 5
+        params = ws.params(*[["X"] for _ in costs], share=2, costs=costs, timeout_s=timeout_s)
+        run_open(build_plugin(lambda: backend), request(1, "runner/run", params))
+        host_limit = timeout_s * -(-len(costs) // 2) + HOST_SLACK_S
+        self.assertTrue(backend.calls)
+        for call in backend.calls:
+            self.assertLessEqual(call["timeout_s"], host_limit)
+
     def test_share_and_job_count_cap_instances(self):
         ws = Workspace(self)
         backend = ScriptBackend(delay=0.05)

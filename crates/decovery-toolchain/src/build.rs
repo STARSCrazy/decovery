@@ -41,10 +41,21 @@ impl SourceJob {
         }
     }
 
-    /// Stages and runs the compile in `dir` (a name of at most 8 characters under the build directory).
-    pub fn in_dir(mut self, dir: impl Into<String>) -> Self {
-        self.dir = Some(dir.into());
-        self
+    /// Stages and runs the compile in `dir`, a directory of the build directory. A DOS directory name: 1 to 8
+    /// characters of `A-Z a-z 0-9 _ -`.
+    pub fn in_dir(mut self, dir: impl Into<String>) -> Result<Self, ToolchainError> {
+        let dir = dir.into();
+        let valid = (1..=8).contains(&dir.len())
+            && dir
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        if !valid {
+            return Err(ToolchainError::Invalid(format!(
+                "directory {dir:?}: not a DOS directory name (1 to 8 characters of A-Z a-z 0-9 _ -)"
+            )));
+        }
+        self.dir = Some(dir);
+        Ok(self)
     }
 
     /// The path of the staged source relative to the build directory.
@@ -518,8 +529,8 @@ mod tests {
         }
         let profile = crate::profile("turbo-c-2.0").unwrap();
         let sources = [
-            SourceJob::new("A.C", "-ms").in_dir("V001"),
-            SourceJob::new("A.C", "-ms").in_dir("V002"),
+            SourceJob::new("A.C", "-ms").in_dir("V001").unwrap(),
+            SourceJob::new("A.C", "-ms").in_dir("V002").unwrap(),
         ];
         let records = Records::default();
         let runners: Vec<Box<dyn Runner>> = vec![Box::new(records.clone())];
@@ -533,6 +544,19 @@ mod tests {
         let last = jobs[0].commands.len() - 1;
         assert_eq!(jobs[0].commands[last - 1], "CD V001");
         assert_eq!(jobs[0].commands[last], profile.compile_line("-ms", "A.C"));
+    }
+
+    #[test]
+    fn directory_of_a_job_must_be_a_dos_name() {
+        for bad in ["", "TOOLONGNAME", "a b", "..", "a/b", r"a\b", "ä"] {
+            assert!(
+                SourceJob::new("A.C", "").in_dir(bad).is_err(),
+                "{bad:?} must be refused"
+            );
+        }
+        for good in ["V001", "v_1-2", "12345678"] {
+            assert!(SourceJob::new("A.C", "").in_dir(good).is_ok(), "{good:?}");
+        }
     }
 
     #[test]

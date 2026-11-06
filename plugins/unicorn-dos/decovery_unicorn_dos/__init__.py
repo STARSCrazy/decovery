@@ -108,7 +108,10 @@ def build_plugin(machine_factory: Callable[[Any], Any] | None = None) -> Plugin:
             )
 
         if pool is not None:
-            outcomes = pool.run(jobs, parallel=share, on_done=report)
+            # the host's call limit is timeout_s x ceil(jobs / share) + slack: runs again stay within the first part
+            at_once = max(1, min(share or pool.workers, pool.workers))
+            budget = timeout_s * -(-len(jobs) // at_once)
+            outcomes = pool.run(jobs, parallel=share, on_done=report, budget_s=budget)
         else:
             with lock:
                 outcomes = []

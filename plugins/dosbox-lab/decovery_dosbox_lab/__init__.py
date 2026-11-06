@@ -56,8 +56,11 @@ MEMORY_PER_INSTANCE_MB = 256
 ZERO_PROGRAM = bytes.fromhex("B8004CCD21")
 ZERO_NAME = "ZERO.COM"
 # Added to a session's backstop limit (`timeout_s` x its jobs) for DOSBox to start; the per-job limit is enforced by
-# watching the output. The host's call budget is `timeout_s` x jobs + 30 s.
+# watching the output. The host's call limit is `timeout_s` x ceil(jobs / share) + HOST_SLACK_S (docs/plugin-protocol.md,
+# "Time contract"); `split_jobs` keeps every instance at ceil(jobs / instances) jobs, so a session's backstop is
+# never above it.
 SESSION_SLACK_S = 10
+HOST_SLACK_S = 30
 SAVED = "DECOVERY_SAVED"  # prefix of the variables that keep a job's environment to restore after it
 
 # Commands the shell runs itself: no CALL and no errorlevel check (they leave the errorlevel of the last program). A
@@ -146,11 +149,14 @@ def max_instances() -> int:
 
 def split_jobs(costs: list[int], instances: int) -> list[list[int]]:
     """Job indices per instance: larger cost first, each job to the instance with the least cost so far (then the
-    fewest jobs). Every instance gets at least one job when there are enough."""
-    loads = [(0, 0, k) for k in range(max(1, min(instances, len(costs))))]
+    fewest jobs) among those that hold fewer than ceil(jobs / instances) jobs, so no instance runs more rounds than
+    the host's call limit counts. Every instance gets at least one job when there are enough."""
+    n = max(1, min(instances, len(costs)))
+    cap = -(-len(costs) // n)
+    loads = [(0, 0, k) for k in range(n)]
     split: list[list[int]] = [[] for _ in loads]
     for i in sorted(range(len(costs)), key=lambda i: -costs[i]):
-        load, count, k = min(loads)
+        load, count, k = min(entry for entry in loads if entry[1] < cap)
         split[k].append(i)
         loads[k] = (load + costs[i], count + 1, k)
     return split
@@ -352,8 +358,9 @@ class _Instance:
         ctx: Context,
     ) -> dict:
         """Outcomes by job number, from one DOSBox session. Each job may run `timeout_s` from its begin marker; the
-        session as a whole is bounded by `timeout_s` x its jobs + `SESSION_SLACK_S` (DOSBox start-up), which stays
-        within the host's call budget for any number of instances."""
+        session as a whole is bounded by `timeout_s` x its jobs + `SESSION_SLACK_S` (DOSBox start-up); `split_jobs`
+        gives an instance at most ceil(jobs / instances) jobs, which keeps that within the host's call limit
+        (`timeout_s` x ceil(jobs / share) + `HOST_SLACK_S`) when `SESSION_SLACK_S` <= `HOST_SLACK_S`."""
         numbers = [n for n, _ in jobs]
         text = build_script([c for _, c in jobs], self.current, numbers, self.tmp_name)
         self.script.write_bytes(text.encode("cp437"))

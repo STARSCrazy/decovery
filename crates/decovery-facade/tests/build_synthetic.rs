@@ -934,3 +934,64 @@ fn variant_build_forwards_what_the_runner_reports_per_job() {
     let jobs = seen.iter().filter(|m| m.contains(" of 3 done")).count();
     assert_eq!(jobs, 3, "{seen:?}");
 }
+
+#[test]
+fn variants_compared_in_parallel_equal_the_same_variants_one_by_one() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    anchored(&f);
+    // eight variants of `sub`: the variable it loads and the code around it differ
+    let loads = ["_g3", "_g2", "_g3", "_g3", "_g3", "_g1", "_g3", "_g2"];
+    let objects: Vec<Vec<u8>> = loads
+        .iter()
+        .enumerate()
+        .map(|(i, variable)| {
+            let mut sub = loader(0, 11);
+            if i % 2 == 1 {
+                sub[5] = 0x91; // some bytes differ too
+            }
+            build_fixture::omf_with_refs(&[
+                ("_add", &loader(0, 11), "_g1"),
+                ("_sub", &sub, variable),
+            ])
+        })
+        .collect();
+    let t = texts(objects.len());
+    for (i, object) in objects.iter().enumerate() {
+        f.write_raw_obj(&format!("V{:03}", i + 1), object);
+    }
+    let together = run_variants(&f, "sub", &refs(&t));
+    let judged = |response: &Response, index: u64| {
+        let mut v = response.data["variants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["index"] == index)
+            .unwrap()
+            .clone();
+        v["index"] = Value::Null;
+        v
+    };
+    for (i, object) in objects.iter().enumerate() {
+        // alone it is variant 1 of its own call
+        f.write_raw_obj("V001", object);
+        let alone = run_variants(&f, "sub", &[&t[i]]);
+        assert_eq!(
+            judged(&alone, 1),
+            judged(&together, i as u64 + 1),
+            "variant {}",
+            i + 1
+        );
+    }
+    let verdicts: std::collections::BTreeSet<&str> = together.data["variants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["verdict"].as_str().unwrap())
+        .collect();
+    assert!(
+        verdicts.len() >= 2,
+        "the variants must not all agree: {verdicts:?}"
+    );
+    assert_eq!(together.data["timing"]["distinct"], 8);
+}

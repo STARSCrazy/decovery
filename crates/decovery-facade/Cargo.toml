@@ -15,6 +15,7 @@ decovery-loaders.workspace = true
 decovery-objects.workspace = true
 decovery-plugin.workspace = true
 decovery-toolchain.workspace = true
+rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
