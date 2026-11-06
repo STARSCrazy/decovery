@@ -244,17 +244,20 @@ class JobPool:
         unfinished = [i for i in order if outcomes[i] is None]
         if unfinished:
             self._discard(pool)
-            left = None if deadline is None else deadline - time.monotonic()
-            again = [jobs[i] if left is None else _within(jobs[i], left) for i in unfinished]
             with ThreadPoolExecutor(min(limit, len(unfinished))) as threads:
-                for i, outcome in zip(unfinished, threads.map(self._alone, again)):
+                reruns = threads.map(lambda i: self._alone(jobs[i], deadline), unfinished)
+                for i, outcome in zip(unfinished, reruns):
                     outcomes[i] = outcome
                     if on_done is not None:
                         on_done(i, outcome)
         return outcomes  # type: ignore[return-value]
 
-    def _alone(self, job: dict) -> dict:
-        """Run one job again in a fresh process of its own: if it dies once more, nothing else is lost."""
+    def _alone(self, job: dict, deadline: float | None = None) -> dict:
+        """Run one job again in a fresh process of its own: if it dies once more, nothing else is lost. The time it
+        may take is what is left of `deadline` (`time.monotonic()`) when it starts, at most its own limit; none is
+        left: it is not run."""
+        if deadline is not None:
+            job = _within(job, deadline - time.monotonic())
         if job.get("timeout_s", 1) <= 0:
             return _outcome("failed", None, [], "not run again: the time budget of the call is used up")
         pool = _spawn(1)
