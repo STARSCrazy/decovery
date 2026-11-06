@@ -1,3 +1,6 @@
+#[path = "../../decovery-facade/tests/support/build_fixture.rs"]
+mod build_fixture;
+
 use std::process::Command;
 
 #[test]
@@ -437,4 +440,44 @@ fn setup_toolchain_writes_user_config() {
             .unwrap()
             .contains("no-such-profile")
     );
+}
+
+fn build_cli(root: &std::path::Path, files: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_decovery"))
+        .arg("build")
+        .args(files)
+        .arg("--json")
+        .arg("--workspace")
+        .arg(root)
+        .output()
+        .expect("run decovery")
+}
+
+#[test]
+fn build_exit_codes() {
+    let python = python_or_skip!();
+    let f = build_fixture::fixture(&python, "");
+    let out = build_cli(f.root(), &["a.c"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["summary"], "a.c: 2 functions, 2 identical");
+
+    let mut sub = build_fixture::SUB.to_vec();
+    sub[6] = 0x33;
+    f.write_obj("A", &[("_add", build_fixture::ADD), ("_sub", &sub)]);
+    f.write_source("a.c", &format!("{}/* changed */\n", build_fixture::A_C));
+    let out = build_cli(f.root(), &["a.c"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+
+    std::fs::remove_file(f.objects.path().join("Z.OBJ")).unwrap();
+    let out = build_cli(f.root(), &["z.c"]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a failed file is not a success: {out:?}"
+    );
+
+    let out = build_cli(f.root(), &["missing.c"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(String::from_utf8(out.stderr).unwrap().contains("missing.c"));
 }

@@ -11,6 +11,7 @@ rust-version.workspace = true
 decovery-core.workspace = true
 decovery-objects.workspace = true
 decovery-x86.workspace = true
+rayon.workspace = true
 
 [dev-dependencies]
 decovery-loaders.workspace = true

@@ -1,5 +1,7 @@
 //! Compiler profiles, tool directories and the rebuild settings of a workspace.
 
+mod build;
+mod cache;
 mod cheat;
 mod cp437;
 mod error;
@@ -7,6 +9,10 @@ mod profile;
 mod runner;
 mod staging;
 
+pub use build::{
+    CompiledFile, DEFAULT_TIMEOUT_S, cache_misses, compile, is_job_not_run, tool_fingerprint,
+};
+pub use cache::{OBJECT_CACHE_DIR, ObjectCache};
 pub use cheat::{CheatFinding, CheatKind, find_cheats};
 pub use runner::{
     JobOutcome, JobStatus, Mount, NativeRunner, PluginRunner, RunJob, RunRequest, Runner,

@@ -1,11 +1,13 @@
 //! Typed views of `knowledge/rebuild.toml` and `knowledge/references.toml` as migrate writes them.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::address::Address;
 use crate::knowledge::ClaimSource;
+use crate::store::{WorkspaceLock, write_atomic};
 use crate::workspace::{SCHEMA, WorkspaceError};
 
 /// Path of the rebuild records relative to the workspace root.
@@ -28,68 +30,186 @@ pub enum RebuildResult {
     Other,
 }
 
-/// The last rebuild of one function.
+/// decovery's verdict on a rebuilt function (design 4); set only by decovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum VerdictId {
+    Identical,
+    Equivalent,
+    Differs,
+    Unchecked,
+    /// A value this version does not know; kept so the record is not lost.
+    ///
+    /// Not written back; writers refuse it.
+    #[serde(other)]
+    Other,
+}
+
+impl VerdictId {
+    /// The serialized id.
+    pub fn id(self) -> &'static str {
+        match self {
+            VerdictId::Identical => "identical",
+            VerdictId::Equivalent => "equivalent",
+            VerdictId::Differs => "differs",
+            VerdictId::Unchecked => "unchecked",
+            VerdictId::Other => "other",
+        }
+    }
+}
+
+impl RebuildResult {
+    /// The serialized id.
+    pub fn id(self) -> &'static str {
+        match self {
+            RebuildResult::Identical => "identical",
+            RebuildResult::Differs => "differs",
+            RebuildResult::Error => "error",
+            RebuildResult::Other => "other",
+        }
+    }
+}
+
+/// Why a rebuilt function is not identical, as stored: a kebab-case kind (`bytes-differ`, `wrong-absolute-ref`,
+/// `inline-assembly`, ...), the offset in the function and a count where the kind has them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct BlockerRecord {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<u32>,
+}
+
+impl BlockerRecord {
+    pub fn new(kind: impl Into<String>, at: Option<u32>, count: Option<u32>) -> Self {
+        BlockerRecord {
+            kind: kind.into(),
+            at,
+            count,
+        }
+    }
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+/// The last rebuild of one function.
+///
+/// `result` is Decomp's byte rule, `verdict` and `blockers` are decovery's. Zero metrics are not written. Keys this
+/// version does not know are kept in `extra` and written back.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct RebuildRecord {
     pub address: Address,
     pub name: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compiler: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flags: Option<String>,
     pub result: RebuildResult,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<VerdictId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blockers: Vec<BlockerRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub bytes: u32,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub equal: u32,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub gaps: u32,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub differing: u32,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub refs_ok: u32,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub refs_wrong: u32,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub refs_unchecked: u32,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub instructions_differing: u32,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub padding_bytes: u32,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub alignment: u32,
-    #[serde(default, deserialize_with = "number_or_text")]
+    #[serde(
+        default,
+        deserialize_with = "number_or_text",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub first_difference: Option<u32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnoses: Vec<String>,
-    #[serde(default)]
+    /// blake3 of the function's bytes in the object, 16 hex characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub date: Option<String>,
-    /// The last equivalence check (`[function.equivalence]`); only the fields shown in output are kept.
-    #[serde(default)]
+    /// The last equivalence check (`[function.equivalence]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub equivalence: Option<Equivalence>,
+    /// Keys this version does not know.
+    #[serde(flatten)]
+    pub extra: toml::Table,
 }
 
-/// The last equivalence check of a rebuilt function, as far as output shows it.
-///
-/// Other keys of the table (reasons, code, case counts by kind) are ignored when reading.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+impl RebuildRecord {
+    /// A record with only address, name and result set.
+    pub fn new(address: Address, name: impl Into<String>, result: RebuildResult) -> Self {
+        RebuildRecord {
+            address,
+            name: name.into(),
+            file: None,
+            compiler: None,
+            flags: None,
+            result,
+            verdict: None,
+            blockers: Vec::new(),
+            message: None,
+            bytes: 0,
+            equal: 0,
+            gaps: 0,
+            differing: 0,
+            refs_ok: 0,
+            refs_wrong: 0,
+            refs_unchecked: 0,
+            instructions_differing: 0,
+            padding_bytes: 0,
+            alignment: 0,
+            first_difference: None,
+            diagnoses: Vec::new(),
+            code_hash: None,
+            date: None,
+            equivalence: None,
+            extra: toml::Table::new(),
+        }
+    }
+}
+
+/// The last equivalence check of a rebuilt function. The fields shown in output are typed; the others (reasons,
+/// code, case counts by kind) are kept in `extra`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Equivalence {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verdict: Option<String>,
-    #[serde(default, rename = "static")]
+    #[serde(default, rename = "static", skip_serializing_if = "Option::is_none")]
     pub static_check: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dynamic: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cases: Option<u32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub date: Option<String>,
+    #[serde(flatten)]
+    pub extra: toml::Table,
 }
 
 /// `first_difference` is an integer in practice, but the schema allows text (`"12"`, `"0x0C"`).
@@ -141,7 +261,7 @@ pub struct Reference {
     pub evidence: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct RebuildFile {
     schema: u32,
     #[serde(default)]
@@ -169,6 +289,78 @@ pub fn read_references(root: &Path) -> Result<Vec<Reference>, WorkspaceError> {
     Ok(read_optional::<ReferencesFile>(&path, |f| f.schema)?
         .map(|f| f.reference)
         .unwrap_or_default())
+}
+
+/// Writes `knowledge/rebuild.toml`: records sorted by address (stable), LF line ends, deterministic. Refuses a
+/// record with an unknown result or verdict.
+pub fn save_rebuild(
+    root: &Path,
+    records: &[RebuildRecord],
+    _lock: &WorkspaceLock,
+) -> Result<(), WorkspaceError> {
+    let path = root.join(REBUILD_FILE);
+    for r in records {
+        let unknown = [
+            (r.result == RebuildResult::Other).then_some("result"),
+            (r.verdict == Some(VerdictId::Other)).then_some("verdict"),
+        ];
+        if let Some(field) = unknown.into_iter().flatten().next() {
+            return Err(WorkspaceError::UnknownValue {
+                file: path,
+                detail: format!("rebuild record at {} has an unknown {field}", r.address),
+            });
+        }
+    }
+    let mut function = records.to_vec();
+    function.sort_by_key(|r| r.address);
+    let text = toml::to_string(&RebuildFile {
+        schema: SCHEMA,
+        function,
+    })
+    .map_err(|e| WorkspaceError::Io {
+        path: path.clone(),
+        source: std::io::Error::other(e),
+    })?;
+    write_atomic(&path, text.as_bytes()).map_err(|source| WorkspaceError::Io { path, source })
+}
+
+/// Merges the records of a build into the stored ones. Records of `built_files` are replaced by `new`; with `all`
+/// (every source was built), records of files not in `existing_files` are dropped. A new record keeps the old
+/// record's `equivalence` when its `code_hash` equals the old one or the old record has none, and the old
+/// record's unknown keys. Sorted by address.
+pub fn merge_rebuild(
+    old: Vec<RebuildRecord>,
+    new: Vec<RebuildRecord>,
+    built_files: &[String],
+    all: bool,
+    existing_files: &[String],
+) -> Vec<RebuildRecord> {
+    let listed =
+        |file: &Option<String>, list: &[String]| file.as_ref().is_some_and(|f| list.contains(f));
+    let mut previous: BTreeMap<Address, RebuildRecord> = BTreeMap::new();
+    let mut merged: BTreeMap<Address, RebuildRecord> = BTreeMap::new();
+    for r in old {
+        let replaced = listed(&r.file, built_files);
+        let vanished = all && !listed(&r.file, existing_files);
+        if !replaced && !vanished {
+            merged.insert(r.address, r.clone());
+        }
+        previous.entry(r.address).or_insert(r);
+    }
+    for mut r in new {
+        if let Some(before) = previous.get(&r.address) {
+            if r.equivalence.is_none()
+                && (before.code_hash.is_none() || before.code_hash == r.code_hash)
+            {
+                r.equivalence = before.equivalence.clone();
+            }
+            for (key, value) in &before.extra {
+                r.extra.entry(key.clone()).or_insert_with(|| value.clone());
+            }
+        }
+        merged.insert(r.address, r);
+    }
+    merged.into_values().collect()
 }
 
 fn read_optional<T: for<'de> Deserialize<'de>>(
@@ -371,5 +563,136 @@ source = "human"
         let dir = tempfile::tempdir().unwrap();
         assert!(read_rebuild(dir.path()).unwrap().is_empty());
         assert!(read_references(dir.path()).unwrap().is_empty());
+    }
+
+    fn lock(dir: &Path) -> WorkspaceLock {
+        std::fs::write(
+            dir.join(crate::workspace::CONFIG_FILE),
+            "schema = 1\n[target]\nfile = \"t.exe\"\nsha256 = \"00\"\nformat = \"mz\"\nprocessor = \"x86\"\n",
+        )
+        .unwrap();
+        crate::Workspace::open(dir)
+            .unwrap()
+            .lock(std::time::Duration::from_secs(1))
+            .unwrap()
+    }
+
+    fn record(at: u32, file: &str, result: RebuildResult) -> RebuildRecord {
+        let mut r = RebuildRecord::new(Address::Flat(at), format!("f{at:x}"), result);
+        r.file = Some(file.to_string());
+        r
+    }
+
+    const WITH_UNKNOWN_KEYS: &str = r#"schema = 1
+
+[[function]]
+address = "flat:00010010"
+name = "a"
+file = "main.c"
+result = "differs"
+verdict = "differs"
+bytes = 12
+differing = 2
+first_difference = "0x4"
+future_key = "kept"
+
+[[function.blockers]]
+kind = "bytes-differ"
+count = 2
+
+[function.equivalence]
+verdict = "equivalent_tested"
+reasons = ["same calls"]
+code = "abc"
+"#;
+
+    #[test]
+    fn save_round_trip_is_byte_stable_and_keeps_unknown_keys() {
+        let dir = root_with(REBUILD_FILE, WITH_UNKNOWN_KEYS);
+        let lock = lock(dir.path());
+        let records = read_rebuild(dir.path()).unwrap();
+        assert_eq!(records[0].extra["future_key"].as_str(), Some("kept"));
+        assert_eq!(records[0].first_difference, Some(4));
+        assert_eq!(records[0].verdict, Some(VerdictId::Differs));
+        assert_eq!(
+            records[0].blockers,
+            [BlockerRecord::new("bytes-differ", None, Some(2))]
+        );
+        let eq = records[0].equivalence.as_ref().unwrap();
+        assert_eq!(eq.extra["code"].as_str(), Some("abc"));
+        save_rebuild(dir.path(), &records, &lock).unwrap();
+        let first = std::fs::read_to_string(dir.path().join(REBUILD_FILE)).unwrap();
+        assert!(first.contains("future_key = \"kept\""), "{first}");
+        assert!(first.contains("first_difference = 4"), "{first}");
+        assert!(first.contains("reasons = [\"same calls\"]"), "{first}");
+        assert!(!first.contains("equal = 0") && !first.contains('\r'));
+        let again = read_rebuild(dir.path()).unwrap();
+        assert_eq!(again, records);
+        save_rebuild(dir.path(), &again, &lock).unwrap();
+        let second = std::fs::read_to_string(dir.path().join(REBUILD_FILE)).unwrap();
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn save_refuses_unknown_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = lock(dir.path());
+        let r = record(0x10, "a.c", RebuildResult::Other);
+        let err = save_rebuild(dir.path(), &[r], &lock).unwrap_err();
+        assert!(matches!(err, WorkspaceError::UnknownValue { .. }), "{err}");
+    }
+
+    #[test]
+    fn merge_replaces_built_files_and_keeps_others() {
+        let old = vec![
+            record(0x10, "a.c", RebuildResult::Identical),
+            record(0x20, "a.c", RebuildResult::Identical),
+            record(0x30, "b.c", RebuildResult::Differs),
+            record(0x40, "gone.c", RebuildResult::Differs),
+        ];
+        let new = vec![record(0x10, "a.c", RebuildResult::Differs)];
+        let files = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let merged = merge_rebuild(old.clone(), new.clone(), &files(&["a.c"]), false, &[]);
+        let at: Vec<_> = merged.iter().map(|r| (r.address, r.result)).collect();
+        assert_eq!(
+            at,
+            [
+                (Address::Flat(0x10), RebuildResult::Differs),
+                (Address::Flat(0x30), RebuildResult::Differs),
+                (Address::Flat(0x40), RebuildResult::Differs),
+            ]
+        );
+        let all = merge_rebuild(
+            old,
+            new,
+            &files(&["a.c", "b.c"]),
+            true,
+            &files(&["a.c", "b.c"]),
+        );
+        let at: Vec<_> = all.iter().map(|r| r.address).collect();
+        assert_eq!(at, [Address::Flat(0x10)]);
+    }
+
+    #[test]
+    fn merge_keeps_equivalence_only_for_same_code() {
+        let mut before = record(0x10, "a.c", RebuildResult::Differs);
+        before.equivalence = Some(Equivalence {
+            verdict: Some("equivalent_tested".into()),
+            ..Equivalence::default()
+        });
+        before.extra.insert("note".into(), "x".into());
+        let files = ["a.c".to_string()];
+        let mut same = record(0x10, "a.c", RebuildResult::Differs);
+        same.code_hash = Some("11".into());
+        // the old record has no code hash: kept
+        let merged = merge_rebuild(vec![before.clone()], vec![same.clone()], &files, false, &[]);
+        assert!(merged[0].equivalence.is_some());
+        assert_eq!(merged[0].extra["note"].as_str(), Some("x"));
+        before.code_hash = Some("11".into());
+        let merged = merge_rebuild(vec![before.clone()], vec![same.clone()], &files, false, &[]);
+        assert!(merged[0].equivalence.is_some());
+        same.code_hash = Some("22".into());
+        let merged = merge_rebuild(vec![before], vec![same], &files, false, &[]);
+        assert!(merged[0].equivalence.is_none());
     }
 }

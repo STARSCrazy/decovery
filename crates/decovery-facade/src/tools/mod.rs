@@ -2,6 +2,7 @@
 
 mod analyze;
 mod annotate;
+mod build;
 mod detail;
 mod find;
 mod show;
@@ -9,6 +10,7 @@ mod status;
 
 pub use analyze::{AnalyzeOptions, analyze, analyze_with_user_plugins, program_description};
 pub use annotate::{AnnotateAction, Annotation, annotate};
+pub use build::{BuildRequest, OBJECT_FORMAT, OBJECTS_DIR, RUNS_DIR, SOURCE_DIR, Variant, build};
 pub use detail::detail;
 pub use find::{DEFAULT_LIMIT, FindQuery, FindWhat, FunctionFilter, FunctionSort, find};
 pub use show::show;

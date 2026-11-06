@@ -13,8 +13,8 @@ mod setup;
 
 use decovery_core::{ClaimSource, Confidence};
 use decovery_facade::{
-    AnalyzeOptions, AnnotateAction, Annotation, Budget, DEFAULT_LIMIT, FacadeError, FindQuery,
-    FindWhat, FunctionFilter, FunctionSort, Progress, Response, Session,
+    AnalyzeOptions, AnnotateAction, Annotation, Budget, BuildRequest, DEFAULT_LIMIT, FacadeError,
+    FindQuery, FindWhat, FunctionFilter, FunctionSort, Progress, Response, Session,
 };
 
 /// Recover source code from old executables.
@@ -135,6 +135,13 @@ enum Command {
         /// Decompile only this function again (name, address or `file:0x…`; repeatable).
         #[arg(long = "function", value_name = "TARGET")]
         function: Vec<String>,
+    },
+    /// Compile the rebuild sources (`src/`), compare their functions with the original and record the results.
+    /// Exit code 0 when every built function is identical, 1 when not (or a file failed), 2 on errors.
+    /// Progress goes to stderr.
+    Build {
+        /// Source files in `src/` (e.g. `ai.c`); default: all.
+        files: Vec<String>,
     },
     /// Page the content of a handle returned by another command.
     Detail {
@@ -389,6 +396,14 @@ fn main() -> ExitCode {
             };
             finish(analyze(&cli.workspace, &options, cli.json))
         }
+        Command::Build { files } => match build(&cli.workspace, files, cli.json) {
+            Ok(true) => ExitCode::SUCCESS,
+            Ok(false) => ExitCode::from(1),
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::from(e.exit_code())
+            }
+        },
         Command::Detail {
             handle,
             offset,
@@ -718,6 +733,58 @@ fn analyze(workspace: &Path, options: &AnalyzeOptions, json: bool) -> Result<(),
     };
     let response = decovery_facade::analyze(workspace, options, &progress)?;
     print_summary(&response, json)
+}
+
+/// Builds and prints the result; `true` when every built function is identical and no file failed.
+fn build(workspace: &Path, files: Vec<String>, json: bool) -> Result<bool, FacadeError> {
+    let progress = |p: Progress| {
+        if let Some(message) = p.message.filter(|m| !m.trim().is_empty()) {
+            eprintln!("{message}");
+        }
+    };
+    let mut request = BuildRequest::default();
+    request.files = files;
+    let response = decovery_facade::build(workspace, &request, &progress)?;
+    let d = &response.data;
+    let counts = &d["counts"];
+    let complete = counts["failed_files"] == 0 && counts["identical"] == counts["functions"];
+    if json {
+        print_json(&response)?;
+        return Ok(complete);
+    }
+    print_summary(&response, false)?;
+    for file in d["files"].as_array().into_iter().flatten() {
+        if file["status"] == "error" {
+            println!(
+                "{}: error: {}",
+                file["file"].as_str().unwrap_or(""),
+                file["message"].as_str().unwrap_or("").replace('\n', "\n  ")
+            );
+        }
+    }
+    for f in d["functions"].as_array().into_iter().flatten() {
+        if f["verdict"] != "identical" {
+            let blockers: Vec<&str> = f["blockers"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|b| b["kind"].as_str())
+                .collect();
+            println!(
+                "{}\t{}\t{}\t{}",
+                f["address"].as_str().unwrap_or(""),
+                f["name"].as_str().unwrap_or(""),
+                f["verdict"].as_str().unwrap_or(""),
+                blockers.join(" ")
+            );
+        }
+    }
+    for hint in d["hints"].as_array().into_iter().flatten() {
+        if let Some(text) = hint.as_str() {
+            eprintln!("hint: {text}");
+        }
+    }
+    Ok(complete)
 }
 
 /// The JSON envelope, or the summary on stdout and `data.warnings` on stderr.
