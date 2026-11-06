@@ -8,7 +8,7 @@ use decovery_x86::{DecodeOptions, decode_detailed, internal_calls, padding_posit
 use rayon::prelude::*;
 
 use crate::anchors::{Anchors, Condition, FLAT, Outcome, SectionKey, frame_name};
-use crate::instructions::{self, Naming, Side};
+use crate::instructions::{self, Keep, Naming, Side};
 use crate::pairs::Pair;
 use crate::{
     Blocker, CompareOptions, Comparison, Decoration, Metrics, ModuleComparison, ModuleOptions,
@@ -375,7 +375,9 @@ pub(crate) fn instruction_pairs(
         decoration,
         options.padding,
         bits,
+        Keep::Always,
     )
+    .1
 }
 
 /// Compares every placement with its original. Anchors (ADR 0006) are established over all placements first,
@@ -738,7 +740,13 @@ fn prepare(
     }
 
     // --- Decomp's `_befehlsvergleich` ---
-    let pairs = instruction_comparison(
+    // pairs are kept only for a diagnosis of a function whose instructions are not all equal
+    let keep = if diagnosis.is_some() {
+        Keep::IfNotEqual
+    } else {
+        Keep::Never
+    };
+    let (differing, pairs) = instruction_comparison(
         &rebuild,
         at,
         base,
@@ -749,14 +757,15 @@ fn prepare(
         decoration,
         padding_option,
         bits,
+        keep,
     );
-    m.instructions_differing = pairs.iter().filter(|p| p.kind.differs()).count() as u32;
+    m.instructions_differing = differing;
     let diagnoses = match diagnosis {
-        Some(family) => crate::diagnose::diagnose(&pairs, bits as u8, family)
+        Some(family) if !pairs.is_empty() => crate::diagnose::diagnose(&pairs, bits as u8, family)
             .into_iter()
             .map(|f| f.rule)
             .collect(),
-        None => Vec::new(),
+        _ => Vec::new(),
     };
     drop(pairs);
 
@@ -793,8 +802,8 @@ fn prepare(
     }
 }
 
-/// Decomp's `_befehlsvergleich` for one placement: the aligned, judged instruction pairs. `original` holds the
-/// original bytes over the rebuild's length.
+/// Decomp's `_befehlsvergleich` for one placement: the number of differing instructions and the aligned, judged
+/// pairs as `keep` asks. `original` holds the original bytes over the rebuild's length.
 #[allow(clippy::too_many_arguments)]
 fn instruction_comparison(
     rebuild: &Rebuild<'_>,
@@ -807,7 +816,8 @@ fn instruction_comparison(
     decoration: &Decoration,
     padding_option: bool,
     bits: u32,
-) -> Vec<Pair> {
+    keep: Keep,
+) -> (u32, Vec<Pair>) {
     let f = rebuild.f;
     let code = &rebuild.bytes;
     let original_span = original_len
@@ -879,6 +889,7 @@ fn instruction_comparison(
         bits,
         padding_option,
         &data_address,
+        keep,
     )
 }
 

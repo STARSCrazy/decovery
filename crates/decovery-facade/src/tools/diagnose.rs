@@ -100,7 +100,9 @@ pub fn diagnose_tool(
             rules.join(", ")
         )
     } else if pairs.is_empty() {
-        format!("{name}: the original bytes of the function are not in the program")
+        format!(
+            "{name}: no instructions compared (the original bytes are not in the program, or the code is not 16- or 32-bit)"
+        )
     } else if let Some(p) = pairs.iter().find(|p| p.kind.differs()) {
         let at = match (&p.rebuild, &p.original) {
             (Some(d), _) => format!("rebuild {:04X}", d.offset),
