@@ -14,7 +14,7 @@ mod setup;
 use decovery_core::{ClaimSource, Confidence};
 use decovery_facade::{
     AnalyzeOptions, AnnotateAction, Annotation, Budget, BuildRequest, DEFAULT_LIMIT, FacadeError,
-    FindQuery, FindWhat, FunctionFilter, FunctionSort, Progress, Response, Session,
+    FindQuery, FindWhat, FunctionFilter, FunctionSort, Progress, Response, Session, Variant,
 };
 
 /// Recover source code from old executables.
@@ -142,9 +142,17 @@ enum Command {
     /// Compile the rebuild sources (`src/`), compare their functions with the original and record the results.
     /// Exit code 0 when every built function is identical, 1 when not (or a file failed), 2 on errors.
     /// Progress goes to stderr.
+    /// With `--variant`: compile candidate sources for `--function` instead and rank them (best first, nothing is
+    /// recorded); exit code 0 when the best is identical.
     Build {
         /// Source files in `src/` (e.g. `ai.c`); default: all.
         files: Vec<String>,
+        /// Report this function only (name or address); its file is built.
+        #[arg(long, value_name = "NAME")]
+        function: Option<String>,
+        /// Candidate source file for `--function` (repeatable, at most 64).
+        #[arg(long = "variant", value_name = "FILE")]
+        variant: Vec<PathBuf>,
     },
     /// Page the content of a handle returned by another command.
     Detail {
@@ -402,7 +410,11 @@ fn main() -> ExitCode {
             };
             finish(analyze(&cli.workspace, &options, cli.json))
         }
-        Command::Build { files } => match build(&cli.workspace, files, cli.json) {
+        Command::Build {
+            files,
+            function,
+            variant,
+        } => match build(&cli.workspace, files, function, &variant, cli.json) {
             Ok(true) => ExitCode::SUCCESS,
             Ok(false) => ExitCode::from(1),
             Err(e) => {
@@ -742,7 +754,13 @@ fn analyze(workspace: &Path, options: &AnalyzeOptions, json: bool) -> Result<(),
 }
 
 /// Builds and prints the result; `true` when every built function is identical and no file failed.
-fn build(workspace: &Path, files: Vec<String>, json: bool) -> Result<bool, FacadeError> {
+fn build(
+    workspace: &Path,
+    files: Vec<String>,
+    function: Option<String>,
+    variants: &[PathBuf],
+    json: bool,
+) -> Result<bool, FacadeError> {
     let progress = |p: Progress| {
         if let Some(message) = p.message.filter(|m| !m.trim().is_empty()) {
             eprintln!("{message}");
@@ -750,7 +768,19 @@ fn build(workspace: &Path, files: Vec<String>, json: bool) -> Result<bool, Facad
     };
     let mut request = BuildRequest::default();
     request.files = files;
+    request.function = function;
+    for path in variants {
+        let source = std::fs::read_to_string(path).map_err(|e| {
+            FacadeError::Invalid(format!("cannot read variant {}: {e}", path.display()))
+        })?;
+        request
+            .variants
+            .push(Variant::new(source).with_label(path.display().to_string()));
+    }
     let response = decovery_facade::build(workspace, &request, &progress)?;
+    if !variants.is_empty() {
+        return print_variants(&response, json);
+    }
     let d = &response.data;
     let counts = &d["counts"];
     let complete = counts["failed_files"] == 0 && counts["identical"] == counts["functions"];
@@ -791,6 +821,32 @@ fn build(workspace: &Path, files: Vec<String>, json: bool) -> Result<bool, Facad
         }
     }
     Ok(complete)
+}
+
+/// Prints the ranked variants (best first); `true` when the best one is identical.
+fn print_variants(response: &Response, json: bool) -> Result<bool, FacadeError> {
+    let best_identical =
+        response.data["variants"][0]["verdict"] == "identical" && !response.data["best"].is_null();
+    if json {
+        print_json(response)?;
+        return Ok(best_identical);
+    }
+    print_summary(response, false)?;
+    for v in response.data["variants"].as_array().into_iter().flatten() {
+        println!(
+            "{}\t{}\t{}\t{}\t{}\t{}",
+            v["index"],
+            v["verdict"].as_str().unwrap_or(""),
+            v["instructions_differing"],
+            v["differing"],
+            v["refs_wrong"],
+            v["label"].as_str().unwrap_or("")
+        );
+        if let Some(message) = v["message"].as_str() {
+            println!("  {}", message.replace('\n', "\n  "));
+        }
+    }
+    Ok(best_identical)
 }
 
 /// The JSON envelope, or the summary on stdout and `data.warnings` on stderr.

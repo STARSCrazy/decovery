@@ -467,3 +467,246 @@ fn analysis_with_end_before_start_does_not_panic() {
     run(&f, &["a.c"]);
     assert_eq!(record(&f, "add").verdict, Some(VerdictId::Identical));
 }
+
+// ---- variants (Task 12) ----
+
+use decovery_facade::{FacadeError, Variant};
+
+fn variant_request(function: Option<&str>, sources: &[&str]) -> BuildRequest {
+    let mut request = BuildRequest::default();
+    request.function = function.map(str::to_string);
+    request.variants = sources.iter().map(|s| Variant::new(*s)).collect();
+    request
+}
+
+fn run_variants(f: &Fixture, function: &str, sources: &[&str]) -> Response {
+    build(f.root(), &variant_request(Some(function), sources), &|_| {}).unwrap()
+}
+
+fn order(response: &Response) -> Vec<u64> {
+    response.data["variants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["index"].as_u64().unwrap())
+        .collect()
+}
+
+const SUB_SOURCE: &str = "int sub(int a, int b)\n{\n    return a - b;\n}\n";
+
+#[test]
+fn variants_are_ranked() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    let mut two = SUB.to_vec();
+    two[6] = 0x33;
+    two[7] = 0x00;
+    let mut one = SUB.to_vec();
+    one[6] = 0x33;
+    // the objects also hold `add`, which is not the function asked for
+    f.write_obj("V001", &[("_add", ADD), ("_sub", &two)]);
+    f.write_obj("V002", &[("_add", ADD), ("_sub", SUB)]);
+    f.write_obj("V003", &[("_sub", &one)]);
+    let response = run_variants(&f, "sub", &[SUB_SOURCE, SUB_SOURCE, SUB_SOURCE]);
+    assert_eq!(f.log("requests.log"), ["3"], "one runner request");
+    assert_eq!(order(&response), [2, 3, 1]);
+    let d = &response.data;
+    assert_eq!(d["function"], "sub");
+    assert_eq!(d["best"], 2);
+    let v = d["variants"].as_array().unwrap();
+    assert_eq!(v[0]["verdict"], "identical");
+    assert_eq!(v[0]["differing"], 0);
+    assert_eq!(v[1]["verdict"], "differs");
+    assert_eq!(v[1]["differing"], 1);
+    assert_eq!(v[2]["differing"], 2);
+    assert_eq!(v[2]["blockers"][0]["kind"], "bytes-differ");
+    assert!(v[2]["instructions_differing"].as_u64().unwrap() >= 1);
+    assert!(
+        response.summary.contains("variant 2"),
+        "{}",
+        response.summary
+    );
+}
+
+#[test]
+fn variant_labels_are_reported() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    f.write_obj("V001", &[("_sub", SUB)]);
+    let mut request = variant_request(Some("sub"), &[SUB_SOURCE]);
+    request.variants[0] = Variant::new(SUB_SOURCE).with_label("plain");
+    let response = build(f.root(), &request, &|_| {}).unwrap();
+    assert_eq!(response.data["variants"][0]["label"], "plain");
+}
+
+#[test]
+fn variant_compile_error_ranks_last() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    // no V001.OBJ: the fake compiler fails
+    f.write_obj("V002", &[("_sub", SUB)]);
+    f.write_obj("V003", &[("_sub", SUB)]);
+    let response = run_variants(&f, "sub", &["int broken(", SUB_SOURCE, SUB_SOURCE]);
+    assert_eq!(order(&response), [2, 3, 1]);
+    assert_eq!(response.data["best"], 2);
+    let last = &response.data["variants"][2];
+    assert_eq!(last["verdict"], "error");
+    assert!(
+        last["message"]
+            .as_str()
+            .unwrap()
+            .contains("V001.C(1): Error"),
+        "{last}"
+    );
+    // nothing compiles: no best
+    let f = fixture(&python, "");
+    let response = run_variants(&f, "sub", &[SUB_SOURCE]);
+    assert!(response.data["best"].is_null(), "{}", response.data);
+    assert_eq!(response.data["variants"][0]["verdict"], "error");
+}
+
+#[test]
+fn variant_without_the_function_is_unchecked_and_ranks_last() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    f.write_obj("V001", &[("_add", ADD)]);
+    let mut two = SUB.to_vec();
+    two[6] = 0x33;
+    f.write_obj("V002", &[("_sub", &two)]);
+    let response = run_variants(&f, "sub", &[SUB_SOURCE, SUB_SOURCE]);
+    assert_eq!(order(&response), [2, 1]);
+    let last = &response.data["variants"][1];
+    assert_eq!(last["verdict"], "unchecked");
+    assert!(last["message"].as_str().unwrap().contains("sub"), "{last}");
+}
+
+#[test]
+fn variants_do_not_write_records() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    seed(&f, OTHER_FILES);
+    let before = std::fs::read(f.rebuild_path()).unwrap();
+    f.write_obj("V001", &[("_sub", SUB)]);
+    f.write_obj("V002", &[("_sub", SUB)]);
+    run_variants(&f, "sub", &[SUB_SOURCE, SUB_SOURCE]);
+    assert_eq!(std::fs::read(f.rebuild_path()).unwrap(), before);
+    let root = f.root();
+    assert!(!root.join("cache/rebuild/obj").exists());
+    assert!(!root.join("output").exists());
+    let runs = std::fs::read_dir(root.join("cache/rebuild/runs")).map_or(0, |d| d.count());
+    assert_eq!(runs, 0, "build directory not removed");
+}
+
+#[test]
+fn unchanged_variant_is_not_compiled_again() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    f.write_obj("V001", &[("_sub", SUB)]);
+    run_variants(&f, "sub", &[SUB_SOURCE]);
+    assert_eq!(f.log("calls.log").len(), 1);
+    let second = run_variants(&f, "sub", &[SUB_SOURCE]);
+    assert_eq!(f.log("calls.log").len(), 1, "served from the object cache");
+    assert_eq!(second.data["timing"]["cached"], 1);
+    assert_eq!(second.data["timing"]["jobs"], 0);
+    assert_eq!(second.data["variants"][0]["verdict"], "identical");
+    // a changed variant is compiled
+    run_variants(&f, "sub", &[&format!("{SUB_SOURCE}/* changed */\n")]);
+    assert_eq!(f.log("calls.log").len(), 2);
+}
+
+#[test]
+fn variant_with_inline_asm_is_not_identical() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    f.write_obj("V001", &[("_sub", SUB)]);
+    f.write_obj("V002", &[("_sub", SUB)]);
+    let asm = "int sub(int a, int b)\r\n{\r\n    _asm nop;\r\n    return a - b;\r\n}\r\n";
+    let response = run_variants(&f, "sub", &[asm, SUB_SOURCE]);
+    // the plain variant wins although both objects are byte-identical
+    assert_eq!(order(&response), [2, 1]);
+    let v = &response.data["variants"][1];
+    assert_eq!(v["verdict"], "differs");
+    assert!(
+        v["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b["kind"] == "inline-assembly"),
+        "{v}"
+    );
+    assert!(v["message"].as_str().unwrap().contains("line 3"), "{v}");
+}
+
+#[test]
+fn too_many_variants_is_rejected() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    let many = vec![SUB_SOURCE; 65];
+    let error = build(f.root(), &variant_request(Some("sub"), &many), &|_| {}).unwrap_err();
+    assert!(
+        matches!(&error, FacadeError::Invalid(m) if m.contains("at most 64")),
+        "{error}"
+    );
+    assert!(f.log("requests.log").is_empty());
+    // 64 are fine
+    for i in 1..=64 {
+        f.write_obj(&format!("V{i:03}"), &[("_sub", SUB)]);
+    }
+    let many = vec![SUB_SOURCE; 64];
+    let response = run_variants(&f, "sub", &many);
+    assert_eq!(response.data["variants"].as_array().unwrap().len(), 64);
+    assert_eq!(f.log("requests.log"), ["64"]);
+}
+
+#[test]
+fn variants_need_function() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    let error = build(f.root(), &variant_request(None, &[SUB_SOURCE]), &|_| {}).unwrap_err();
+    assert!(
+        matches!(&error, FacadeError::Invalid(m) if m.contains("function")),
+        "{error}"
+    );
+    assert!(f.log("requests.log").is_empty());
+}
+
+#[test]
+fn function_without_record_comes_from_the_only_defining_source() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    f.write_obj("V001", &[("_sub", SUB)]);
+    // no rebuild record: a.c is the only source that defines sub
+    let response = run_variants(&f, "sub", &[SUB_SOURCE]);
+    assert_eq!(response.data["variants"][0]["verdict"], "identical");
+    let error = build(
+        f.root(),
+        &variant_request(Some("nosuch"), &[SUB_SOURCE]),
+        &|_| {},
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("nosuch"), "{error}");
+    // two sources defining it: ambiguous
+    f.write_source("b.c", SUB_SOURCE);
+    let error = build(
+        f.root(),
+        &variant_request(Some("sub"), &[SUB_SOURCE]),
+        &|_| {},
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("a.c") && error.to_string().contains("b.c"),
+        "{error}"
+    );
+}
+
+#[test]
+fn function_selects_its_file_without_variants() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    let mut request = BuildRequest::default();
+    request.function = Some("zed".to_string());
+    let response = build(f.root(), &request, &|_| {}).unwrap();
+    assert_eq!(f.log("calls.log"), ["Z.C"]);
+    assert_eq!(response.data["files"].as_array().unwrap().len(), 1);
+    assert_eq!(record(&f, "zed").verdict, Some(VerdictId::Identical));
+}

@@ -34,15 +34,34 @@ pub const OBJECT_FORMAT: &str = "decovery-obj/1";
 
 static BUILD_COUNTER: AtomicU32 = AtomicU32::new(0);
 
-/// A source text to build instead of the file (Task 12).
+/// Most variants one `build` call compiles.
+pub const MAX_VARIANTS: usize = 64;
+
+/// A candidate source text for one function, compiled instead of the function's file (`build` with `variants`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Variant {
-    pub label: String,
+    pub label: Option<String>,
     pub source: String,
 }
 
+impl Variant {
+    pub fn new(source: impl Into<String>) -> Self {
+        Variant {
+            label: None,
+            source: source.into(),
+        }
+    }
+
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+}
+
 /// What to build: `files` (names in `src/`; empty = all sources), optionally reported for one `function` only.
+/// With `variants` the request compiles those candidate sources for `function` and ranks them instead; nothing is
+/// recorded then.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct BuildRequest {
@@ -148,9 +167,7 @@ pub fn build(
 ) -> Result<Response, FacadeError> {
     let started = Instant::now();
     if !request.variants.is_empty() {
-        return Err(FacadeError::Invalid(
-            "build variants are not supported yet".into(),
-        ));
+        return build_variants(root, request, progress, started);
     }
     let stamps = SessionStamps::of(root);
     let ws = Workspace::open(root)?;
@@ -225,53 +242,16 @@ pub fn build(
         .iter()
         .map(|&i| (sources[i].dos_name.clone(), sources[i].flags.clone()))
         .collect();
-    let mut warnings: Vec<String> = Vec::new();
-    progress(Progress::new(
-        0,
-        Some(jobs_input.len() as u64),
-        Some(format!("compiling {} sources", jobs_input.len())),
-    ));
-    let user = read_user_config()?;
-    let runner_names = if rebuild.runners.is_empty() {
-        profile.runners.clone()
-    } else {
-        rebuild.runners.clone()
-    };
-    // every input (tool fingerprint, sources, headers, cached objects) is read once, here
-    let plan = if jobs_input.is_empty() {
-        None
-    } else {
-        Some(plan_compile(&ws, &profile, &jobs_input, &run_dir.0).map_err(toolchain)?)
-    };
-    let input_hashes = plan
-        .as_ref()
-        .map(|p| p.input_hashes().clone())
-        .unwrap_or_default();
-    let needs_runner = plan.as_ref().is_some_and(|p| p.misses() > 0);
-    let runners = if needs_runner {
-        let (runners, more) = open_runners(&runner_names, &ws, &user);
-        warnings.extend(more);
-        runners
-    } else {
-        Vec::new()
-    };
-    let (compiled, more) = match plan {
-        None => (Vec::new(), Vec::new()),
-        Some(plan) => {
-            compile_planned(&ws, &profile, plan, &run_dir.0, &runners, None).map_err(toolchain)?
-        }
-    };
-    drop(runners);
-    warnings.extend(more);
+    let Compiled {
+        files: compiled,
+        input_hashes,
+        mut warnings,
+    } = compile_jobs(&ws, &profile, &jobs_input, &run_dir.0, progress)?;
     let jobs = compiled.iter().filter(|c| !c.cached).count();
     let cached = compiled.len() - jobs;
     for (&i, file) in staged.iter().zip(compiled) {
         if file.object.is_none() {
-            sources[i].error = Some(if file.message.is_empty() {
-                "compile failed".to_string()
-            } else {
-                file.message.clone()
-            });
+            sources[i].error = Some(failure_text(&file));
         }
         sources[i].compiled = Some(file);
     }
@@ -303,17 +283,11 @@ pub fn build(
         for module in &object.modules {
             for view in functions(module).into_iter().filter(|f| is_public(f)) {
                 let raw = view.name;
-                let c_name = profile.decoration.undecorate(raw);
-                let found = knowledge
-                    .address_of(c_name)
-                    .map(|a| (c_name, a))
-                    .or_else(|| {
-                        (c_name != raw)
-                            .then(|| knowledge.address_of(raw).map(|a| (raw, a)))
-                            .flatten()
-                    });
-                let Some((name, address)) = found else {
-                    hints.push(format!("{c_name}: no counterpart in the original"));
+                let Some((name, address)) = place_name(&knowledge, &profile, raw) else {
+                    hints.push(format!(
+                        "{}: no counterpart in the original",
+                        profile.decoration.undecorate(raw)
+                    ));
                     continue;
                 };
                 if let Some(other) = taken.get(&address) {
@@ -324,17 +298,7 @@ pub fn build(
                     continue;
                 }
                 taken.insert(address, sources[*i].name.clone());
-                let original_len = index
-                    .as_ref()
-                    .and_then(|ix| ix.function_at(address))
-                    .and_then(|f| {
-                        f.end
-                            .linear()?
-                            .checked_sub(f.start.linear()?)?
-                            .checked_add(1)
-                    })
-                    .or_else(|| symbol_sizes.get(&address).copied().flatten())
-                    .and_then(|n| u32::try_from(n).ok());
+                let original_len = original_len(index.as_ref(), &symbol_sizes, address);
                 let code_hash = blake3::hash(view.code()).to_hex()[..16].to_string();
                 placed.push(Built {
                     source: *i,
@@ -505,17 +469,471 @@ pub fn build(
     )
 }
 
-/// The file whose rebuild records hold `function`.
+/// The file of `function`: the one its rebuild record names, else the only source in `src/` that defines it.
 fn file_of_function(root: &Path, function: &str) -> Result<String, FacadeError> {
-    read_rebuild(root)?
+    let recorded = read_rebuild(root)?
         .into_iter()
         .find(|r| r.name == function || r.address.to_string() == function)
-        .and_then(|r| r.file)
-        .ok_or_else(|| {
-            FacadeError::Invalid(format!(
-                "no rebuild record names the file of {function}; build its file instead"
-            ))
+        .and_then(|r| r.file);
+    if let Some(file) = recorded {
+        return Ok(file);
+    }
+    let set = find_sources(&root.join(SOURCE_DIR), &[]).map_err(toolchain)?;
+    let mut defining = Vec::new();
+    for path in set.sources.iter().filter(|p| is_c(&file_name(p))) {
+        if defines_function(&read_text(path)?, function) {
+            defining.push(file_name(path));
+        }
+    }
+    match defining.len() {
+        1 => Ok(defining.remove(0)),
+        0 => Err(FacadeError::Invalid(format!(
+            "no rebuild record names the file of {function} and no source in {SOURCE_DIR}/ defines it; name the file"
+        ))),
+        _ => Err(FacadeError::Invalid(format!(
+            "{function} is defined in {}; name the file",
+            defining.join(", ")
+        ))),
+    }
+}
+
+/// Whether `text` has a definition of the C function `name`: a line starting in column 0 with an identifier, holding
+/// `name(` and neither ending in `;` (a prototype) nor assigning (an initializer).
+fn defines_function(text: &str, name: &str) -> bool {
+    let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    text.lines().any(|line| {
+        if !line
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            || line.trim_end().ends_with(';')
+            || line.contains('=')
+        {
+            return false;
+        }
+        let mut from = 0;
+        while let Some(found) = line[from..].find(name) {
+            let at = from + found;
+            let rest = &line[at + name.len()..];
+            if !line[..at].chars().next_back().is_some_and(ident)
+                && rest.trim_start().starts_with('(')
+            {
+                return true;
+            }
+            from = at + name.len();
+        }
+        false
+    })
+}
+
+/// The C name and original address of a function of an object, as the build places it: by the undecorated name,
+/// else by the raw one.
+fn place_name<'a>(
+    knowledge: &KnowledgeView<'_>,
+    profile: &decovery_toolchain::Profile,
+    raw: &'a str,
+) -> Option<(&'a str, Address)> {
+    let c_name = profile.decoration.undecorate(raw);
+    knowledge
+        .address_of(c_name)
+        .map(|a| (c_name, a))
+        .or_else(|| {
+            (c_name != raw)
+                .then(|| knowledge.address_of(raw).map(|a| (raw, a)))
+                .flatten()
         })
+}
+
+/// Length of the original function at `address`: from the analysis, else the symbol's size.
+fn original_len(
+    index: Option<&decovery_core::AnalysisIndex<'_>>,
+    symbol_sizes: &HashMap<Address, Option<u64>>,
+    address: Address,
+) -> Option<u32> {
+    index
+        .and_then(|ix| ix.function_at(address))
+        .and_then(|f| {
+            f.end
+                .linear()?
+                .checked_sub(f.start.linear()?)?
+                .checked_add(1)
+        })
+        .or_else(|| symbol_sizes.get(&address).copied().flatten())
+        .and_then(|n| u32::try_from(n).ok())
+}
+
+/// What [`compile_jobs`] returns: one file per job, the hashes of everything staged, the runners' warnings.
+struct Compiled {
+    files: Vec<CompiledFile>,
+    input_hashes: BTreeMap<String, String>,
+    warnings: Vec<String>,
+}
+
+/// Compiles the staged `jobs_input` (DOS name, flags) in `run_dir`: inputs read once, object cache first, all
+/// misses in one runner request (started only when there are misses).
+fn compile_jobs(
+    ws: &Workspace,
+    profile: &decovery_toolchain::Profile,
+    jobs_input: &[(String, String)],
+    run_dir: &Path,
+    progress: &dyn Fn(Progress),
+) -> Result<Compiled, FacadeError> {
+    let mut warnings: Vec<String> = Vec::new();
+    progress(Progress::new(
+        0,
+        Some(jobs_input.len() as u64),
+        Some(format!("compiling {} sources", jobs_input.len())),
+    ));
+    let user = read_user_config()?;
+    let rebuild = ws.config.rebuild.clone().unwrap_or_default();
+    let runner_names = if rebuild.runners.is_empty() {
+        profile.runners.clone()
+    } else {
+        rebuild.runners.clone()
+    };
+    // every input (tool fingerprint, sources, headers, cached objects) is read once, here
+    let plan = if jobs_input.is_empty() {
+        None
+    } else {
+        Some(plan_compile(ws, profile, jobs_input, run_dir).map_err(toolchain)?)
+    };
+    let input_hashes = plan
+        .as_ref()
+        .map(|p| p.input_hashes().clone())
+        .unwrap_or_default();
+    let needs_runner = plan.as_ref().is_some_and(|p| p.misses() > 0);
+    let runners = if needs_runner {
+        let (runners, more) = open_runners(&runner_names, ws, &user);
+        warnings.extend(more);
+        runners
+    } else {
+        Vec::new()
+    };
+    let (files, more) = match plan {
+        None => (Vec::new(), Vec::new()),
+        Some(plan) => {
+            compile_planned(ws, profile, plan, run_dir, &runners, None).map_err(toolchain)?
+        }
+    };
+    drop(runners);
+    warnings.extend(more);
+    Ok(Compiled {
+        files,
+        input_hashes,
+        warnings,
+    })
+}
+
+/// Why a file without object failed.
+fn failure_text(file: &CompiledFile) -> String {
+    if file.message.is_empty() {
+        "compile failed".to_string()
+    } else {
+        file.message.clone()
+    }
+}
+
+/// The outcome of one variant.
+struct VariantResult {
+    /// 1-based: the variant's position in the request, also the number in its staged name (`V001.C`).
+    index: usize,
+    label: Option<String>,
+    verdict: &'static str,
+    /// The variant has a comparison with the original (compiled, function found, original bytes available).
+    checked: bool,
+    instructions_differing: u32,
+    differing: u32,
+    refs_wrong: u32,
+    blockers: Vec<BlockerRecord>,
+    message: Option<String>,
+}
+
+impl VariantResult {
+    fn unchecked(
+        index: usize,
+        label: Option<String>,
+        verdict: &'static str,
+        message: String,
+    ) -> Self {
+        VariantResult {
+            index,
+            label,
+            verdict,
+            checked: false,
+            instructions_differing: 0,
+            differing: 0,
+            refs_wrong: 0,
+            blockers: Vec::new(),
+            message: Some(message),
+        }
+    }
+
+    /// Variants with a comparison first; among them identical first, then fewer differing instructions, then fewer
+    /// differing bytes plus wrong references, then the order of the request.
+    fn rank(&self) -> (bool, bool, u32, u32, usize) {
+        (
+            !self.checked,
+            self.verdict != "identical",
+            self.instructions_differing,
+            self.differing.saturating_add(self.refs_wrong),
+            self.index,
+        )
+    }
+
+    fn json(&self) -> Value {
+        let mut v = json!({
+            "index": self.index,
+            "label": self.label,
+            "verdict": self.verdict,
+            "instructions_differing": self.instructions_differing,
+            "differing": self.differing,
+            "refs_wrong": self.refs_wrong,
+            "blockers": self.blockers.iter().map(blocker_json).collect::<Vec<_>>(),
+        });
+        if let Some(m) = &self.message {
+            v["message"] = json!(m);
+        }
+        v
+    }
+}
+
+/// `build` with variants: compiles the candidate sources of `request.variants` for `request.function` (all cache
+/// misses in one runner request), compares the function of each variant's object with the original and ranks the
+/// variants. Records, kept objects and output files stay untouched.
+fn build_variants(
+    root: &Path,
+    request: &BuildRequest,
+    progress: &dyn Fn(Progress),
+    started: Instant,
+) -> Result<Response, FacadeError> {
+    let function = request.function.as_deref().ok_or_else(|| {
+        FacadeError::Invalid("build with variants needs a function (--function <name>)".into())
+    })?;
+    if request.variants.len() > MAX_VARIANTS {
+        return Err(FacadeError::Invalid(format!(
+            "at most {MAX_VARIANTS} variants per call, got {}",
+            request.variants.len()
+        )));
+    }
+    if request.files.len() > 1 {
+        return Err(FacadeError::Invalid(
+            "build with variants takes at most one file (the one the variants replace)".into(),
+        ));
+    }
+    let ws = Workspace::open(root)?;
+    let analysis = Analysis::load(root)?.filter(|a| a.target_sha256 == ws.config.target.sha256);
+    let (profile, default_flags) = rebuild_profile(&ws).map_err(toolchain)?;
+    let rebuild = ws.config.rebuild.clone().unwrap_or_default();
+    let file = match request.files.first() {
+        Some(file) => file.clone(),
+        None => file_of_function(root, function)?,
+    };
+    let flags = file_flags(&rebuild.file_flags, &file)
+        .cloned()
+        .unwrap_or(default_flags);
+    // the variants replace `file`; the headers of src/ are staged beside them
+    let set = find_sources(&root.join(SOURCE_DIR), &[]).map_err(toolchain)?;
+    let run_dir = RunDir(root.join(RUNS_DIR).join(format!(
+        "build-{}-{}",
+        std::process::id(),
+        BUILD_COUNTER.fetch_add(1, Ordering::Relaxed)
+    )));
+    if run_dir.0.exists() {
+        std::fs::remove_dir_all(&run_dir.0).map_err(|source| FacadeError::Output {
+            path: run_dir.0.clone(),
+            source,
+        })?;
+    }
+    for header in &set.headers {
+        let text = read_text(header)?;
+        stage_text(&file_name(header), &text, &run_dir.0).map_err(toolchain)?;
+    }
+    let staged_name = |i: usize| format!("V{:03}.C", i + 1);
+    let mut errors: Vec<Option<String>> = vec![None; request.variants.len()];
+    let mut jobs_input: Vec<(String, String)> = Vec::new();
+    let mut staged: Vec<usize> = Vec::new();
+    for (i, variant) in request.variants.iter().enumerate() {
+        match stage_text(&staged_name(i), &variant.source, &run_dir.0) {
+            Ok(dos_name) => {
+                jobs_input.push((dos_name, flags.clone()));
+                staged.push(i);
+            }
+            Err(e) => errors[i] = Some(e.to_string()),
+        }
+    }
+
+    let compile_started = Instant::now();
+    let Compiled {
+        files: compiled,
+        mut warnings,
+        ..
+    } = compile_jobs(&ws, &profile, &jobs_input, &run_dir.0, progress)?;
+    drop(run_dir);
+    let jobs = compiled.iter().filter(|c| !c.cached).count();
+    let cached = compiled.len() - jobs;
+    let compile_ms = ms(compile_started.elapsed());
+
+    // compare the function of each variant's object
+    let compare_started = Instant::now();
+    let mut objects: Vec<Option<ObjectFile>> = Vec::new();
+    objects.resize_with(request.variants.len(), || None);
+    for (&i, file) in staged.iter().zip(&compiled) {
+        match &file.object {
+            None => errors[i] = Some(failure_text(file)),
+            Some(bytes) => match read_omf(bytes, &staged_name(i)) {
+                Ok(object) => objects[i] = Some(object),
+                Err(e) => errors[i] = Some(format!("cannot read the object: {e}")),
+            },
+        }
+    }
+    let knowledge = KnowledgeView::new(&ws, analysis.as_ref());
+    let index = analysis.as_ref().map(Analysis::index);
+    let symbol_sizes = symbol_sizes(&ws);
+    let options = ModuleOptions::new(profile.padding, rebuild.frames.clone());
+    let mut program = None;
+    let mut results: Vec<VariantResult> = Vec::new();
+    for (i, variant) in request.variants.iter().enumerate() {
+        let (number, label) = (i + 1, variant.label.clone());
+        if let Some(message) = errors[i].take() {
+            results.push(VariantResult::unchecked(number, label, "error", message));
+            continue;
+        }
+        let Some(object) = &objects[i] else {
+            continue;
+        };
+        let found = object.modules.iter().find_map(|module| {
+            functions(module)
+                .into_iter()
+                .filter(|f| is_public(f))
+                .find_map(|view| {
+                    let (name, address) = place_name(&knowledge, &profile, view.name)?;
+                    (name == function || address.to_string() == function)
+                        .then_some((view, name, address))
+                })
+        });
+        let Some((view, name, address)) = found else {
+            results.push(VariantResult::unchecked(
+                number,
+                label,
+                "unchecked",
+                format!(
+                    "the object does not define {function} (or it has no counterpart in the original)"
+                ),
+            ));
+            continue;
+        };
+        let placements = [Placement::new(
+            view,
+            address,
+            original_len(index.as_ref(), &symbol_sizes, address),
+        )];
+        if program.is_none() {
+            program = Some(crate::program::load(&ws)?);
+        }
+        let Some(program) = program.as_ref() else {
+            continue;
+        };
+        let module = decovery_diff::compare_module(
+            &placements,
+            program,
+            &knowledge,
+            &profile.decoration,
+            &options,
+        );
+        warnings.extend(module.warnings);
+        let Some(comparison) = module.functions.into_iter().next() else {
+            results.push(VariantResult::unchecked(
+                number,
+                label,
+                "unchecked",
+                format!("{function} was not compared"),
+            ));
+            continue;
+        };
+        let m = &comparison.metrics;
+        let mut verdict = verdict_id(&comparison.verdict);
+        let checked = verdict != VerdictId::Unchecked;
+        let mut blockers: Vec<BlockerRecord> =
+            comparison.blockers.iter().map(blocker_record).collect();
+        let mut message = (!checked)
+            .then(|| "the original bytes of the function are not in the program".to_string());
+        // inline assembly is never identical (find_cheats needs LF text)
+        let text = variant.source.replace("\r\n", "\n");
+        let findings: Vec<CheatFinding> = find_cheats(&text)
+            .into_iter()
+            .filter(|f| f.function.as_deref() == Some(name))
+            .collect();
+        if !findings.is_empty() {
+            blockers.push(blocker_record(&Blocker::InlineAssembly));
+            if checked {
+                verdict = VerdictId::Differs;
+            }
+            let found = findings
+                .iter()
+                .map(|f| format!("line {}: {} {}", f.line, f.kind.id(), f.text))
+                .collect::<Vec<_>>()
+                .join("\n");
+            message = Some(match message {
+                Some(before) => format!("{before}\n{found}"),
+                None => found,
+            });
+        }
+        results.push(VariantResult {
+            index: number,
+            label,
+            verdict: verdict.id(),
+            checked,
+            instructions_differing: m.instructions_differing,
+            differing: m.differing,
+            refs_wrong: m.refs_wrong,
+            blockers,
+            message,
+        });
+    }
+    results.sort_by_key(VariantResult::rank);
+    let compare_ms = ms(compare_started.elapsed());
+
+    let best = results.first().filter(|r| r.checked);
+    let failed = results.iter().filter(|r| r.verdict == "error").count();
+    let n = results.len();
+    let mut summary = format!("{function}: {n} variant{}", if n == 1 { "" } else { "s" });
+    match best {
+        Some(r) => summary.push_str(&format!(
+            ", best variant {} {} ({} instructions, {} bytes differ)",
+            r.index, r.verdict, r.instructions_differing, r.differing
+        )),
+        None => summary.push_str(", none could be compared"),
+    }
+    if failed > 0 {
+        summary.push_str(&format!("; {failed} failed to compile"));
+    }
+    Ok(Response::new(
+        summary,
+        json!({
+            "function": function,
+            "best": best.map(|r| r.index),
+            "variants": results.iter().map(VariantResult::json).collect::<Vec<_>>(),
+            "warnings": warnings,
+            "timing": {
+                "compile_ms": compile_ms,
+                "compare_ms": compare_ms,
+                "total_ms": ms(started.elapsed()),
+                "jobs": jobs,
+                "cached": cached,
+            },
+        }),
+    ))
+}
+
+fn blocker_json(b: &BlockerRecord) -> Value {
+    let mut v = json!({ "kind": b.kind });
+    if let Some(at) = b.at {
+        v["at"] = json!(at);
+    }
+    if let Some(count) = b.count {
+        v["count"] = json!(count);
+    }
+    v
 }
 
 fn read_text(path: &Path) -> Result<String, FacadeError> {
@@ -662,12 +1080,7 @@ fn function_json(r: &RebuildRecord) -> Value {
         "file": r.file,
         "verdict": r.verdict.map(VerdictId::id),
         "result": r.result.id(),
-        "blockers": r.blockers.iter().map(|b| {
-            let mut v = json!({ "kind": b.kind });
-            if let Some(at) = b.at { v["at"] = json!(at); }
-            if let Some(count) = b.count { v["count"] = json!(count); }
-            v
-        }).collect::<Vec<_>>(),
+        "blockers": r.blockers.iter().map(blocker_json).collect::<Vec<_>>(),
         "bytes": r.bytes,
         "differing": r.differing,
         "instructions_differing": r.instructions_differing,
