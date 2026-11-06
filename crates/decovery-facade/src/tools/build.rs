@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use decovery_core::{
     Address, Analysis, BlockerRecord, RebuildRecord, RebuildResult, VerdictId, Workspace,
@@ -13,8 +13,8 @@ use decovery_diff::{Blocker, Comparison, ModuleOptions, Placement, SymbolView, V
 use decovery_objects::{FunctionView, ObjectFile, functions, read_omf};
 use decovery_plugin::Progress;
 use decovery_toolchain::{
-    CheatFinding, CompiledFile, cache_misses, compile, find_cheats, find_sources, open_runners,
-    rebuild_profile, stage_text,
+    CheatFinding, CompiledFile, compile_planned, find_cheats, find_sources, open_runners,
+    plan_compile, rebuild_profile, stage_text,
 };
 use serde_json::{Value, json};
 
@@ -106,6 +106,31 @@ fn file_flags<'a>(table: &'a BTreeMap<String, String>, name: &str) -> Option<&'a
         })
 }
 
+/// Size and modification time of the files a [`Session`] is read from (configuration, symbols, analysis): when they
+/// are unchanged at record time, the session is built from what the build already holds instead of read again.
+#[derive(Debug, PartialEq, Eq)]
+struct SessionStamps(Vec<Option<(u64, Option<SystemTime>)>>);
+
+impl SessionStamps {
+    fn of(root: &Path) -> Self {
+        let files = [
+            decovery_core::workspace::CONFIG_FILE,
+            decovery_core::workspace::SYMBOLS_FILE,
+            decovery_core::analysis::ANALYSIS_FILE,
+        ];
+        SessionStamps(
+            files
+                .iter()
+                .map(|f| {
+                    std::fs::metadata(root.join(f))
+                        .ok()
+                        .map(|m| (m.len(), m.modified().ok()))
+                })
+                .collect(),
+        )
+    }
+}
+
 fn file_name(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -127,6 +152,7 @@ pub fn build(
             "build variants are not supported yet".into(),
         ));
     }
+    let stamps = SessionStamps::of(root);
     let ws = Workspace::open(root)?;
     let analysis = Analysis::load(root)?.filter(|a| a.target_sha256 == ws.config.target.sha256);
     let (profile, default_flags) = rebuild_profile(&ws).map_err(toolchain)?;
@@ -211,8 +237,17 @@ pub fn build(
     } else {
         rebuild.runners.clone()
     };
-    let needs_runner = !jobs_input.is_empty()
-        && cache_misses(&ws, &profile, &jobs_input, &run_dir.0).map_err(toolchain)? > 0;
+    // every input (tool fingerprint, sources, headers, cached objects) is read once, here
+    let plan = if jobs_input.is_empty() {
+        None
+    } else {
+        Some(plan_compile(&ws, &profile, &jobs_input, &run_dir.0).map_err(toolchain)?)
+    };
+    let input_hashes = plan
+        .as_ref()
+        .map(|p| p.input_hashes().clone())
+        .unwrap_or_default();
+    let needs_runner = plan.as_ref().is_some_and(|p| p.misses() > 0);
     let runners = if needs_runner {
         let (runners, more) = open_runners(&runner_names, &ws, &user);
         warnings.extend(more);
@@ -220,10 +255,11 @@ pub fn build(
     } else {
         Vec::new()
     };
-    let (compiled, more) = if jobs_input.is_empty() {
-        (Vec::new(), Vec::new())
-    } else {
-        compile(&ws, &profile, &jobs_input, &run_dir.0, &runners, None).map_err(toolchain)?
+    let (compiled, more) = match plan {
+        None => (Vec::new(), Vec::new()),
+        Some(plan) => {
+            compile_planned(&ws, &profile, plan, &run_dir.0, &runners, None).map_err(toolchain)?
+        }
     };
     drop(runners);
     warnings.extend(more);
@@ -239,7 +275,6 @@ pub fn build(
         }
         sources[i].compiled = Some(file);
     }
-    let input_hashes = input_hashes(&run_dir.0)?;
     drop(run_dir);
     let compile_ms = ms(compile_started.elapsed());
 
@@ -259,6 +294,7 @@ pub fn build(
     // place every public function of a code section at its original
     let knowledge = KnowledgeView::new(&ws, analysis.as_ref());
     let index = analysis.as_ref().map(Analysis::index);
+    let symbol_sizes = symbol_sizes(&ws);
     let mut hints: Vec<String> = Vec::new();
     let mut placements: Vec<Placement<'_>> = Vec::new();
     let mut placed: Vec<Built> = Vec::new();
@@ -297,7 +333,7 @@ pub fn build(
                             .checked_sub(f.start.linear()?)?
                             .checked_add(1)
                     })
-                    .or_else(|| symbol_size(&ws, address))
+                    .or_else(|| symbol_sizes.get(&address).copied().flatten())
                     .and_then(|n| u32::try_from(n).ok());
                 let code_hash = blake3::hash(view.code()).to_hex()[..16].to_string();
                 placed.push(Built {
@@ -428,8 +464,17 @@ pub fn build(
     let merged = merge_rebuild(old, new_records.clone(), &built_files, all, &existing_files);
     save_rebuild(root, &merged, &lock)?;
     keep_objects(root, &sources, &new_records, &input_hashes, &profile.id)?;
-    if analysis.is_some() {
-        let session = Session::open(root)?;
+    if let Some(analysis) = analysis {
+        // what the build loaded is still what is on disk (checked under the lock): no second parse
+        let session = if SessionStamps::of(root) == stamps {
+            Session {
+                workspace: ws,
+                analysis,
+                rebuild: merged,
+            }
+        } else {
+            Session::open(root)?
+        };
         write_affected(
             &session,
             &Change::Rebuild {
@@ -482,43 +527,6 @@ fn is_c(name: &str) -> bool {
     name.to_ascii_lowercase().ends_with(".c")
 }
 
-/// Name and bytes of every staged file.
-fn staged_files(build_dir: &Path) -> std::io::Result<Vec<(String, Vec<u8>)>> {
-    let mut out = Vec::new();
-    if !build_dir.exists() {
-        return Ok(out);
-    }
-    for entry in std::fs::read_dir(build_dir)? {
-        let entry = entry?;
-        if entry.path().is_file() {
-            out.push((
-                entry.file_name().to_string_lossy().into_owned(),
-                std::fs::read(entry.path())?,
-            ));
-        }
-    }
-    out.sort();
-    Ok(out)
-}
-
-/// blake3 of every staged input (sources and headers), by DOS name.
-fn input_hashes(build_dir: &Path) -> Result<BTreeMap<String, String>, FacadeError> {
-    let files = staged_files(build_dir).map_err(|source| FacadeError::Output {
-        path: build_dir.to_path_buf(),
-        source,
-    })?;
-    Ok(files
-        .into_iter()
-        .filter(|(n, _)| {
-            let upper = n.to_ascii_uppercase();
-            [".C", ".H", ".S", ".ASM"]
-                .iter()
-                .any(|e| upper.ends_with(e))
-        })
-        .map(|(n, b)| (n, blake3::hash(&b).to_hex().to_string()))
-        .collect())
-}
-
 fn is_public(f: &FunctionView<'_>) -> bool {
     f.module
         .symbols
@@ -526,11 +534,17 @@ fn is_public(f: &FunctionView<'_>) -> bool {
         .any(|s| s.public && s.name == f.name && s.section == f.section && s.offset == f.start)
 }
 
-fn symbol_size(ws: &Workspace, at: Address) -> Option<u64> {
-    ws.symbols
+/// The `size` of the first active (not refuted) symbol at each address, built once per build.
+fn symbol_sizes(ws: &Workspace) -> HashMap<Address, Option<u64>> {
+    let mut sizes = HashMap::new();
+    for s in ws
+        .symbols
         .iter()
-        .find(|s| s.address == at && s.confidence != decovery_core::Confidence::Refuted)
-        .and_then(|s| s.size)
+        .filter(|s| s.confidence != decovery_core::Confidence::Refuted)
+    {
+        sizes.entry(s.address).or_insert(s.size);
+    }
+    sizes
 }
 
 fn verdict_id(v: &Verdict) -> VerdictId {

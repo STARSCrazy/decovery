@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use decovery_plugin::{CallOptions, CancelToken, PluginError, PluginHost, Progress};
+use decovery_plugin::{CallOptions, CancelToken, Limits, PluginError, PluginHost, Progress};
 use serde_json::json;
 
 fn python() -> Option<OsString> {
@@ -51,6 +51,7 @@ fn round_trip() {
         host.info().capabilities,
         [("echo".to_string(), 1u32)].into()
     );
+    assert_eq!(host.info().limits("echo"), Limits::new(3, Some(64)));
     let out = host.call("echo/ping", json!({"x": 1}), opts(LONG)).unwrap();
     assert_eq!(out, json!({"x": 1}));
     let err = host.call("nope/x", json!({}), opts(LONG)).unwrap_err();

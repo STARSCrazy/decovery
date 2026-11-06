@@ -15,6 +15,7 @@ from __future__ import annotations
 import re
 import struct
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 from decovery_plugin import RpcError
@@ -71,6 +72,14 @@ def _program_kind(data: bytes) -> tuple[str | None, str]:
         if signature in (b"LE", b"LX", b"NE", b"PE"):
             return None, f"{signature.decode()} executable"
     return "realmode", "real-mode MZ program"
+
+
+@lru_cache(maxsize=64)
+def _program_kind_of_file(path: str, size: int, mtime_ns: int) -> tuple[str | None, str]:
+    """`_program_kind` of a file, read once per version (size, modification time): every job of a request runs the
+    same compiler, which is hundreds of KB."""
+    with open(path, "rb") as f:
+        return _program_kind(f.read())
 
 
 def choose_host(data: bytes) -> str | None:
@@ -161,7 +170,8 @@ def plan(
                 text = host_path.read_bytes().decode("cp437")
                 lines(text.replace("\r", "").split("\n"), depth + 1)
                 continue
-            host, kind = _program_kind(host_path.read_bytes())
+            stat = host_path.stat()
+            host, kind = _program_kind_of_file(str(host_path), stat.st_size, stat.st_mtime_ns)
             if host is None or host not in hosts:
                 raise RpcError(RUNNER_UNSUPPORTED, f"{dos_path}: {kind} cannot be run by unicorn-dos")
             steps.append(

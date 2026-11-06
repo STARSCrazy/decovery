@@ -15,6 +15,20 @@ fn prints_version() {
 }
 
 #[test]
+fn jobs_must_be_positive() {
+    let out = Command::new(env!("CARGO_BIN_EXE_decovery"))
+        .args(["--jobs", "0", "status"])
+        .output()
+        .expect("run decovery");
+    assert_eq!(out.status.code(), Some(2));
+    let help = Command::new(env!("CARGO_BIN_EXE_decovery"))
+        .args(["build", "--help"])
+        .output()
+        .expect("run decovery");
+    assert!(String::from_utf8_lossy(&help.stdout).contains("--jobs"));
+}
+
+#[test]
 fn compare_without_workspace_exits_with_2() {
     let dir = tempfile::tempdir().unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_decovery"))

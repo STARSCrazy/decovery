@@ -1,6 +1,8 @@
+import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -11,6 +13,7 @@ sys.path.insert(0, str(HERE.parent.parent / "decovery-plugin-sdk"))
 import asm  # noqa: E402
 from decovery_plugin import RpcError  # noqa: E402
 
+from decovery_unicorn_dos import batch  # noqa: E402
 from decovery_unicorn_dos.batch import choose_host, plan  # noqa: E402
 
 PRELUDE = ["SET WATCOM=D:\\", "SET INCLUDE=D:\\H", "SET PATH=D:\\BINW"]
@@ -29,6 +32,24 @@ class BatchTest(unittest.TestCase):
         (self.d / "binw" / "realtool.exe").write_bytes(asm.plain_mz())
         (self.d / "binw" / "letool.exe").write_bytes(asm.le_exe())
         self.drives = {"C": self.c, "D": self.d}
+
+    def test_program_is_read_once_per_version(self):
+        reads = []
+        original = batch._program_kind
+
+        def counting(data):
+            reads.append(len(data))
+            return original(data)
+
+        with mock.patch.object(batch, "_program_kind", counting):
+            for name in ("A.C", "B.C", "C.C"):
+                plan(PRELUDE + [f"WCC386 {name}"], self.drives)
+            self.assertEqual(len(reads), 1)  # three jobs, one read of the compiler
+            program = self.d / "binw" / "wcc386.exe"
+            stat = program.stat()
+            os.utime(program, ns=(stat.st_atime_ns, stat.st_mtime_ns + 2_000_000_000))
+            plan(PRELUDE + ["WCC386 D.C"], self.drives)
+            self.assertEqual(len(reads), 2)  # a changed program is read again
 
     def test_set_lines_build_the_environment(self):
         steps = plan(PRELUDE + ["SET WATCOM=", "WCC386 -zq -ox -3r A.C"], self.drives)

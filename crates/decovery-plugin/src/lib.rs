@@ -6,4 +6,4 @@ mod host;
 pub mod protocol;
 
 pub use host::{CallOptions, CancelToken, PluginError, PluginHost};
-pub use protocol::{Blob, BlobError, PROTOCOL, PluginInfo, Progress};
+pub use protocol::{Blob, BlobError, Limits, PROTOCOL, PluginInfo, Progress};

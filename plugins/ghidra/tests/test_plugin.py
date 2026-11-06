@@ -184,7 +184,14 @@ class PluginTests(unittest.TestCase):
         out = run(self.plugin, req(1, "initialize", {"protocol": "decovery-plugin/1", "host_version": "0"}))
         result = by_id(out, 1)["result"]
         self.assertEqual(result["name"], "ghidra")
-        self.assertEqual(result["capabilities"], {"analyzer": {"version": 2}, "decompiler": {"version": 2}})
+        self.assertEqual({c: v["version"] for c, v in result["capabilities"].items()}, {"analyzer": 2, "decompiler": 2})
+
+    def test_initialize_declares_limits(self):
+        out = run(self.plugin, req(1, "initialize", {"protocol": "decovery-plugin/1", "host_version": "0"}))
+        capabilities = by_id(out, 1)["result"]["capabilities"]
+        for name in ("analyzer", "decompiler"):
+            # one program and one decompiler per process; a JVM with Ghidra needs about 2 GB
+            self.assertEqual(capabilities[name]["limits"], {"max_parallel": 1, "memory_per_instance_mb": 2048})
 
     # -- open ----------------------------------------------------------------------------------------------------
 

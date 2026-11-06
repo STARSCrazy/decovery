@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import unittest
 
@@ -52,6 +53,21 @@ class ServerTests(unittest.TestCase):
                 "capabilities": {"echo": {"version": 1}, "analyzer": {"version": 2}},
             },
         )
+
+    def test_initialize_declares_limits(self):
+        plugin = self.make()
+        plugin.set_limits("analyzer", max_parallel=4, memory_per_instance_mb=512)
+        out = run(plugin, req(1, "initialize", {"protocol": "decovery-plugin/1", "host_version": "0"}))
+        capabilities = by_id(out, 1)["result"]["capabilities"]
+        self.assertEqual(
+            capabilities["analyzer"],
+            {"version": 2, "limits": {"max_parallel": 4, "memory_per_instance_mb": 512}},
+        )
+        self.assertEqual(capabilities["echo"], {"version": 1})  # no limits declared: the host assumes 1
+
+    def test_limits_must_be_positive(self):
+        with self.assertRaises(ValueError):
+            Plugin("demo", "1").set_limits("a", max_parallel=0)
 
     def test_dispatches_registered_method(self):
         out = run(self.make(), req(1, "echo/ping", {"x": 1}))
@@ -184,6 +200,33 @@ plugin.serve()
 """
 
 
+# A handler that prints, and a spawned child that prints and writes to fd 1 directly: none of it may reach the
+# protocol stream.
+PRINTING_PLUGIN = """
+import multiprocessing, os, sys
+sys.path.insert(0, sys.argv[1])
+from decovery_plugin import Plugin
+plugin = Plugin("noisy", "1")
+
+def child():
+    print("child print")
+    sys.stdout.flush()
+    os.write(1, b"child fd 1\\n")
+
+@plugin.method("noisy/print")
+def noisy(params, ctx):
+    print("handler print")
+    os.write(1, b"handler fd 1\\n")
+    p = multiprocessing.get_context("spawn").Process(target=child)
+    p.start()
+    p.join(20)
+    return p.exitcode
+
+if __name__ == "__main__":
+    plugin.serve()
+"""
+
+
 def ask(proc, request, seconds):
     """Writes `request` and returns the parsed answer, or None when none comes within `seconds`."""
     proc.stdin.write(json.dumps(request) + "\n")
@@ -242,6 +285,33 @@ class StdioProcessTests(unittest.TestCase):
             proc.wait()
             proc.stdin.close()
             proc.stdout.close()
+
+
+class StdoutGuardTests(unittest.TestCase):
+    def test_worker_print_does_not_corrupt_protocol(self):
+        sdk = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        script = os.path.join(tmp.name, "noisy_plugin.py")  # a file: spawned children import its `child`
+        with open(script, "w", encoding="utf-8") as f:
+            f.write(PRINTING_PLUGIN)
+        proc = subprocess.Popen(
+            [sys.executable, script, sdk],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            encoding="utf-8",
+        )
+        try:
+            out, err = proc.communicate(
+                json.dumps(req(1, "noisy/print")) + "\n" + json.dumps(req(2, "shutdown")) + "\n", timeout=60
+            )
+        finally:
+            proc.kill()
+        lines = [json.loads(line) for line in out.splitlines()]  # every stdout line is a protocol message
+        self.assertEqual(by_id(lines, 1)["result"], 0)
+        for text in ("handler print", "handler fd 1", "child print", "child fd 1"):
+            self.assertIn(text, err)  # what the code printed went to stderr (logs)
 
 
 if __name__ == "__main__":

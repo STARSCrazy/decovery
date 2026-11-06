@@ -1,11 +1,13 @@
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -41,6 +43,25 @@ def run(plugin, *messages):
 
 def request(request_id, method, params=None):
     return {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params or {}}
+
+
+def pid_of(job):
+    """Worker that answers with its process id."""
+    return {"status": "done", "exit_code": 0, "stdout": str(os.getpid()), "message": None}
+
+
+def timed(job):
+    """Worker that sleeps `sleep` seconds and answers with its start and end time (in stdout)."""
+    start = time.time()
+    time.sleep(job.get("sleep", 0))
+    return {"status": "done", "exit_code": 0, "stdout": f"{start} {time.time()}", "message": None}
+
+
+def noisy(job):
+    """Worker that prints and writes to fd 1 directly."""
+    print("worker print", flush=True)
+    os.write(1, b"worker fd 1\n")
+    return {"status": "done", "exit_code": 0, "stdout": "", "message": None}
 
 
 def die(job):
@@ -93,7 +114,16 @@ class PluginProtocolTest(unittest.TestCase):
         answers = run(build_plugin(), request(1, "initialize"), request(2, "shutdown"))
         result = answers[1]["result"]
         self.assertEqual(result["name"], "unicorn-dos")
-        self.assertEqual(result["capabilities"], {"runner": {"version": 1}})
+        self.assertEqual(set(result["capabilities"]), {"runner"})
+
+    def test_initialize_declares_limits(self):
+        with mock.patch.dict(os.environ):
+            os.environ.pop("DECOVERY_UNICORN_PARALLEL", None)
+            answers = run(build_plugin(), request(1, "initialize"), request(2, "shutdown"))
+        runner = answers[1]["result"]["capabilities"]["runner"]
+        self.assertEqual(runner["version"], 1)
+        self.assertEqual(runner["limits"]["max_parallel"], os.cpu_count())  # scales with the cores
+        self.assertGreaterEqual(runner["limits"]["memory_per_instance_mb"], 1)
 
     def test_unsupported_program_is_refused_before_any_job(self):
         ws = Workspace(self)
@@ -205,6 +235,66 @@ class JobPoolTest(unittest.TestCase):
             outcomes = pool.run([{"n": 7, "die_once": str(Path(tmp) / "marker")}])
         self.assertEqual(outcomes[0]["status"], "done")
         self.assertEqual(outcomes[0]["exit_code"], 7)
+
+    def test_pool_is_reused_across_requests(self):
+        pool = JobPool(workers=2, worker=pid_of)
+        self.addCleanup(pool.close)
+        first = {o["stdout"] for o in pool.run([{}, {}, {}, {}])}
+        second = {o["stdout"] for o in pool.run([{}, {}, {}, {}])}
+        self.assertTrue(second <= first, f"new worker processes for the second request: {second - first}")
+        self.assertLessEqual(len(first), 2)
+
+    def test_plugin_keeps_one_pool(self):
+        pools = []
+        original = JobPool.__init__
+
+        def record(self, *args, **kwargs):
+            original(self, *args, **kwargs)
+            pools.append(self)
+
+        JobPool.__init__ = record
+        self.addCleanup(setattr, JobPool, "__init__", original)
+        ws = Workspace(self)
+        plugin = build_plugin()
+        run(plugin, request(1, "runner/run", ws.params(["ECHO a"])), request(2, "runner/run", ws.params(["ECHO b"])))
+        self.assertEqual(len(pools), 1)
+
+    def test_in_flight_jobs_stay_within_request_share(self):
+        pool = JobPool(workers=4, worker=timed)
+        self.addCleanup(pool.close)
+        outcomes = pool.run([{"sleep": 0.4} for _ in range(4)], parallel=2)
+        spans = [tuple(map(float, o["stdout"].split())) for o in outcomes]
+        most = max(sum(1 for s, e in spans if s <= t < e) for t, _ in spans)
+        self.assertEqual(most, 2)
+
+    def test_longest_job_first(self):
+        pool = JobPool(workers=1, worker=timed)
+        self.addCleanup(pool.close)
+        jobs = [{"cost": 10}, {"cost": 300}, {"cost": 20}, {}]
+        outcomes = pool.run([dict(job, sleep=0.05) for job in jobs])
+        starts = [float(o["stdout"].split()[0]) for o in outcomes]
+        self.assertEqual(sorted(range(4), key=lambda i: starts[i]), [1, 2, 0, 3])  # results stay in job order
+
+    def test_worker_print_does_not_corrupt_protocol(self):
+        script = (
+            "import json, sys\n"
+            f"sys.path[:0] = {[str(HERE), str(HERE.parent), str(HERE.parent.parent / 'decovery-plugin-sdk')]!r}\n"
+            "from decovery_unicorn_dos.pool import JobPool\n"
+            "from test_plugin import noisy\n"
+            "if __name__ == '__main__':\n"
+            "    pool = JobPool(workers=2, worker=noisy)\n"
+            "    outcomes = pool.run([{}, {}])\n"
+            "    pool.close()\n"
+            "    print(json.dumps([o['status'] for o in outcomes]))\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pool_main.py"
+            path.write_text(script, encoding="utf-8")
+            proc = subprocess.run([sys.executable, str(path)], capture_output=True, text=True, timeout=120)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(json.loads(proc.stdout), ["done", "done"])  # nothing but the parent's own line
+        self.assertIn("worker print", proc.stderr)
+        self.assertIn("worker fd 1", proc.stderr)
 
     def test_unexpected_exception_is_an_emulation_error(self):
         ws = Workspace(self)

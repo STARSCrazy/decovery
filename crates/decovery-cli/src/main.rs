@@ -27,6 +27,9 @@ struct Cli {
     /// Print the result as JSON.
     #[arg(long, global = true)]
     json: bool,
+    /// Most compile jobs in flight at once over all runners; default: the number of logical cores.
+    #[arg(long, global = true, value_parser = clap::value_parser!(u32).range(1..))]
+    jobs: Option<u32>,
     #[command(subcommand)]
     command: Command,
 }
@@ -261,6 +264,9 @@ enum Sort {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if let Some(jobs) = cli.jobs {
+        decovery_toolchain::set_global_jobs(jobs);
+    }
     match cli.command {
         Command::Migrate { from, to } => finish(migrate(&from, &to, cli.json)),
         Command::Compare {

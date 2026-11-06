@@ -13,7 +13,8 @@ use crate::workspace::{SCHEMA, SYMBOLS_FILE, WorkspaceError};
 
 /// Directory below the workspace root that holds the analysis.
 pub const ANALYSIS_DIR: &str = "knowledge/analysis";
-const ANALYSIS_FILE: &str = "knowledge/analysis/analysis.json";
+/// The stored analysis, relative to the workspace root.
+pub const ANALYSIS_FILE: &str = "knowledge/analysis/analysis.json";
 const DECOMPILED_DIR: &str = "knowledge/analysis/decompiled";
 
 /// The tool that produced an analysis (`ghidra`, `decomp-import`).

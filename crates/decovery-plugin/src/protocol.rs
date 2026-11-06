@@ -30,6 +30,40 @@ pub struct PluginInfo {
     pub protocol: String,
     /// Capability name to capability version.
     pub capabilities: BTreeMap<String, u32>,
+    /// Declared limits by capability; a capability without an entry runs one job at a time.
+    pub limits: BTreeMap<String, Limits>,
+}
+
+impl PluginInfo {
+    /// The limits declared for `capability`, or the default (one job at a time).
+    pub fn limits(&self, capability: &str) -> Limits {
+        self.limits.get(capability).copied().unwrap_or_default()
+    }
+}
+
+/// How many jobs of a capability a plugin runs at once, and the memory each running instance needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Limits {
+    /// At least 1.
+    pub max_parallel: u32,
+    pub memory_per_instance_mb: Option<u32>,
+}
+
+impl Limits {
+    /// `max_parallel` below 1 counts as 1.
+    pub fn new(max_parallel: u32, memory_per_instance_mb: Option<u32>) -> Self {
+        Limits {
+            max_parallel: max_parallel.max(1),
+            memory_per_instance_mb,
+        }
+    }
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Limits::new(1, None)
+    }
 }
 
 /// A `$/progress` notification.
@@ -68,10 +102,30 @@ pub(crate) struct WireInfo {
 #[derive(Deserialize)]
 pub(crate) struct WireCapability {
     pub version: u32,
+    #[serde(default)]
+    pub limits: Option<WireLimits>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct WireLimits {
+    pub max_parallel: u32,
+    #[serde(default)]
+    pub memory_per_instance_mb: Option<u32>,
 }
 
 impl From<WireInfo> for PluginInfo {
     fn from(w: WireInfo) -> Self {
+        let limits = w
+            .capabilities
+            .iter()
+            .filter_map(|(k, v)| {
+                let l = v.limits.as_ref()?;
+                Some((
+                    k.clone(),
+                    Limits::new(l.max_parallel, l.memory_per_instance_mb),
+                ))
+            })
+            .collect();
         PluginInfo {
             name: w.name,
             version: w.version,
@@ -81,6 +135,7 @@ impl From<WireInfo> for PluginInfo {
                 .into_iter()
                 .map(|(k, v)| (k, v.version))
                 .collect(),
+            limits,
         }
     }
 }
@@ -249,6 +304,36 @@ fn base64_decode(text: &str) -> Result<Vec<u8>, BlobError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn initialize_reads_declared_limits() {
+        let wire: WireInfo = serde_json::from_value(serde_json::json!({
+            "name": "p", "version": "1", "protocol": PROTOCOL,
+            "capabilities": {
+                "runner": {"version": 1, "limits": {"max_parallel": 6, "memory_per_instance_mb": 256}},
+                "analyzer": {"version": 2},
+                "decompiler": {"version": 2, "limits": {"max_parallel": 2, "memory_per_instance_mb": null}}
+            }
+        }))
+        .unwrap();
+        let info = PluginInfo::from(wire);
+        assert_eq!(info.capabilities["runner"], 1);
+        assert_eq!(info.limits("runner"), Limits::new(6, Some(256)));
+        assert_eq!(info.limits("decompiler"), Limits::new(2, None));
+        // absent limits (and unknown capabilities) mean one job at a time
+        assert_eq!(info.limits("analyzer"), Limits::new(1, None));
+        assert_eq!(info.limits("other"), Limits::default());
+    }
+
+    #[test]
+    fn zero_max_parallel_is_one() {
+        let wire: WireInfo = serde_json::from_value(serde_json::json!({
+            "name": "p", "version": "1", "protocol": PROTOCOL,
+            "capabilities": {"runner": {"version": 1, "limits": {"max_parallel": 0}}}
+        }))
+        .unwrap();
+        assert_eq!(PluginInfo::from(wire).limits("runner").max_parallel, 1);
+    }
 
     #[test]
     fn base64_round_trips_all_tail_lengths() {

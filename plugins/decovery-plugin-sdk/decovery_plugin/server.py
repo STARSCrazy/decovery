@@ -84,6 +84,7 @@ class Plugin:
         self.version = version
         self._methods: dict[str, Handler] = {}
         self._capabilities: dict[str, int] = {}
+        self._limits: dict[str, dict[str, int | None]] = {}
         self._shutdown_hooks: list[Callable[[], None]] = []
 
     def method(self, name: str, capability_version: int = 1) -> Callable[[Handler], Handler]:
@@ -104,6 +105,19 @@ class Plugin:
 
         return register
 
+    def set_limits(self, capability: str, max_parallel: int, memory_per_instance_mb: int | None = None) -> None:
+        """Declare how many jobs of `capability` the plugin runs at once and the memory each instance needs; the
+        host keeps its in-flight jobs within `max_parallel` (1 when not declared)."""
+        if isinstance(max_parallel, bool) or not isinstance(max_parallel, int) or max_parallel < 1:
+            raise ValueError(f"max_parallel must be a positive integer: {max_parallel!r}")
+        if memory_per_instance_mb is not None and (
+            isinstance(memory_per_instance_mb, bool)
+            or not isinstance(memory_per_instance_mb, int)
+            or memory_per_instance_mb < 1
+        ):
+            raise ValueError(f"memory_per_instance_mb must be a positive integer: {memory_per_instance_mb!r}")
+        self._limits[capability] = {"max_parallel": max_parallel, "memory_per_instance_mb": memory_per_instance_mb}
+
     def on_shutdown(self, hook: Callable[[], None]) -> Callable[[], None]:
         """Run `hook` when the session ends (`shutdown` or end of input), after running requests had their
         grace period. Hooks run in registration order; one that raises does not stop the others."""
@@ -115,8 +129,14 @@ class Plugin:
             "name": self.name,
             "version": self.version,
             "protocol": PROTOCOL,
-            "capabilities": {c: {"version": v} for c, v in self._capabilities.items()},
+            "capabilities": {c: self._capability(c, v) for c, v in self._capabilities.items()},
         }
+
+    def _capability(self, name: str, version: int) -> dict:
+        entry: dict[str, Any] = {"version": version}
+        if name in self._limits:
+            entry["limits"] = dict(self._limits[name])
+        return entry
 
     def serve(self, stdin: io.TextIOBase | None = None, stdout: io.TextIOBase | None = None) -> None:
         """Blocking stdio loop. Returns after `shutdown` or end of input."""
@@ -131,7 +151,15 @@ class Plugin:
             os.dup2(null, sys.stdin.fileno())
             os.close(null)
         if stdout is None:
-            stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", newline="\n", write_through=True)
+            # The protocol writes to a duplicate of fd 1; fd 1 itself becomes the standard error. Whatever else
+            # prints (a handler, native code, a worker process inheriting the standard output) ends up in the logs
+            # and cannot corrupt the protocol stream.
+            sys.stdout.flush()
+            stdout = io.TextIOWrapper(
+                io.FileIO(os.dup(sys.stdout.fileno()), "wb"), encoding="utf-8", newline="\n", write_through=True
+            )
+            os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
+            sys.stdout = sys.stderr
         _Session(self, stdin, stdout).run()
 
 

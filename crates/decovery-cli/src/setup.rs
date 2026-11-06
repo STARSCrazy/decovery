@@ -349,8 +349,60 @@ struct Place<'a> {
     platform: Platform,
 }
 
+/// File in a plugin venv with the hash of the SDK and plugin sources installed into it.
+const SOURCES_STAMP: &str = "decovery-sources.sha256";
+
+/// Directories and files below a plugin source directory that are build output, not source.
+fn is_build_output(name: &str) -> bool {
+    name == "__pycache__"
+        || name == "build"
+        || name == "dist"
+        || name.starts_with('.')
+        || name.ends_with(".egg-info")
+        || name.ends_with(".pyc")
+}
+
+/// sha256 over the files below `dirs` (relative path and bytes, in path order), without build output.
+fn sources_hash(dirs: &[&Path]) -> Result<String, SetupError> {
+    fn walk(dir: &Path, rel: &str, out: &mut Vec<(String, PathBuf)>) -> Result<(), SetupError> {
+        let entries = std::fs::read_dir(dir).map_err(|e| io_err("cannot read", dir, e))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| io_err("cannot read", dir, e))?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if is_build_output(&name) {
+                continue;
+            }
+            let path = entry.path();
+            let rel = format!("{rel}/{name}");
+            if path.is_dir() {
+                walk(&path, &rel, out)?;
+            } else {
+                out.push((rel, path));
+            }
+        }
+        Ok(())
+    }
+    let mut hasher = Sha256::new();
+    for dir in dirs {
+        let mut files = Vec::new();
+        let top = dir.file_name().unwrap_or_default().to_string_lossy();
+        walk(dir, &top, &mut files)?;
+        files.sort();
+        for (rel, path) in files {
+            let bytes = std::fs::read(&path).map_err(|e| io_err("cannot read", &path, e))?;
+            hasher.update((rel.len() as u64).to_le_bytes());
+            hasher.update(rel.as_bytes());
+            hasher.update((bytes.len() as u64).to_le_bytes());
+            hasher.update(&bytes);
+        }
+    }
+    Ok(hex(&hasher.finalize()))
+}
+
 /// Creates the venv, installs the requirements, the SDK and the plugin, and registers `[plugins.<id>]`.
-/// A venv in which the plugin already imports is kept as it is. Returns the venv python and whether it was kept.
+/// A venv in which the plugin already imports is kept; the SDK and the plugin are installed into it again (without
+/// their dependencies) when their sources changed since the last install. Returns the venv python and whether the
+/// venv was kept.
 fn install_venv_plugin(
     spec: &VenvPlugin,
     place: &Place,
@@ -386,8 +438,28 @@ fn install_venv_plugin(
                 &["-c".into(), format!("import {}", spec.module).into()],
             )
             .is_ok();
+    let sources = sources_hash(&[&sdk, &plugin])?;
+    let stamp = venv.join(SOURCES_STAMP);
     if kept {
-        log("step: venv exists and the plugin imports");
+        let installed = std::fs::read_to_string(&stamp).unwrap_or_default();
+        if installed.trim() == sources {
+            log("step: venv exists, the plugin imports and its sources are unchanged");
+        } else {
+            log("step: venv exists; the SDK or plugin sources changed, reinstalling them");
+            run(
+                runner,
+                venv_python.as_os_str(),
+                &[
+                    "-m".into(),
+                    "pip".into(),
+                    "install".into(),
+                    "--no-deps".into(),
+                    "--force-reinstall".into(),
+                    sdk.clone().into_os_string(),
+                    plugin.clone().into_os_string(),
+                ],
+            )?;
+        }
     } else {
         run(
             runner,
@@ -433,6 +505,8 @@ fn install_venv_plugin(
         args.push(plugin.into_os_string());
         run(runner, venv_python.as_os_str(), &args)?;
     }
+    std::fs::write(&stamp, format!("{sources}\n"))
+        .map_err(|e| io_err("cannot write", &stamp, e))?;
 
     log(&format!(
         "step: writing [plugins.{}] to {}",
@@ -445,7 +519,7 @@ fn install_venv_plugin(
 }
 
 /// Creates `<extern>/unicorn-venv`, installs the SDK, the `unicorn-dos` plugin and the pinned unicorn, and
-/// registers `[plugins.unicorn-dos]`. A venv in which the plugin already imports is kept as it is.
+/// registers `[plugins.unicorn-dos]`. An existing venv is kept; changed SDK or plugin sources are reinstalled into it.
 pub fn run_unicorn_setup(
     opts: &UnicornOptions,
     runner: &dyn Runner,
@@ -1212,6 +1286,55 @@ mod tests {
                 .iter()
                 .any(|c| c.contains(&"pip".to_string()))
         );
+    }
+
+    #[test]
+    fn changed_package_is_reinstalled() {
+        let dir = tempfile::tempdir().unwrap();
+        let opts = unicorn_options(dir.path());
+        let plugin_file = opts.plugins_dir.join("unicorn-dos").join("pool.py");
+        std::fs::write(&plugin_file, "PARALLEL = 8\n").unwrap();
+        run_unicorn_setup(&opts, &FakeRunner::default(), &mut |_| {}).unwrap();
+
+        // unchanged sources (compiled files do not count): nothing to do
+        let cache = opts.plugins_dir.join("unicorn-dos").join("__pycache__");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("pool.cpython-312.pyc"), b"x").unwrap();
+        let unchanged = FakeRunner::default();
+        run_unicorn_setup(&opts, &unchanged, &mut |_| {}).unwrap();
+        assert!(
+            !unchanged
+                .calls
+                .borrow()
+                .iter()
+                .any(|c| c.contains(&"pip".to_string()))
+        );
+
+        // a changed plugin source is installed into the existing venv, which is not recreated
+        for changed in [
+            plugin_file.clone(),
+            opts.plugins_dir
+                .join("decovery-plugin-sdk")
+                .join("server.py"),
+        ] {
+            std::fs::write(&changed, "PARALLEL = None\n").unwrap();
+            let again = FakeRunner::default();
+            let mut steps = Vec::new();
+            let report =
+                run_unicorn_setup(&opts, &again, &mut |l| steps.push(l.to_string())).unwrap();
+            assert!(report.venv_kept);
+            let calls = again.calls.borrow();
+            assert!(!calls.iter().any(|c| c.contains(&"venv".to_string())));
+            let pip = calls
+                .iter()
+                .find(|c| c.contains(&"pip".to_string()))
+                .expect("pip reinstalls the changed sources");
+            assert!(pip.contains(&"--force-reinstall".to_string()));
+            assert!(pip.contains(&"--no-deps".to_string()));
+            assert!(pip.iter().any(|a| a.ends_with("decovery-plugin-sdk")));
+            assert!(pip.iter().any(|a| a.ends_with("unicorn-dos")));
+            assert!(steps.iter().any(|s| s.contains("changed")), "{steps:?}");
+        }
     }
 
     #[test]

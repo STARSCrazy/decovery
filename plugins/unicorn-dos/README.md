@@ -29,8 +29,11 @@ P3 image with relocations, ...) answers `-32020` (`RUNNER_UNSUPPORTED`), so deco
 or extender call the emulation does not provide ends the job with status `failed` and a message such as
 `unsupported INT 21h AH=4Bh at 000C:0001A2B3 (EAX=...)`; it never continues silently.
 
-Jobs run in parallel in spawned worker processes (`DECOVERY_UNICORN_PARALLEL`, default 8); each worker keeps one
-emulated machine per program and resets it between runs by rewriting only the changed 4 KiB pages. A worker
+Jobs run in parallel in spawned worker processes: one pool for the life of the plugin, one worker per logical core
+(`DECOVERY_UNICORN_PARALLEL` overrides), declared as `max_parallel` in `initialize`. A request runs at most
+`options.jobs` jobs at once, larger jobs (`cost`) first; workers start on demand. A worker's standard output goes to
+the standard error, so a printing worker cannot corrupt the protocol stream. Each worker keeps one emulated machine
+per program and resets it between runs by rewriting only the changed 4 KiB pages. A worker
 that dies takes the pending jobs of its pool with it; those run once more, each in a fresh process, so only a
 job that crashes again fails.
 
