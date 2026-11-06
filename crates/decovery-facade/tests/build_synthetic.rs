@@ -369,21 +369,101 @@ fn output_header_shows_new_result() {
 }
 
 #[test]
-fn assembler_source_is_not_compiled() {
+fn assembler_source_is_skipped_and_keeps_record_and_object() {
     let python = python_or_skip!();
     let f = fixture(&python, "");
     f.write_source("asmpart.asm", "_TEXT segment\n_TEXT ends\nend\n");
+    seed(
+        &f,
+        "schema = 1\n\n[[function]]\naddress = \"seg:0000:0030\"\nname = \"zed\"\nfile = \"asmpart.asm\"\nresult = \"identical\"\n",
+    );
+    let obj_dir = f.root().join("cache/rebuild/obj");
+    std::fs::create_dir_all(&obj_dir).unwrap();
+    std::fs::write(obj_dir.join("asmpart.obj"), b"migrated object").unwrap();
+    std::fs::remove_file(f.root().join("src/z.c")).unwrap();
     let response = run(&f, &[]);
     let files = response.data["files"].as_array().unwrap();
     let asm = files.iter().find(|v| v["file"] == "asmpart.asm").unwrap();
-    assert_eq!(asm["status"], "error");
+    assert_eq!(asm["status"], "skipped");
+    assert!(asm.get("message").is_none(), "{asm}");
+    let hints = strings(&response.data["hints"]);
     assert!(
-        asm["message"]
-            .as_str()
-            .unwrap()
-            .starts_with("assembler sources are not built yet"),
-        "{asm}"
+        hints.contains(&"no assembler available for asmpart.asm".to_string()),
+        "{hints:?}"
+    );
+    assert_eq!(response.data["counts"]["skipped_files"], 1);
+    assert_eq!(response.data["counts"]["failed_files"], 0);
+    assert!(
+        response.summary.ends_with("; 1 skipped"),
+        "{}",
+        response.summary
     );
     assert!(f.log("calls.log").iter().all(|c| !c.contains("ASMPART")));
+    let zed = record(&f, "zed");
+    assert_eq!((zed.result, zed.verdict), (RebuildResult::Identical, None));
+    assert_eq!(zed.file.as_deref(), Some("asmpart.asm"));
+    assert_eq!(
+        std::fs::read(obj_dir.join("asmpart.obj")).unwrap(),
+        b"migrated object"
+    );
+    assert_eq!(record(&f, "add").verdict, Some(VerdictId::Identical));
+}
+
+#[test]
+fn failed_compile_keeps_last_good_object() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    run(&f, &["a.c"]);
+    let obj = f.root().join("cache/rebuild/obj/a.obj");
+    let meta = f.root().join("cache/rebuild/obj/a.json");
+    let good = std::fs::read(&obj).unwrap();
+    std::fs::remove_file(f.objects.path().join("A.OBJ")).unwrap();
+    f.write_source("a.c", &format!("{A_C}/* changed */\n"));
+    let response = run(&f, &["a.c"]);
+    assert_eq!(response.data["files"][0]["status"], "error");
+    assert_eq!(record(&f, "add").result, RebuildResult::Error);
+    assert_eq!(std::fs::read(&obj).unwrap(), good);
+    assert!(meta.is_file());
+}
+
+#[test]
+fn inline_asm_keeps_unchecked_verdict_and_message() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    // zed placed outside the program image: its original bytes are not available
+    let symbols = f.root().join("knowledge/symbols.toml");
+    let text = std::fs::read_to_string(&symbols)
+        .unwrap()
+        .replace("seg:0000:0030", "seg:0F00:0000");
+    std::fs::write(&symbols, text).unwrap();
+    f.write_source("z.c", "void zed(void)\n{\n    _asm nop;\n}\n");
+    run(&f, &["z.c"]);
+    let zed = record(&f, "zed");
+    assert_eq!(zed.verdict, Some(VerdictId::Unchecked));
+    assert_eq!(zed.result, RebuildResult::Error);
+    assert!(
+        zed.blockers
+            .contains(&BlockerRecord::new("inline-assembly", None, None))
+    );
+    let message = zed.message.unwrap();
+    assert!(
+        message.starts_with("the original bytes of the function are not in the program"),
+        "{message}"
+    );
+    assert!(message.contains("line 3: inline-asm"), "{message}");
+}
+
+#[test]
+fn analysis_with_end_before_start_does_not_panic() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    let root = f.root();
+    let mut analysis = decovery_core::Analysis::load(root).unwrap().unwrap();
+    analysis.functions[0].end = decovery_core::Address::Seg { seg: 0, off: 0x0F };
+    let ws = Workspace::open(root).unwrap();
+    let lock = ws.lock(Duration::from_secs(5)).unwrap();
+    analysis.save(root, &lock).unwrap();
+    drop(lock);
+    run(&f, &["a.c"]);
     assert_eq!(record(&f, "add").verdict, Some(VerdictId::Identical));
 }

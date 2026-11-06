@@ -80,6 +80,9 @@ struct Source {
     compiled: Option<CompiledFile>,
     /// Why the source has no object.
     error: Option<String>,
+    /// The profile has no way to build this source (an assembler file without an assembler run): not built, its
+    /// records and its kept object stay as they are.
+    skipped: bool,
 }
 
 /// A compared function of the build.
@@ -134,7 +137,12 @@ pub fn build(
         _ => request.files.clone(),
     };
     let set = find_sources(&root.join(SOURCE_DIR), &files).map_err(toolchain)?;
-    let built_files: Vec<String> = set.sources.iter().map(|p| file_name(p)).collect();
+    let existing_files: Vec<String> = set.sources.iter().map(|p| file_name(p)).collect();
+    let built_files: Vec<String> = existing_files
+        .iter()
+        .filter(|name| is_c(name))
+        .cloned()
+        .collect();
 
     // stage
     let run_dir = RunDir(root.join(RUNS_DIR).join(format!(
@@ -165,12 +173,10 @@ pub fn build(
             text: String::new(),
             compiled: None,
             error: None,
+            skipped: false,
         };
         if !is_c(&source.name) {
-            source.error = Some(format!(
-                "assembler sources are not built yet (profile {} has no assembler that build runs)",
-                profile.id
-            ));
+            source.skipped = true;
         } else {
             match read_text(path).and_then(|text| {
                 stage_text(&source.name, &text, &run_dir.0)
@@ -187,7 +193,7 @@ pub fn build(
     // compile: cache hits, then all misses in one runner request
     let compile_started = Instant::now();
     let staged: Vec<usize> = (0..sources.len())
-        .filter(|&i| sources[i].error.is_none())
+        .filter(|&i| sources[i].error.is_none() && !sources[i].skipped)
         .collect();
     let jobs_input: Vec<(String, String)> = staged
         .iter()
@@ -285,7 +291,12 @@ pub fn build(
                 let original_len = index
                     .as_ref()
                     .and_then(|ix| ix.function_at(address))
-                    .and_then(|f| Some(f.end.linear()? - f.start.linear()? + 1))
+                    .and_then(|f| {
+                        f.end
+                            .linear()?
+                            .checked_sub(f.start.linear()?)?
+                            .checked_add(1)
+                    })
                     .or_else(|| symbol_size(&ws, address))
                     .and_then(|n| u32::try_from(n).ok());
                 let code_hash = blake3::hash(view.code()).to_hex()[..16].to_string();
@@ -354,17 +365,22 @@ pub fn build(
         let mut r = record(built, comparison, source, &profile.id, &date);
         if let Some(findings) = cheats[built.source].get(&built.name) {
             r.blockers.push(blocker_record(&Blocker::InlineAssembly));
-            r.verdict = Some(VerdictId::Differs);
+            // an unchecked comparison stays unchecked (and keeps its message); the findings are added
+            if r.verdict != Some(VerdictId::Unchecked) {
+                r.verdict = Some(VerdictId::Differs);
+            }
             if r.result == RebuildResult::Identical {
                 r.result = RebuildResult::Differs;
             }
-            r.message = Some(
-                findings
-                    .iter()
-                    .map(|f| format!("line {}: {} {}", f.line, f.kind.id(), f.text))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            );
+            let found = findings
+                .iter()
+                .map(|f| format!("line {}: {} {}", f.line, f.kind.id(), f.text))
+                .collect::<Vec<_>>()
+                .join("\n");
+            r.message = Some(match r.message.take() {
+                Some(before) => format!("{before}\n{found}"),
+                None => found,
+            });
         }
         new_records.push(r);
     }
@@ -397,13 +413,19 @@ pub fn build(
             new_records.push(r);
         }
     }
+    for source in sources.iter().filter(|s| s.skipped) {
+        hints.push(format!("no assembler available for {}", source.name));
+    }
     let mut affected: BTreeSet<Address> = old
         .iter()
-        .filter(|r| all || r.file.as_ref().is_some_and(|f| built_files.contains(f)))
+        .filter(|r| match &r.file {
+            Some(f) => built_files.contains(f) || (all && !existing_files.contains(f)),
+            None => all,
+        })
         .map(|r| r.address)
         .collect();
     affected.extend(new_records.iter().map(|r| r.address));
-    let merged = merge_rebuild(old, new_records.clone(), &built_files, all, &built_files);
+    let merged = merge_rebuild(old, new_records.clone(), &built_files, all, &existing_files);
     save_rebuild(root, &merged, &lock)?;
     keep_objects(root, &sources, &new_records, &input_hashes, &profile.id)?;
     if analysis.is_some() {
@@ -565,8 +587,8 @@ fn record(
     r
 }
 
-/// Copies each object to `cache/rebuild/obj/<stem>.obj` with `<stem>.json` (inputs, identical functions); a
-/// source without an object loses both.
+/// Copies each object built in this run to `cache/rebuild/obj/<stem>.obj` with `<stem>.json` (inputs, identical
+/// functions). A source without a new object (skipped, or failed this time) keeps whatever is kept there.
 fn keep_objects(
     root: &Path,
     sources: &[Source],
@@ -590,17 +612,6 @@ fn keep_objects(
             .and_then(|c| c.object.as_ref())
             .filter(|_| source.error.is_none());
         let Some(object) = object else {
-            for path in [&obj_path, &meta_path] {
-                match std::fs::remove_file(path) {
-                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                        return Err(FacadeError::Output {
-                            path: path.clone(),
-                            source: e,
-                        });
-                    }
-                    _ => {}
-                }
-            }
             continue;
         };
         let identical: serde_json::Map<String, Value> = records
@@ -669,13 +680,20 @@ fn respond(
         count(VerdictId::Unchecked),
     );
     let failed = sources.iter().filter(|s| s.error.is_some()).count();
+    let skipped = sources.iter().filter(|s| s.skipped).count();
     let files: Vec<Value> = sources
         .iter()
         .map(|s| {
             let cached = s.compiled.as_ref().is_some_and(|c| c.cached);
             let mut v = json!({
                 "file": s.name,
-                "status": if s.error.is_some() { "error" } else { "compiled" },
+                "status": if s.skipped {
+                    "skipped"
+                } else if s.error.is_some() {
+                    "error"
+                } else {
+                    "compiled"
+                },
                 "cached": cached,
             });
             if let Some(m) = &s.error {
@@ -704,6 +722,9 @@ fn respond(
             "; {failed} file{} failed",
             if failed == 1 { "" } else { "s" }
         ));
+    }
+    if skipped > 0 {
+        summary.push_str(&format!("; {skipped} skipped"));
     }
 
     // problems first; identical functions only as far as the budget allows
@@ -757,6 +778,7 @@ fn respond(
                 "unchecked": unchecked,
                 "files": sources.len(),
                 "failed_files": failed,
+                "skipped_files": skipped,
             },
             "timing": timing,
         }),

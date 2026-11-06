@@ -109,6 +109,20 @@ pub struct JobOutcome {
 }
 
 impl JobOutcome {
+    /// A finished job (exit code 0) that produced all of `expected`, for tests of callers.
+    #[cfg(test)]
+    pub(crate) fn done_for_test(expected: Vec<String>) -> Self {
+        JobOutcome {
+            status: JobStatus::Done,
+            exit_code: Some(0),
+            stdout: String::new(),
+            produced: expected.clone(),
+            message: None,
+            runner: "test".into(),
+            expected,
+        }
+    }
+
     /// `Done`, exit code 0 and every expected file produced.
     pub fn succeeded(&self) -> bool {
         self.status == JobStatus::Done
