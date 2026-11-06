@@ -125,6 +125,11 @@ class Plugin:
             # code in a handler that touches fd 0 (JNI_CreateJavaVM calls `_setmode` on it) would otherwise wait
             # for the next request line, which the host only sends after the answer.
             stdin = io.TextIOWrapper(io.FileIO(os.dup(sys.stdin.fileno()), "rb"), encoding="utf-8")
+            # fd 0 itself becomes NUL: a child process (multiprocessing spawn) inherits the standard input, and on
+            # Windows a child closing or reading its copy of the protocol pipe waits for the read pending here.
+            null = os.open(os.devnull, os.O_RDONLY)
+            os.dup2(null, sys.stdin.fileno())
+            os.close(null)
         if stdout is None:
             stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", newline="\n", write_through=True)
         _Session(self, stdin, stdout).run()
