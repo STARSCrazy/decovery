@@ -206,7 +206,7 @@ fn functions(session: &Session, query: &FindQuery, pattern: Option<Pattern>) -> 
     let rebuild: HashMap<Address, RebuildResult> = session
         .rebuild
         .iter()
-        .map(|r| (r.address, r.result))
+        .map(|r| (r.address, r.effective_result()))
         .collect();
     let mut entries: Vec<Entry> = Vec::new();
     for f in &session.analysis.functions {
