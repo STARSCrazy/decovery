@@ -7,14 +7,15 @@ import json
 import sys
 from pathlib import Path
 
-from decomp.signaturen.omf import lies_datei
+# Decomp's own name (its API is German); aliased so this script's identifiers stay English.
+from decomp.signaturen.omf import lies_datei as read_omf_file
 
 
 def main(out_dir: str, *files: str) -> None:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     for f in files:
-        read = lies_datei(f)
+        read = read_omf_file(f)
         result = {
             "bits": read.bits,
             "unknown_records": {f"{k:02X}": v for k, v in sorted(read.unbekannt.items())},
