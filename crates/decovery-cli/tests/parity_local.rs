@@ -12,6 +12,20 @@ use std::process::Command;
 
 use serde_json::Value;
 
+// Decomp's on-disk names (its workspace is German).
+const DECOMP_KNOWLEDGE_DIR: &str = "wissen";
+const DECOMP_OUTPUT_DIR: &str = "ausgabe";
+const DECOMP_FUNCTIONS_DIR: &str = "funktionen";
+const DECOMP_REBUILD_RECORDS_FILE: &str = "nachbau.toml";
+const DECOMP_RECORD_TABLE: &str = "funktion";
+const DECOMP_ADDRESS_TAG: &str = "@adresse";
+const DECOMP_KEY_ADDRESS: &str = "adresse";
+const DECOMP_KEY_FILE: &str = "datei";
+const DECOMP_KEY_RESULT: &str = "ergebnis";
+const DECOMP_RESULT_IDENTICAL: &str = "identisch";
+const DECOMP_RESULT_DIFFERS: &str = "abweichend";
+
+/// Decomp's metric key and decovery's field name.
 const METRICS: [(&str, &str); 7] = [
     ("bytes", "bytes"),
     ("gleich", "equal"),
@@ -30,7 +44,7 @@ fn va(text: &str) -> Option<u32> {
     u32::from_str_radix(text.strip_prefix("va:")?, 16).ok()
 }
 
-/// Function spans from `@adresse    va:X .. va:Y (N Bytes` in Decomp's generated output (taken from Ghidra).
+/// Function spans from the `@adresse    va:X .. va:Y (N Bytes` in Decomp's generated output (taken from Ghidra).
 fn spans(dir: &Path) -> BTreeMap<u32, u32> {
     let mut out = BTreeMap::new();
     let mut stack = vec![dir.to_path_buf()];
@@ -47,11 +61,11 @@ fn spans(dir: &Path) -> BTreeMap<u32, u32> {
             let Ok(text) = std::fs::read_to_string(&p) else {
                 continue;
             };
-            let Some(line) = text.lines().find(|l| l.contains("@adresse")) else {
+            let Some(line) = text.lines().find(|l| l.contains(DECOMP_ADDRESS_TAG)) else {
                 continue;
             };
             let words: Vec<&str> = line.split_whitespace().collect();
-            let Some(i) = words.iter().position(|w| *w == "@adresse") else {
+            let Some(i) = words.iter().position(|w| *w == DECOMP_ADDRESS_TAG) else {
                 continue;
             };
             if let (Some(start), Some(end)) = (
@@ -87,11 +101,14 @@ fn first_20_identical_and_5_differing() {
     let ws = to.path().join("ws");
     decovery_core_migrate(&from, &ws);
 
-    let recorded: toml::Table = std::fs::read_to_string(from.join("wissen").join("nachbau.toml"))
-        .unwrap()
-        .parse()
-        .unwrap();
-    let entries: Vec<&toml::Table> = recorded["funktion"]
+    let recorded: toml::Table = std::fs::read_to_string(
+        from.join(DECOMP_KNOWLEDGE_DIR)
+            .join(DECOMP_REBUILD_RECORDS_FILE),
+    )
+    .unwrap()
+    .parse()
+    .unwrap();
+    let entries: Vec<&toml::Table> = recorded[DECOMP_RECORD_TABLE]
         .as_array()
         .unwrap()
         .iter()
@@ -101,26 +118,26 @@ fn first_20_identical_and_5_differing() {
         entries
             .iter()
             .copied()
-            .filter(|e| e.get("ergebnis").and_then(|v| v.as_str()) == Some(result))
+            .filter(|e| e.get(DECOMP_KEY_RESULT).and_then(|v| v.as_str()) == Some(result))
             .take(n)
             .collect()
     };
-    let sample: Vec<&toml::Table> = with("identisch", 20)
+    let sample: Vec<&toml::Table> = with(DECOMP_RESULT_IDENTICAL, 20)
         .into_iter()
-        .chain(with("abweichend", 5))
+        .chain(with(DECOMP_RESULT_DIFFERS, 5))
         .collect();
     assert_eq!(
         sample.len(),
         25,
         "workspace has fewer than 20 + 5 recorded functions"
     );
-    let spans = spans(&from.join("ausgabe").join("funktionen"));
+    let spans = spans(&from.join(DECOMP_OUTPUT_DIR).join(DECOMP_FUNCTIONS_DIR));
 
     let mut rows = Vec::new();
     for e in &sample {
         let name = e["name"].as_str().unwrap();
-        let address = va(e["adresse"].as_str().unwrap()).unwrap();
-        let stem = e["datei"].as_str().unwrap().trim_end_matches(".c");
+        let address = va(e[DECOMP_KEY_ADDRESS].as_str().unwrap()).unwrap();
+        let stem = e[DECOMP_KEY_FILE].as_str().unwrap().trim_end_matches(".c");
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_decovery"));
         cmd.args(["compare", "--json", "--workspace"])
             .arg(&ws)
@@ -145,7 +162,7 @@ fn first_20_identical_and_5_differing() {
         rows.push(Row {
             name: name.to_string(),
             address,
-            recorded: e["ergebnis"].as_str().unwrap().to_string(),
+            recorded: e[DECOMP_KEY_RESULT].as_str().unwrap().to_string(),
             verdict: v["verdict"].as_str().unwrap().to_string(),
             blockers: v["blockers"]
                 .as_array()
@@ -186,7 +203,7 @@ fn first_20_identical_and_5_differing() {
     std::fs::create_dir_all(&golden).unwrap();
     std::fs::write(golden.join("parity-phase-0.md"), &report).unwrap();
 
-    let agree = |r: &&Row| (r.recorded == "identisch") == (r.verdict == "identical");
+    let agree = |r: &&Row| (r.recorded == DECOMP_RESULT_IDENTICAL) == (r.verdict == "identical");
     let mut categories: BTreeMap<String, usize> = BTreeMap::new();
     for r in rows.iter().filter(|r| !agree(r)) {
         let key = format!(

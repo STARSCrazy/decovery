@@ -5,6 +5,23 @@ use std::path::{Path, PathBuf};
 
 use decovery_core::{Address, Analysis, Workspace, migrate_decomp};
 
+// Decomp's on-disk names (its workspace is German).
+const DECOMP_KNOWLEDGE_DIR: &str = "wissen";
+const DECOMP_REBUILD_DIR: &str = "nachbau";
+const DECOMP_GAME_DIR: &str = "spiel";
+const DECOMP_OUTPUT_DIR: &str = "ausgabe";
+const DECOMP_FUNCTIONS_DIR: &str = "funktionen";
+const DECOMP_RUNS_DIR: &str = "laufzeit";
+const DECOMP_SYMBOLS_FILE: &str = "symbole.toml";
+const DECOMP_NOTES_FILE: &str = "notizen.md";
+const DECOMP_STYLE_FILE: &str = "programmierstil.md";
+const DECOMP_REBUILD_RECORDS_FILE: &str = "nachbau.toml";
+const DECOMP_REBUILD_PROGRAM_FILE: &str = "nachbau-programm.toml";
+const DECOMP_RUN_RECORDS_FILE: &str = "laufzeit.toml";
+const DECOMP_REFERENCES_FILE: &str = "verweise.toml";
+const DECOMP_ADDRESS_TAG: &str = "@adresse";
+const DECOMP_DECOMPILE_ERROR_PREFIX: &str = "/* Dekompilieren fehlgeschlagen: ";
+
 #[test]
 #[ignore = "local: private Decomp workspace"]
 fn migrates_without_loss() {
@@ -13,7 +30,8 @@ fn migrates_without_loss() {
     );
     let to = tempfile::tempdir().unwrap();
 
-    let source = std::fs::read_to_string(from.join("wissen").join("symbole.toml")).unwrap();
+    let source =
+        std::fs::read_to_string(from.join(DECOMP_KNOWLEDGE_DIR).join(DECOMP_SYMBOLS_FILE)).unwrap();
     let expected = source.matches("[[symbol]]").count();
 
     let report = migrate_decomp(&from, to.path()).unwrap();
@@ -41,37 +59,43 @@ fn migrates_without_loss() {
     assert!(unexpected.is_empty(), "not in allowlist: {unexpected:?}");
     assert!(to.path().join(".gitignore").is_file(), "missing .gitignore");
     // Workspaces differ in what they contain: an output is required exactly when its source exists.
-    let wissen = from.join("wissen");
-    let has_reports = std::fs::read_dir(&wissen).unwrap().any(|e| {
+    let knowledge_dir = from.join(DECOMP_KNOWLEDGE_DIR);
+    let has_reports = std::fs::read_dir(&knowledge_dir).unwrap().any(|e| {
         let name = e.unwrap().file_name().to_string_lossy().into_owned();
-        name.ends_with(".md") && name != "notizen.md" && name != "programmierstil.md"
+        name.ends_with(".md") && name != DECOMP_NOTES_FILE && name != DECOMP_STYLE_FILE
     });
     for (source_exists, rel) in [
-        (from.join("nachbau").is_dir(), "src"),
+        (from.join(DECOMP_REBUILD_DIR).is_dir(), "src"),
         (
-            wissen.join("nachbau.toml").is_file(),
+            knowledge_dir.join(DECOMP_REBUILD_RECORDS_FILE).is_file(),
             "knowledge/rebuild.toml",
         ),
         (
-            wissen.join("nachbau-programm.toml").is_file(),
+            knowledge_dir.join(DECOMP_REBUILD_PROGRAM_FILE).is_file(),
             "knowledge/rebuild-program.toml",
         ),
         (
-            wissen.join("laufzeit.toml").is_file(),
+            knowledge_dir.join(DECOMP_RUN_RECORDS_FILE).is_file(),
             "knowledge/runs.toml",
         ),
         (
-            wissen.join("verweise.toml").is_file(),
+            knowledge_dir.join(DECOMP_REFERENCES_FILE).is_file(),
             "knowledge/references.toml",
         ),
         (
-            wissen.join("programmierstil.md").is_file(),
+            knowledge_dir.join(DECOMP_STYLE_FILE).is_file(),
             "knowledge/style.md",
         ),
         (has_reports, "knowledge/reports"),
-        (wissen.join("laufzeit").is_dir(), "knowledge/runs"),
         (
-            from.join("cache").join("nachbau").join("obj").is_dir(),
+            knowledge_dir.join(DECOMP_RUNS_DIR).is_dir(),
+            "knowledge/runs",
+        ),
+        (
+            from.join("cache")
+                .join(DECOMP_REBUILD_DIR)
+                .join("obj")
+                .is_dir(),
             "cache/rebuild/obj",
         ),
     ] {
@@ -81,14 +105,14 @@ fn migrates_without_loss() {
             "{rel}: source exists = {source_exists}"
         );
     }
-    if from.join("spiel").is_dir() {
+    if from.join(DECOMP_GAME_DIR).is_dir() {
         assert!(ws.config.target.file.starts_with("target/"));
         assert!(to.path().join(&ws.config.target.file).is_file());
     }
-    if from.join("ausgabe").is_dir() || from.join("cache").is_dir() {
+    if from.join(DECOMP_OUTPUT_DIR).is_dir() || from.join("cache").is_dir() {
         assert!(!report.skipped.is_empty());
     }
-    let functions_dir = from.join("ausgabe").join("funktionen");
+    let functions_dir = from.join(DECOMP_OUTPUT_DIR).join(DECOMP_FUNCTIONS_DIR);
     if functions_dir.is_dir() {
         assert_analysis_matches(&functions_dir, to.path(), report.analysis_functions);
     } else {
@@ -162,7 +186,7 @@ fn assert_analysis_matches(functions_dir: &Path, to: &Path, imported: u32) {
         let (header, body) = text.split_at(header_len);
         let first = header.lines().next().unwrap();
         let start_text = first
-            .strip_prefix("/* @adresse")
+            .strip_prefix(&format!("/* {DECOMP_ADDRESS_TAG}"))
             .unwrap()
             .trim_start()
             .split(' ')
@@ -181,7 +205,7 @@ fn assert_analysis_matches(functions_dir: &Path, to: &Path, imported: u32) {
             .unwrap_or_else(|| panic!("no function for {}", file.display()));
         assert_eq!(
             function.decompile_error.is_some(),
-            body.starts_with("/* Dekompilieren fehlgeschlagen: ")
+            body.starts_with(DECOMP_DECOMPILE_ERROR_PREFIX)
         );
         with_error += usize::from(function.decompile_error.is_some());
     }

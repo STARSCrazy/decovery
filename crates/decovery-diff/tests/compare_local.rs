@@ -16,6 +16,32 @@ use decovery_diff::{
 use decovery_loaders::load_le;
 use decovery_objects::{ObjectFile, RefTarget, functions, read_omf};
 
+// Decomp's on-disk names (its workspace is German).
+const DECOMP_KNOWLEDGE_DIR: &str = "wissen";
+const DECOMP_OUTPUT_DIR: &str = "ausgabe";
+const DECOMP_FUNCTIONS_DIR: &str = "funktionen";
+const DECOMP_REBUILD_DIR: &str = "nachbau";
+const DECOMP_SYMBOLS_FILE: &str = "symbole.toml";
+const DECOMP_REBUILD_RECORDS_FILE: &str = "nachbau.toml";
+const DECOMP_ADDRESS_TAG: &str = "@adresse";
+const DECOMP_RECORD_TABLE: &str = "funktion";
+const DECOMP_KEY_TARGET: &str = "ziel";
+const DECOMP_KEY_ADDRESS: &str = "adresse";
+const DECOMP_KEY_FILE: &str = "datei";
+const DECOMP_KEY_RESULT: &str = "ergebnis";
+const DECOMP_KEY_REFUTED: &str = "widerlegt";
+const DECOMP_RESULT_IDENTICAL: &str = "identisch";
+/// Decomp's metric keys, in the order of `Metrics`' fields used below.
+const DECOMP_METRIC_KEYS: [&str; 7] = [
+    "bytes",
+    "gleich",
+    "luecken",
+    "abweichend",
+    "verweise_passend",
+    "verweise_falsch",
+    "befehle_abweichend",
+];
+
 fn env_path(name: &str) -> PathBuf {
     PathBuf::from(std::env::var_os(name).unwrap_or_else(|| panic!("{name} is not set")))
 }
@@ -36,11 +62,13 @@ impl Knowledge {
         let mut by_address = BTreeMap::new();
         for s in doc["symbol"].as_array().unwrap() {
             let s = s.as_table().unwrap();
-            if s.get("widerlegt").is_some() {
+            if s.get(DECOMP_KEY_REFUTED).is_some() {
                 continue;
             }
             let (Some(a), Some(n)) = (
-                s.get("adresse").and_then(|v| v.as_str()).and_then(va),
+                s.get(DECOMP_KEY_ADDRESS)
+                    .and_then(|v| v.as_str())
+                    .and_then(va),
                 s.get("name").and_then(|v| v.as_str()),
             ) else {
                 continue;
@@ -82,7 +110,7 @@ impl SymbolView for Knowledge {
     }
 }
 
-/// Function spans from `@adresse    va:X .. va:Y (N Bytes` in the generated output.
+/// Function spans from the `@adresse    va:X .. va:Y (N Bytes` in the generated output.
 fn spans(dir: &Path) -> BTreeMap<u32, u32> {
     let mut out = BTreeMap::new();
     let mut stack = vec![dir.to_path_buf()];
@@ -96,11 +124,11 @@ fn spans(dir: &Path) -> BTreeMap<u32, u32> {
             let Ok(text) = std::fs::read_to_string(&p) else {
                 continue;
             };
-            let Some(line) = text.lines().find(|l| l.contains("@adresse")) else {
+            let Some(line) = text.lines().find(|l| l.contains(DECOMP_ADDRESS_TAG)) else {
                 continue;
             };
             let words: Vec<&str> = line.split_whitespace().collect();
-            let Some(i) = words.iter().position(|w| *w == "@adresse") else {
+            let Some(i) = words.iter().position(|w| *w == DECOMP_ADDRESS_TAG) else {
                 continue;
             };
             if let (Some(start), Some(end)) = (
@@ -129,18 +157,20 @@ impl Setup {
             .unwrap()
             .parse()
             .unwrap();
-        let target = config["ziel"]["datei"].as_str().unwrap();
+        let target = config[DECOMP_KEY_TARGET][DECOMP_KEY_FILE].as_str().unwrap();
         let exe = std::fs::read(root.join(target)).unwrap();
-        let recorded: toml::Table =
-            std::fs::read_to_string(root.join("wissen").join("nachbau.toml"))
-                .unwrap()
-                .parse()
-                .unwrap();
+        let recorded: toml::Table = std::fs::read_to_string(
+            root.join(DECOMP_KNOWLEDGE_DIR)
+                .join(DECOMP_REBUILD_RECORDS_FILE),
+        )
+        .unwrap()
+        .parse()
+        .unwrap();
         Setup {
             program: load_le(&exe).unwrap().program,
-            knowledge: Knowledge::load(&root.join("wissen").join("symbole.toml")),
-            spans: spans(&root.join("ausgabe").join("funktionen")),
-            recorded: recorded["funktion"]
+            knowledge: Knowledge::load(&root.join(DECOMP_KNOWLEDGE_DIR).join(DECOMP_SYMBOLS_FILE)),
+            spans: spans(&root.join(DECOMP_OUTPUT_DIR).join(DECOMP_FUNCTIONS_DIR)),
+            recorded: recorded[DECOMP_RECORD_TABLE]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -154,7 +184,7 @@ impl Setup {
         let path = self
             .root
             .join("cache")
-            .join("nachbau")
+            .join(DECOMP_REBUILD_DIR)
             .join("obj")
             .join(format!("{stem}.obj"));
         read_omf(&std::fs::read(path).unwrap(), &format!("{stem}.obj")).unwrap()
@@ -186,7 +216,10 @@ fn num(e: &toml::Table, key: &str) -> u32 {
 impl Setup {
     /// Stem of the first rebuilt source file recorded in `nachbau.toml`.
     fn first_source_file(&self) -> String {
-        self.recorded[0]["datei"].as_str().unwrap().to_string()
+        self.recorded[0][DECOMP_KEY_FILE]
+            .as_str()
+            .unwrap()
+            .to_string()
     }
 }
 
@@ -201,10 +234,10 @@ fn metrics_match_decomp() {
     for e in setup
         .recorded
         .iter()
-        .filter(|e| e["datei"].as_str() == Some(file.as_str()))
+        .filter(|e| e[DECOMP_KEY_FILE].as_str() == Some(file.as_str()))
     {
         let name = e["name"].as_str().unwrap();
-        let at = va(e["adresse"].as_str().unwrap()).unwrap();
+        let at = va(e[DECOMP_KEY_ADDRESS].as_str().unwrap()).unwrap();
         let c = setup.compare(&obj, name, at, &setup.knowledge);
         let m = &c.metrics;
         let ours = [
@@ -216,21 +249,16 @@ fn metrics_match_decomp() {
             m.refs_wrong,
             m.instructions_differing,
         ];
-        let theirs = [
-            "bytes",
-            "gleich",
-            "luecken",
-            "abweichend",
-            "verweise_passend",
-            "verweise_falsch",
-            "befehle_abweichend",
-        ]
-        .map(|k| num(e, k));
+        let theirs = DECOMP_METRIC_KEYS.map(|k| num(e, k));
         if ours != theirs {
             mismatches.push(format!("{at:#x}: {ours:?} != {theirs:?}"));
         }
         if c.verdict == Verdict::Identical {
-            assert_eq!(e["ergebnis"].as_str(), Some("identisch"), "{at:#x}");
+            assert_eq!(
+                e[DECOMP_KEY_RESULT].as_str(),
+                Some(DECOMP_RESULT_IDENTICAL),
+                "{at:#x}"
+            );
         }
         compared += 1;
     }
@@ -252,12 +280,12 @@ fn strict_rule_sees_moved_symbols() {
     for e in setup
         .recorded
         .iter()
-        .filter(|e| e["ergebnis"].as_str() == Some("identisch"))
+        .filter(|e| e[DECOMP_KEY_RESULT].as_str() == Some(DECOMP_RESULT_IDENTICAL))
     {
-        let file = e["datei"].as_str().unwrap();
+        let file = e[DECOMP_KEY_FILE].as_str().unwrap();
         let obj = setup.object(file.trim_end_matches(".c"));
         let name = e["name"].as_str().unwrap();
-        let at = va(e["adresse"].as_str().unwrap()).unwrap();
+        let at = va(e[DECOMP_KEY_ADDRESS].as_str().unwrap()).unwrap();
         if setup.compare(&obj, name, at, &setup.knowledge).verdict != Verdict::Identical {
             continue;
         }

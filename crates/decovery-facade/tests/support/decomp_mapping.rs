@@ -14,6 +14,29 @@ use decovery_core::migrate::tables::{
 /// Header keys phase 1 does not generate: runtime results (runtime schemas arrive in phase 6).
 pub const EXCLUDED_KEYS: &[&str] = &["@laufzeit", "@beobachtet"];
 
+// Decomp's German phrases and markers that the functions below look for.
+const DECOMP_NOT_TRIED: &str = "nicht versucht";
+const DECOMP_ERROR_PREFIX: &str = "fehler: ";
+const DECOMP_IDENTICAL_PREFIX: &str = "identisch (";
+const DECOMP_DIFFERS_PREFIX: &str = "abweichend: ";
+const DECOMP_OF: &str = " von ";
+const DECOMP_DIAGNOSIS_MARKER: &str = "Diagnose: ";
+const DECOMP_EQUIVALENCE_MARKER: &str = "gleichwertig: ";
+const DECOMP_STATIC_MARKER: &str = "(statisch ";
+const DECOMP_DYNAMIC_MARKER: &str = ", dynamisch ";
+const DECOMP_UNNAMED_SUFFIX: &str = "  [unbenannt]";
+const DECOMP_NONE: &str = "(keine)";
+const DECOMP_READS: &str = "liest ";
+const DECOMP_WRITES: &str = "schreibt ";
+const DECOMP_SPAN: &str = "Bytes Spanne";
+const DECOMP_IN_BODY: &str = "im Rumpf";
+const DECOMP_FILE_AT: &str = ", datei 0x";
+const DECOMP_DECOMPILE_FAILED_PREFIX: &str = "/* Dekompilieren fehlgeschlagen: ";
+const DECOMP_NOT_AVAILABLE: &str = "/* Disassembly:\n(nicht verfügbar)\n*/";
+/// Decomp's output directories below the workspace.
+const DECOMP_OUTPUT_DIR: &str = "ausgabe";
+const DECOMP_FUNCTIONS_DIR: &str = "funktionen";
+
 /// Fixed German phrases of the `@nachbau` line (Decomp `ergebnis.kopfzeile`) and their English form.
 const REBUILD: &[(&str, &str)] = &[
     (" fest + ", " fixed + "),
@@ -94,32 +117,32 @@ pub fn addresses(text: &str) -> String {
 }
 
 fn rebuild_en(v: &str) -> String {
-    if v == "nicht versucht" {
+    if v == DECOMP_NOT_TRIED {
         return "not tried".to_string();
     }
-    if let Some(rest) = v.strip_prefix("fehler: ") {
+    if let Some(rest) = v.strip_prefix(DECOMP_ERROR_PREFIX) {
         return format!("error: {rest}");
     }
     let mut v = v.to_string();
-    if let Some(rest) = v.strip_prefix("identisch (") {
+    if let Some(rest) = v.strip_prefix(DECOMP_IDENTICAL_PREFIX) {
         v = format!("identical ({rest}");
-    } else if let Some(rest) = v.strip_prefix("abweichend: ") {
+    } else if let Some(rest) = v.strip_prefix(DECOMP_DIFFERS_PREFIX) {
         // "N von M Bytes"
         let rest = rest
-            .replacen(" von ", " of ", 1)
+            .replacen(DECOMP_OF, " of ", 1)
             .replacen(" Bytes", " bytes", 1);
         v = format!("differs: {rest}");
     }
     // Ids first (exact, per token), then the fixed phrases around them.
-    let v = map_ids(&v, "Diagnose: ", &[',', ')'], DIAGNOSES);
-    let v = map_ids(&v, "gleichwertig: ", &[' '], EQUIVALENCE_VERDICTS);
-    let v = map_ids(&v, "(statisch ", &[','], EQUIVALENCE_STATIC);
-    let v = map_ids(&v, ", dynamisch ", &[','], EQUIVALENCE_DYNAMIC);
+    let v = map_ids(&v, DECOMP_DIAGNOSIS_MARKER, &[',', ')'], DIAGNOSES);
+    let v = map_ids(&v, DECOMP_EQUIVALENCE_MARKER, &[' '], EQUIVALENCE_VERDICTS);
+    let v = map_ids(&v, DECOMP_STATIC_MARKER, &[','], EQUIVALENCE_STATIC);
+    let v = map_ids(&v, DECOMP_DYNAMIC_MARKER, &[','], EQUIVALENCE_DYNAMIC);
     replace_all(v, REBUILD)
 }
 
 fn name_en(v: &str) -> String {
-    if let Some(name) = v.strip_suffix("  [unbenannt]") {
+    if let Some(name) = v.strip_suffix(DECOMP_UNNAMED_SUFFIX) {
         return format!("{name}  [unnamed]");
     }
     let Some((name, claim)) = v.rsplit_once("  [") else {
@@ -137,15 +160,15 @@ fn name_en(v: &str) -> String {
 }
 
 fn globals_en(v: &str) -> String {
-    if v == "(keine)" {
+    if v == DECOMP_NONE {
         return "(none)".to_string();
     }
     addresses(v)
         .split("; ")
         .map(|e| {
-            if let Some(r) = e.strip_prefix("liest ") {
+            if let Some(r) = e.strip_prefix(DECOMP_READS) {
                 format!("reads {r}")
-            } else if let Some(r) = e.strip_prefix("schreibt ") {
+            } else if let Some(r) = e.strip_prefix(DECOMP_WRITES) {
                 format!("writes {r}")
             } else {
                 e.to_string()
@@ -160,12 +183,12 @@ fn globals_en(v: &str) -> String {
 pub fn value_en(key: &str, v: &str) -> String {
     match key {
         "@address" => addresses(v)
-            .replace("Bytes Spanne", "bytes span")
-            .replace("im Rumpf", "in body")
+            .replace(DECOMP_SPAN, "bytes span")
+            .replace(DECOMP_IN_BODY, "in body")
             .replace(" Bytes", " bytes")
-            .replace(", datei 0x", ", file 0x"),
+            .replace(DECOMP_FILE_AT, ", file 0x"),
         "@name" => name_en(v),
-        "@called-by" | "@calls" | "@strings" => addresses(v).replace("(keine)", "(none)"),
+        "@called-by" | "@calls" | "@strings" => addresses(v).replace(DECOMP_NONE, "(none)"),
         "@globals" => globals_en(v),
         "@rebuild" => rebuild_en(v),
         _ => v.to_string(),
@@ -215,11 +238,11 @@ pub fn expected(decomp: &str) -> String {
         .filter_map(|(k, v)| key_en(&k).map(|en| emit(en, &value_en(en, &v))))
         .collect();
     let mut text = lines.join("\n").replacen(" * ", "/* ", 1) + "\n */\n";
-    let body = match body.strip_prefix("/* Dekompilieren fehlgeschlagen: ") {
+    let body = match body.strip_prefix(DECOMP_DECOMPILE_FAILED_PREFIX) {
         Some(rest) => format!(
             "/* decompilation failed: {}",
             rest.replacen(
-                "/* Disassembly:\n(nicht verfügbar)\n*/",
+                DECOMP_NOT_AVAILABLE,
                 "/* Disassembly:\n(not available)\n*/",
                 1
             )
@@ -242,10 +265,10 @@ pub fn address_of(file: &Path) -> Option<Address> {
     text.parse().ok()
 }
 
-/// Every function file below `<workspace>/ausgabe/funktionen`, sorted by address.
+/// Every function file below Decomp's `ausgabe/funktionen`, sorted by address.
 pub fn decomp_files(workspace: &Path) -> Vec<(Address, PathBuf)> {
     let mut out = Vec::new();
-    let mut stack = vec![workspace.join("ausgabe").join("funktionen")];
+    let mut stack = vec![workspace.join(DECOMP_OUTPUT_DIR).join(DECOMP_FUNCTIONS_DIR)];
     while let Some(dir) = stack.pop() {
         let Ok(list) = std::fs::read_dir(&dir) else {
             continue;

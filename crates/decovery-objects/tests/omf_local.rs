@@ -5,6 +5,9 @@ use std::path::PathBuf;
 use decovery_objects::{functions, read_omf};
 use serde_json::Value;
 
+// Decomp's rebuild object cache below its workspace (its workspace is German).
+const DECOMP_OBJECT_DIR: &str = "cache/nachbau/obj";
+
 fn env_path(name: &str) -> PathBuf {
     PathBuf::from(std::env::var_os(name).unwrap_or_else(|| panic!("{name} is not set")))
 }
@@ -32,7 +35,7 @@ fn hex(s: &str) -> Vec<u8> {
 #[test]
 #[ignore = "local: private Decomp workspace"]
 fn matches_decomp_on_all_objects() {
-    let obj_dir = env_path("DECOVERY_LOCAL_WORKSPACE").join("cache/nachbau/obj");
+    let obj_dir = env_path("DECOVERY_LOCAL_WORKSPACE").join(DECOMP_OBJECT_DIR);
     let golden_dir = env_path("DECOVERY_GOLDEN_DIR").join("omf");
     let mut files: Vec<PathBuf> = std::fs::read_dir(&obj_dir)
         .unwrap()
