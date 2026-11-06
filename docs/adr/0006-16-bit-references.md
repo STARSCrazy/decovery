@@ -51,6 +51,13 @@ functions it compares (`compare_module`: first pass collects, second pass checks
 7. **32-bit.** LE behaviour is unchanged, with one exception: a field whose target is an unnamed position in
    another section, previously an `UncheckedRef`, now proposes a section anchor from the original's relocation
    target (frame base 0) and gets the same consensus and byte check.
+8. **Data layout** (amendment 2026-11-06, Task 11 ruling). A dissenting field whose item is byte-equal to the
+   original at the position the field itself proposes is not a wrong reference but a `DataLayout` blocker: the
+   item exists unchanged, only the section's layout differs from the original. The verdict stays `Differs`.
+9. **Own jump table** (amendment 2026-11-06, Task 11 ruling). A 32-bit field into the function's own section
+   before the function start (Watcom's jump table) is matched by the table, not its address: the original's
+   relocation must point at a table whose consecutive entries lead to the same offsets relative to the function
+   start as the rebuild's entries.
 
 ## Consequences
 
