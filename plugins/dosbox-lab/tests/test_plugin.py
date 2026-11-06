@@ -310,6 +310,31 @@ class RunTest(unittest.TestCase):
         self.assertEqual(answer["error"]["code"], -32010)
 
 
+class ProgressTest(unittest.TestCase):
+    def test_one_progress_event_per_ended_job(self):
+        ws = Workspace(self)
+        backend = ScriptBackend(delay=0)
+        answered = threading.Event()
+
+        class Output(io.StringIO):
+            def write(self, text):
+                written = super().write(text)
+                if '"result"' in text:
+                    answered.set()
+                return written
+
+        def lines():
+            yield json.dumps(request(1, "runner/run", ws.params(["A"], ["B"], ["C"], share=1))) + chr(10)
+            answered.wait(30)
+
+        stdout = Output()
+        build_plugin(lambda: backend).serve(stdin=lines(), stdout=stdout)
+        messages = [json.loads(line) for line in stdout.getvalue().splitlines()]
+        progress = [m["params"] for m in messages if m.get("method") == "$/progress"]
+        self.assertEqual([p["done"] for p in progress], [1, 2, 3])
+        self.assertTrue(all(p["message"].startswith("job ") and " ended after " in p["message"] for p in progress))
+
+
 class InstanceTest(unittest.TestCase):
     def test_dosbox_jobs_split_over_instances(self):
         ws = Workspace(self)

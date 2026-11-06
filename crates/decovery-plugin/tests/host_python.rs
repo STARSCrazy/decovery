@@ -180,3 +180,47 @@ fn plugin_exit_is_reported() {
         "{err:?}"
     );
 }
+
+/// Whether a process with this id exists (Windows).
+#[cfg(windows)]
+fn process_exists(pid: u32) -> bool {
+    let out = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).contains(&pid.to_string())
+}
+
+/// A plugin that hangs in a call and does not answer `shutdown` is killed with the workers it started.
+#[cfg(windows)]
+#[test]
+fn shutdown_of_a_hung_plugin_kills_its_workers() {
+    let Some(host) = spawn() else { return };
+    let marker = std::env::temp_dir().join(format!("decovery-block-{}.pid", std::process::id()));
+    let _ = std::fs::remove_file(&marker);
+    let err = host
+        .call(
+            "echo/block",
+            json!({"seconds": 60, "marker": marker.to_string_lossy()}),
+            opts(Duration::from_secs(2)),
+        )
+        .unwrap_err();
+    assert!(matches!(err, PluginError::Timeout), "{err:?}");
+    let pid: u32 = std::fs::read_to_string(&marker)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(
+        process_exists(pid),
+        "the worker must run before the shutdown"
+    );
+    let started = Instant::now();
+    let _ = host.shutdown();
+    assert!(started.elapsed() < Duration::from_secs(15));
+    assert!(
+        !process_exists(pid),
+        "the worker {pid} survived the shutdown"
+    );
+    let _ = std::fs::remove_file(&marker);
+}

@@ -141,3 +141,72 @@ fn host_caps_in_flight_jobs_to_jobs_and_max_parallel() {
     assert_eq!(shares(&runner, &ten), vec!["share=3"; 10]);
     assert_eq!(slots.acquire(4).count(), 4, "every slot is free again");
 }
+
+#[test]
+fn hung_plugin_ends_the_call_within_timeout_and_slack() {
+    let python = python_or_skip!();
+    let ws = workspace(&python);
+    let build = ws.path().join("build");
+    std::fs::create_dir_all(&build).unwrap();
+    let mut hang = request(&build, 1);
+    hang.jobs = vec![RunJob::new(vec!["HANG".into()], Vec::new())];
+    hang.timeout = Duration::from_secs(1);
+    let runner = start(ws.path(), "plain")
+        .with_slots(JobSlots::new(4))
+        .with_call_slack(Duration::from_secs(1));
+    let started = std::time::Instant::now();
+    let error = runner.run(&hang, None).unwrap_err();
+    assert!(error.to_string().contains("timed out"), "{error}");
+    let waited = started.elapsed();
+    assert!(waited < Duration::from_secs(5), "the call took {waited:?}");
+    // dropping the runner must not wait for the plugin either (shutdown grace 5 s + kill)
+    let started = std::time::Instant::now();
+    drop(runner);
+    assert!(
+        started.elapsed() < Duration::from_secs(12),
+        "the shutdown took {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn plugin_runner_reports_one_progress_event_per_job() {
+    let python = python_or_skip!();
+    let ws = workspace(&python);
+    let build = ws.path().join("build");
+    std::fs::create_dir_all(&build).unwrap();
+    let runner = start(ws.path(), "limited").with_slots(JobSlots::new(4));
+    let seen = std::cell::RefCell::new(Vec::new());
+    let outcomes = runner
+        .run_reporting(&request(&build, 3), None, &|p| {
+            seen.borrow_mut()
+                .push((p.done, p.total, p.message.unwrap_or_default()))
+        })
+        .unwrap();
+    assert_eq!(outcomes.len(), 3);
+    let seen = seen.into_inner();
+    assert_eq!(seen.len(), 3, "{seen:?}");
+    assert_eq!(seen[2], (3, Some(3), "job 3 of 3 done".to_string()));
+}
+
+#[test]
+fn hung_jobs_are_waited_for_in_rounds_of_the_share() {
+    let python = python_or_skip!();
+    let ws = workspace(&python);
+    let build = ws.path().join("build");
+    std::fs::create_dir_all(&build).unwrap();
+    let mut hang = request(&build, 6);
+    hang.jobs = (0..6)
+        .map(|_| RunJob::new(vec!["HANG".into()], Vec::new()))
+        .collect();
+    hang.timeout = Duration::from_secs(1);
+    // share 3: two rounds of one second, plus the slack; not six seconds as if the jobs ran one by one
+    let runner = start(ws.path(), "limited")
+        .with_slots(JobSlots::new(16))
+        .with_call_slack(Duration::from_secs(1));
+    let started = std::time::Instant::now();
+    assert!(runner.run(&hang, None).is_err());
+    let waited = started.elapsed();
+    assert!(waited < Duration::from_secs(5), "the call took {waited:?}");
+    assert!(waited >= Duration::from_secs(3), "the call took {waited:?}");
+}

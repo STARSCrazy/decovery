@@ -51,6 +51,22 @@ class BatchTest(unittest.TestCase):
             plan(PRELUDE + ["WCC386 D.C"], self.drives)
             self.assertEqual(len(reads), 2)  # a changed program is read again
 
+    def test_cd_changes_the_directory_of_the_programs(self):
+        (self.c / "v001").mkdir()
+        steps = plan(PRELUDE + ["CD v001", "WCC386 A.C"], self.drives)
+        self.assertEqual(steps[-1].kind, "run")
+        self.assertEqual(steps[-1].cwd.upper(), "V001")
+        steps = plan(PRELUDE + ["CD v001", "CD \\", "WCC386 A.C"], self.drives)
+        self.assertEqual(steps[-1].cwd, "")  # back to the root
+        steps = plan(PRELUDE + ["WCC386 A.C"], self.drives)
+        self.assertEqual(steps[-1].cwd, "")
+
+    def test_cd_to_a_missing_directory_ends_the_job(self):
+        steps = plan(PRELUDE + ["CD nowhere", "WCC386 A.C"], self.drives)
+        missing = [s for s in steps if s.kind == "missing"]  # execute_job stops at the first one
+        self.assertEqual(len(missing), 1)
+        self.assertIn("nowhere", missing[0].text)
+
     def test_set_lines_build_the_environment(self):
         steps = plan(PRELUDE + ["SET WATCOM=", "WCC386 -zq -ox -3r A.C"], self.drives)
         self.assertEqual([s.kind for s in steps], ["set", "set", "set", "set", "run"])

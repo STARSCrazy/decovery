@@ -6,6 +6,7 @@ Licensed GPL-2.0-only (it uses unicorn); decovery itself only talks to it over t
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -93,11 +94,27 @@ def build_plugin(machine_factory: Callable[[Any], Any] | None = None) -> Plugin:
             }
             for job_steps, cost in zip(steps, costs)
         ]
+        started = time.monotonic()
+        finished = 0
+
+        def report(index: int, outcome: dict) -> None:
+            # one event per ended job: a hang is told from a slow compile by the events that stop coming
+            nonlocal finished
+            finished += 1
+            ctx.progress(
+                finished,
+                len(jobs),
+                f"job {index + 1} of {len(jobs)} {outcome.get('status')} after {time.monotonic() - started:.1f} s",
+            )
+
         if pool is not None:
-            outcomes = pool.run(jobs, parallel=share)
+            outcomes = pool.run(jobs, parallel=share, on_done=report)
         else:
             with lock:
-                outcomes = [execute_job(job, machines.get) for job in jobs]
+                outcomes = []
+                for index, job in enumerate(jobs):
+                    outcomes.append(execute_job(job, machines.get))
+                    report(index, outcomes[-1])
         return {"jobs": outcomes}
 
     return plugin

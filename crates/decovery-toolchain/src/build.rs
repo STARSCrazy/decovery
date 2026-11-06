@@ -8,11 +8,11 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
 use decovery_core::{Workspace, read_user_config};
-use decovery_plugin::CancelToken;
+use decovery_plugin::{CancelToken, Progress};
 
 use crate::{
     JobOutcome, JobStatus, Mount, ObjectCache, Profile, RunJob, RunRequest, Runner, ToolchainError,
-    run_with_fallback, tool_dir,
+    run_with_fallback_reporting, tool_dir,
 };
 
 /// Timeout per compile when `[rebuild] timeout_s` is not set.
@@ -20,6 +20,41 @@ pub const DEFAULT_TIMEOUT_S: u32 = 120;
 
 /// What the dosbox-lab runner reports for the jobs of a batch after one that hung or crashed.
 const JOB_NOT_RUN: &str = "job not run";
+
+/// One source to compile: its staged DOS name, its flags and, optionally, the directory of the build directory it is
+/// staged in (the compiler runs there, so `__FILE__`, messages and the object name are those of a source in the
+/// build directory itself; headers must be staged in that directory too).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SourceJob {
+    pub name: String,
+    pub flags: String,
+    pub dir: Option<String>,
+}
+
+impl SourceJob {
+    pub fn new(name: impl Into<String>, flags: impl Into<String>) -> Self {
+        SourceJob {
+            name: name.into(),
+            flags: flags.into(),
+            dir: None,
+        }
+    }
+
+    /// Stages and runs the compile in `dir` (a name of at most 8 characters under the build directory).
+    pub fn in_dir(mut self, dir: impl Into<String>) -> Self {
+        self.dir = Some(dir.into());
+        self
+    }
+
+    /// The path of the staged source relative to the build directory.
+    fn path(&self) -> PathBuf {
+        match &self.dir {
+            Some(dir) => Path::new(dir).join(&self.name),
+            None => PathBuf::from(&self.name),
+        }
+    }
+}
 
 /// The object of one source, or why there is none.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,7 +185,7 @@ fn failure(outcome: &JobOutcome, object: &str) -> String {
 #[derive(Debug)]
 pub struct CompilePlan {
     dir: PathBuf,
-    sources: Vec<(String, String)>,
+    sources: Vec<SourceJob>,
     keys: Vec<String>,
     /// The cached object per source, if any.
     cached: Vec<Option<Vec<u8>>>,
@@ -179,7 +214,7 @@ impl CompilePlan {
 pub fn plan_compile(
     ws: &Workspace,
     profile: &Profile,
-    sources: &[(String, String)],
+    sources: &[SourceJob],
     build_dir: &Path,
 ) -> Result<CompilePlan, ToolchainError> {
     let user = read_user_config().map_err(|e| ToolchainError::Invalid(e.to_string()))?;
@@ -194,9 +229,10 @@ pub fn plan_compile(
     let mut keys = Vec::new();
     let mut cached = Vec::new();
     let mut sizes = Vec::new();
-    for (name, flags) in sources {
+    for job in sources {
+        let (name, flags) = (&job.name, &job.flags);
         let line = profile.compile_line(flags, name);
-        let source = read(&build_dir.join(name))?;
+        let source = read(&build_dir.join(job.path()))?;
         inputs.insert(name.clone(), blake3::hash(&source).to_hex().to_string());
         let key = ObjectCache::key(profile, &line, &source, &headers, &fingerprint);
         cached.push(cache.get(&key));
@@ -214,22 +250,23 @@ pub fn plan_compile(
     })
 }
 
-/// Compiles the staged `sources` (DOS name, flags) in `build_dir`: [`plan_compile`], then [`compile_planned`].
+/// Compiles the staged `sources` in `build_dir`: [`plan_compile`], then [`compile_planned`].
 pub fn compile(
     ws: &Workspace,
     profile: &Profile,
-    sources: &[(String, String)],
+    sources: &[SourceJob],
     build_dir: &Path,
     runners: &[Box<dyn Runner>],
     cancel: Option<CancelToken>,
 ) -> Result<(Vec<CompiledFile>, Vec<String>), ToolchainError> {
     let plan = plan_compile(ws, profile, sources, build_dir)?;
-    compile_planned(ws, profile, plan, build_dir, runners, cancel)
+    compile_planned(ws, profile, plan, build_dir, runners, cancel, &|_| {})
 }
 
 /// Compiles what `plan` could not take from the object cache, in one runner request, one job per source (its cost
 /// the source size, so runners start the largest first). Jobs the runner did not start ([`is_job_not_run`]) are
-/// submitted once more. Returns one [`CompiledFile`] per source, in order, and the runners' warnings.
+/// submitted once more. Returns one [`CompiledFile`] per source, in order, and the runners' warnings. `progress`
+/// receives what the runner reports while it works (a plugin runner: one event per finished job).
 pub fn compile_planned(
     ws: &Workspace,
     profile: &Profile,
@@ -237,6 +274,7 @@ pub fn compile_planned(
     build_dir: &Path,
     runners: &[Box<dyn Runner>],
     cancel: Option<CancelToken>,
+    progress: &dyn Fn(Progress),
 ) -> Result<(Vec<CompiledFile>, Vec<String>), ToolchainError> {
     let rebuild = ws.config.rebuild.as_ref();
     let CompilePlan {
@@ -251,11 +289,11 @@ pub fn compile_planned(
 
     let mut files: Vec<CompiledFile> = Vec::new();
     let mut misses: Vec<(usize, String, RunJob)> = Vec::new();
-    for (i, (((name, flags), key), object)) in sources.iter().zip(keys).zip(cached).enumerate() {
-        let line = profile.compile_line(flags, name);
+    for (i, ((job, key), object)) in sources.iter().zip(keys).zip(cached).enumerate() {
+        let line = profile.compile_line(&job.flags, &job.name);
         let cached = object.is_some();
         files.push(CompiledFile {
-            file: name.clone(),
+            file: job.name.clone(),
             object,
             message: String::new(),
             cached,
@@ -271,11 +309,18 @@ pub fn compile_planned(
             })?;
             let mut commands = profile.prelude.clone();
             commands.push(format!("SET TMP=C:\\{tmp}"));
+            if let Some(dir) = &job.dir {
+                commands.push(format!("CD {dir}"));
+            }
             commands.push(line);
+            let object = match &job.dir {
+                Some(dir) => format!("{dir}/{}", profile.object_name(&job.name)),
+                None => profile.object_name(&job.name),
+            };
             misses.push((
                 i,
                 key,
-                RunJob::new(commands, vec![profile.object_name(name)]).with_cost(sizes[i]),
+                RunJob::new(commands, vec![object]).with_cost(sizes[i]),
             ));
         }
     }
@@ -296,8 +341,9 @@ pub fn compile_planned(
     ];
     let run = |jobs: Vec<RunJob>, warnings: &mut Vec<String>| {
         let request = RunRequest::new(mounts.clone(), jobs, timeout);
-        let (outcomes, more) = run_with_fallback(runners, &request, cancel.clone())
-            .map_err(|e| ToolchainError::Invalid(format!("cannot compile: {e}")))?;
+        let (outcomes, more) =
+            run_with_fallback_reporting(runners, &request, cancel.clone(), progress)
+                .map_err(|e| ToolchainError::Invalid(format!("cannot compile: {e}")))?;
         warnings.extend(more);
         Ok::<_, ToolchainError>(outcomes)
     };
@@ -415,7 +461,7 @@ mod tests {
         std::fs::write(build.join("A.C"), b"int a;\r\n").unwrap();
         std::fs::write(build.join("B.H"), b"int b;\r\n").unwrap();
         let profile = crate::profile("turbo-c-2.0").unwrap();
-        let sources = [("A.C".to_string(), String::new())];
+        let sources = [SourceJob::new("A.C", "")];
         let plan = plan_compile(&ws, &profile, &sources, &build).unwrap();
         assert_eq!(plan.misses(), 1);
         assert_eq!(
@@ -430,7 +476,8 @@ mod tests {
         // compile_planned runs the plan's misses with the plan's keys: one request, one job
         let records = Records::default();
         let runners: Vec<Box<dyn Runner>> = vec![Box::new(records.clone())];
-        let (files, _) = compile_planned(&ws, &profile, plan, &build, &runners, None).unwrap();
+        let (files, _) =
+            compile_planned(&ws, &profile, plan, &build, &runners, None, &|_| {}).unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(records.0.lock().unwrap().len(), 1);
 
@@ -456,15 +503,45 @@ mod tests {
     }
 
     #[test]
+    fn job_with_directory_runs_there() {
+        let (_root, ws, build) = turbo_c_workspace();
+        for dir in ["V001", "V002"] {
+            std::fs::create_dir_all(build.join(dir)).unwrap();
+            std::fs::write(
+                build.join(dir).join("A.C"),
+                format!(
+                    "int {dir};
+"
+                ),
+            )
+            .unwrap();
+        }
+        let profile = crate::profile("turbo-c-2.0").unwrap();
+        let sources = [
+            SourceJob::new("A.C", "-ms").in_dir("V001"),
+            SourceJob::new("A.C", "-ms").in_dir("V002"),
+        ];
+        let records = Records::default();
+        let runners: Vec<Box<dyn Runner>> = vec![Box::new(records.clone())];
+        compile(&ws, &profile, &sources, &build, &runners, None).unwrap();
+        let requests = records.0.lock().unwrap();
+        assert_eq!(requests.len(), 1, "all misses in one request");
+        let jobs = &requests[0];
+        assert_eq!(jobs[0].expected, ["V001/A.OBJ"]);
+        assert_eq!(jobs[1].expected, ["V002/A.OBJ"]);
+        // the compile line is the one of a source in the build directory itself, run after the CD
+        let last = jobs[0].commands.len() - 1;
+        assert_eq!(jobs[0].commands[last - 1], "CD V001");
+        assert_eq!(jobs[0].commands[last], profile.compile_line("-ms", "A.C"));
+    }
+
+    #[test]
     fn compile_jobs_carry_source_size_as_cost() {
         let (_root, ws, build) = turbo_c_workspace();
         std::fs::write(build.join("A.C"), b"int a;\r\n").unwrap();
         std::fs::write(build.join("B.C"), vec![b' '; 300]).unwrap();
         let profile = crate::profile("turbo-c-2.0").unwrap();
-        let sources = [
-            ("A.C".to_string(), String::new()),
-            ("B.C".to_string(), String::new()),
-        ];
+        let sources = [SourceJob::new("A.C", ""), SourceJob::new("B.C", "")];
         let records = Records::default();
         let runners: Vec<Box<dyn Runner>> = vec![Box::new(records.clone())];
         compile(&ws, &profile, &sources, &build, &runners, None).unwrap();
@@ -482,7 +559,7 @@ mod tests {
         std::fs::write(build.join("A.C"), b"int a;\r\n").unwrap();
         let profile = crate::profile("turbo-c-2.0").unwrap();
         let runners: Vec<Box<dyn Runner>> = vec![Box::new(ClaimsSuccess)];
-        let sources = [("A.C".to_string(), String::new())];
+        let sources = [SourceJob::new("A.C", "")];
         let (files, _) = compile(&ws, &profile, &sources, &build, &runners, None).unwrap();
         assert!(files[0].object.is_none());
         assert!(files[0].message.contains("A.OBJ"), "{}", files[0].message);

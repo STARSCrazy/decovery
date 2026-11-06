@@ -150,7 +150,8 @@ enum Command {
         /// Report this function only (name or address); its file is built.
         #[arg(long, value_name = "NAME")]
         function: Option<String>,
-        /// Candidate source file for `--function` (repeatable, at most 64).
+        /// Candidate source for `--function`: a whole replacement of the function's file, UTF-8 or code page 437
+        /// (repeatable, at most 64).
         #[arg(long = "variant", value_name = "FILE")]
         variant: Vec<PathBuf>,
     },
@@ -770,9 +771,12 @@ fn build(
     request.files = files;
     request.function = function;
     for path in variants {
-        let source = std::fs::read_to_string(path).map_err(|e| {
+        let bytes = std::fs::read(path).map_err(|e| {
             FacadeError::Invalid(format!("cannot read variant {}: {e}", path.display()))
         })?;
+        // UTF-8 text, else code page 437 (what a DOS-era editor writes)
+        let source = String::from_utf8(bytes)
+            .unwrap_or_else(|e| decovery_toolchain::from_cp437(e.as_bytes()));
         request
             .variants
             .push(Variant::new(source).with_label(path.display().to_string()));

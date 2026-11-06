@@ -1,7 +1,7 @@
 """Fake `runner` plugin for the build tests.
 
 For a job whose last command line ends with `X.C` (any extension) it copies `X.OBJ` from the directory in
-FAKE_OMF_DIR into the C mount and exits 0; without that file it prints an error and exits 1. Every compiled job
+FAKE_OMF_DIR into the C mount (after a `CD D` line: `D.OBJ` into the directory D of the C mount, as `X.OBJ`) and exits 0; without that file it prints an error and exits 1. Every compiled job
 appends its source name to `calls.log` and its `SET TMP=` directory (and whether it exists) to `tmp.log`, every
 call appends its job count to `requests.log` (all in FAKE_OMF_DIR).
 
@@ -27,18 +27,22 @@ def append(name, line):
 
 
 def run_job(job, c_root):
+    cd = None
     for line in job["commands"]:
         if line.upper().startswith("SET TMP=C:\\"):
             tmp = line[len("SET TMP=C:\\"):]
             exists = os.path.isdir(os.path.join(c_root, tmp))
             append("tmp.log", f"{tmp} {'exists' if exists else 'missing'}")
+        if line.upper().startswith("CD "):
+            cd = line[3:].strip()
     source = job["commands"][-1].split()[-1]
     stem = source.rsplit(".", 1)[0]
-    append("calls.log", source)
-    obj = os.path.join(OBJECTS, stem + ".OBJ")
+    append("calls.log", f"{cd}/{source}" if cd else source)
+    # a job in a directory (a variant) is served the object named like the directory: V001.OBJ
+    obj = os.path.join(OBJECTS, (cd or stem) + ".OBJ")
     if not os.path.isfile(obj):
         return {"status": "done", "exit_code": 1, "stdout": f"{source}(1): Error: no object\r\n"}
-    shutil.copyfile(obj, os.path.join(c_root, stem + ".OBJ"))
+    shutil.copyfile(obj, os.path.join(c_root, cd or "", stem + ".OBJ"))
     return {"status": "done", "exit_code": 0, "stdout": ""}
 
 
@@ -56,6 +60,7 @@ def run(params, ctx):
                             "message": "job not run: an earlier job ended the batch"})
         else:
             results.append(run_job(job, c_root))
+            ctx.progress(i + 1, len(jobs), f"job {i + 1} of {len(jobs)} done")
     if cut:
         open(marker, "w").close()
     return {"jobs": results}

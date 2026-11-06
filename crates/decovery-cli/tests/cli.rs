@@ -508,7 +508,7 @@ fn build_variants_ranks_and_sets_exit_code() {
     let dir = tempfile::tempdir().unwrap();
     let (one, two) = (dir.path().join("one.c"), dir.path().join("two.c"));
     std::fs::write(&one, source).unwrap();
-    std::fs::write(&two, source).unwrap();
+    std::fs::write(&two, format!("{source}/* two */\n")).unwrap();
     let run = |variants: &[&std::path::Path]| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_decovery"));
         command.args(["build", "--function", "sub", "--json", "--workspace"]);
@@ -529,4 +529,30 @@ fn build_variants_ranks_and_sets_exit_code() {
     // only the worse variant: exit 1
     let out = run(&[&one]);
     assert_eq!(out.status.code(), Some(1), "{out:?}");
+}
+
+#[test]
+fn build_variant_file_may_be_code_page_437() {
+    let python = python_or_skip!();
+    let f = build_fixture::fixture(&python, "");
+    f.write_obj("V001", &[("_sub", build_fixture::SUB)]);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cp.c");
+    // 0x84 is "ä" in code page 437 and not valid UTF-8
+    let mut text = b"/* \x84 */\nint sub(int a, int b)\n{\n    return a - b;\n}\n".to_vec();
+    std::fs::write(&path, &text).unwrap();
+    let run = || {
+        Command::new(env!("CARGO_BIN_EXE_decovery"))
+            .args(["build", "--function", "sub", "--json", "--workspace"])
+            .arg(f.root())
+            .arg("--variant")
+            .arg(&path)
+            .output()
+            .expect("run decovery")
+    };
+    let out = run();
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["data"]["variants"][0]["verdict"], "identical");
+    text.clear();
 }

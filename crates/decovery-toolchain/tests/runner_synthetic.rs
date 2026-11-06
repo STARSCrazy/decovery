@@ -360,3 +360,32 @@ fn native_runner_kills_grandchild_at_timeout() {
         started.elapsed()
     );
 }
+
+#[test]
+fn native_runner_cd_changes_the_directory_of_later_commands() {
+    let Some(python) = python() else {
+        eprintln!("SKIP: no Python (set DECOVERY_PYTHON or put `python` on PATH)");
+        return;
+    };
+    let build = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(build.path().join("v001")).unwrap();
+    let write = format!("{python} -c \"open('out.txt','w').write('x')\"");
+    let req = request(
+        build.path(),
+        vec![
+            job(&["CD v001", &write], &["v001/out.txt"]),
+            job(&["CD nowhere", &write], &["out.txt"]),
+        ],
+        Duration::from_secs(30),
+    );
+    let outcomes = NativeRunner.run(&req, None).unwrap();
+    assert!(outcomes[0].succeeded(), "{:?}", outcomes[0]);
+    assert!(build.path().join("v001/out.txt").is_file());
+    assert!(!build.path().join("out.txt").exists());
+    assert_eq!(outcomes[1].status, JobStatus::Failed);
+    assert!(
+        outcomes[1].message.as_deref().unwrap().contains("nowhere"),
+        "{:?}",
+        outcomes[1]
+    );
+}
