@@ -256,7 +256,7 @@ pub fn run_setup(
     for dir in [&sdk, &ghidra_plugin] {
         if !dir.is_dir() {
             return fail(format!(
-                "plugin directory {} not found; pass --plugins-dir",
+                "plugin directory {} not found; pass --plugins-dir <dir>",
                 dir.display()
             ));
         }
@@ -328,33 +328,62 @@ pub struct UnicornReport {
     pub venv_kept: bool,
 }
 
-/// Creates `<extern>/unicorn-venv`, installs the SDK, the `unicorn-dos` plugin and the pinned unicorn, and
-/// registers `[plugins.unicorn-dos]`. A venv in which the plugin already imports is kept as it is.
-pub fn run_unicorn_setup(
-    opts: &UnicornOptions,
+/// What differs between the plugins that live in a venv of their own.
+struct VenvPlugin<'a> {
+    /// Plugin id in `[plugins.<id>]` and directory name below `plugins/`.
+    id: &'a str,
+    /// Venv directory name below the extern dir.
+    venv_name: &'a str,
+    /// Python module that is run with `-m` and imported to check an existing venv.
+    module: &'a str,
+    /// Requirements installed before the SDK and the plugin (pins, local package directories).
+    requirements: Vec<OsString>,
+}
+
+/// Where a venv plugin is installed from and to.
+struct Place<'a> {
+    extern_dir: &'a Path,
+    plugins_dir: &'a Path,
+    python: &'a str,
+    config_path: &'a Path,
+    platform: Platform,
+}
+
+/// Creates the venv, installs the requirements, the SDK and the plugin, and registers `[plugins.<id>]`.
+/// A venv in which the plugin already imports is kept as it is. Returns the venv python and whether it was kept.
+fn install_venv_plugin(
+    spec: &VenvPlugin,
+    place: &Place,
     runner: &dyn Runner,
     log: &mut dyn FnMut(&str),
-) -> Result<UnicornReport, SetupError> {
-    let sdk = opts.plugins_dir.join("decovery-plugin-sdk");
-    let plugin = opts.plugins_dir.join("unicorn-dos");
+) -> Result<(PathBuf, bool), SetupError> {
+    let Place {
+        extern_dir,
+        plugins_dir,
+        python,
+        config_path,
+        platform,
+    } = *place;
+    let sdk = plugins_dir.join("decovery-plugin-sdk");
+    let plugin = plugins_dir.join(spec.id);
     for dir in [&sdk, &plugin] {
         if !dir.is_dir() {
             return fail(format!(
-                "plugin directory {} not found; pass --plugins-dir",
-                dir.display()
+                "plugin directory {} not found; pass --plugins-dir <dir> (holding decovery-plugin-sdk and {})",
+                dir.display(),
+                spec.id
             ));
         }
     }
-    std::fs::create_dir_all(&opts.extern_dir)
-        .map_err(|e| io_err("cannot create", &opts.extern_dir, e))?;
-    let venv = opts.extern_dir.join("unicorn-venv");
-    let venv_python = venv_python(&venv, opts.platform);
+    std::fs::create_dir_all(extern_dir).map_err(|e| io_err("cannot create", extern_dir, e))?;
+    let venv = extern_dir.join(spec.venv_name);
+    let venv_python = venv_python(&venv, platform);
 
     let kept = venv_python.is_file()
         && runner
             .run(
                 venv_python.as_os_str(),
-                &["-c".into(), "import decovery_unicorn_dos".into()],
+                &["-c".into(), format!("import {}", spec.module).into()],
             )
             .is_ok();
     if kept {
@@ -362,7 +391,7 @@ pub fn run_unicorn_setup(
     } else {
         run(
             runner,
-            OsStr::new(&opts.python),
+            OsStr::new(python),
             &[
                 "-c".into(),
                 "import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)".into(),
@@ -370,14 +399,13 @@ pub fn run_unicorn_setup(
         )
         .map_err(|_| {
             SetupError::Message(format!(
-                "{} is not Python 3.12 or newer; pass --python or set DECOVERY_PYTHON",
-                opts.python
+                "{python} is not Python 3.12 or newer; pass --python or set DECOVERY_PYTHON"
             ))
         })?;
         log(&format!("step: creating venv {}", venv.display()));
         run(
             runner,
-            OsStr::new(&opts.python),
+            OsStr::new(python),
             &[
                 "-m".into(),
                 "venv".into(),
@@ -392,33 +420,113 @@ pub fn run_unicorn_setup(
             ));
         }
         log(&format!(
-            "step: pip install unicorn=={UNICORN} and the local plugins"
+            "step: pip install {} and the local plugins",
+            spec.requirements
+                .iter()
+                .map(|r| r.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join(" ")
         ));
-        run(
-            runner,
-            venv_python.as_os_str(),
-            &[
-                "-m".into(),
-                "pip".into(),
-                "install".into(),
-                format!("unicorn=={UNICORN}").into(),
-                sdk.into_os_string(),
-                plugin.into_os_string(),
-            ],
-        )?;
+        let mut args: Vec<OsString> = vec!["-m".into(), "pip".into(), "install".into()];
+        args.extend(spec.requirements.iter().cloned());
+        args.push(sdk.into_os_string());
+        args.push(plugin.into_os_string());
+        run(runner, venv_python.as_os_str(), &args)?;
     }
 
     log(&format!(
-        "step: writing [plugins.unicorn-dos] to {}",
-        opts.config_path.display()
+        "step: writing [plugins.{}] to {}",
+        spec.id,
+        config_path.display()
     ));
-    let command = vec![
-        path_str(&venv_python)?,
-        "-m".into(),
-        "decovery_unicorn_dos".into(),
-    ];
-    write_plugin_entry(&opts.config_path, "unicorn-dos", &command, &BTreeMap::new())?;
+    let command = vec![path_str(&venv_python)?, "-m".into(), spec.module.into()];
+    write_plugin_entry(config_path, spec.id, &command, &BTreeMap::new())?;
+    Ok((venv_python, kept))
+}
+
+/// Creates `<extern>/unicorn-venv`, installs the SDK, the `unicorn-dos` plugin and the pinned unicorn, and
+/// registers `[plugins.unicorn-dos]`. A venv in which the plugin already imports is kept as it is.
+pub fn run_unicorn_setup(
+    opts: &UnicornOptions,
+    runner: &dyn Runner,
+    log: &mut dyn FnMut(&str),
+) -> Result<UnicornReport, SetupError> {
+    let spec = VenvPlugin {
+        id: "unicorn-dos",
+        venv_name: "unicorn-venv",
+        module: "decovery_unicorn_dos",
+        requirements: vec![format!("unicorn=={UNICORN}").into()],
+    };
+    let (venv_python, kept) = install_venv_plugin(
+        &spec,
+        &Place {
+            extern_dir: &opts.extern_dir,
+            plugins_dir: &opts.plugins_dir,
+            python: &opts.python,
+            config_path: &opts.config_path,
+            platform: opts.platform,
+        },
+        runner,
+        log,
+    )?;
     Ok(UnicornReport {
+        venv_python,
+        config_path: opts.config_path.clone(),
+        venv_kept: kept,
+    })
+}
+
+pub struct DosboxLabOptions {
+    pub extern_dir: PathBuf,
+    /// Directory holding `decovery-plugin-sdk` and `dosbox-lab`.
+    pub plugins_dir: PathBuf,
+    /// Directory of the dosbox-lab Python package (holds its `pyproject.toml`).
+    pub package_dir: PathBuf,
+    /// Python (>= 3.12) used to create the venv.
+    pub python: String,
+    pub config_path: PathBuf,
+    pub platform: Platform,
+}
+
+#[derive(Debug)]
+pub struct DosboxLabReport {
+    pub venv_python: PathBuf,
+    pub config_path: PathBuf,
+    pub venv_kept: bool,
+}
+
+/// Creates `<extern>/dosbox-lab-venv`, installs the SDK, the `dosbox-lab` plugin and the dosbox-lab package from
+/// `package_dir`, and registers `[plugins.dosbox-lab]`. The DOSBox executable is not installed.
+pub fn run_dosbox_lab_setup(
+    opts: &DosboxLabOptions,
+    runner: &dyn Runner,
+    log: &mut dyn FnMut(&str),
+) -> Result<DosboxLabReport, SetupError> {
+    if !opts.package_dir.join("pyproject.toml").is_file() {
+        return fail(format!(
+            "{} holds no pyproject.toml; pass the dosbox-lab Python package directory (`python/` in its repository) with --package",
+            opts.package_dir.display()
+        ));
+    }
+    let spec = VenvPlugin {
+        id: "dosbox-lab",
+        venv_name: "dosbox-lab-venv",
+        module: "decovery_dosbox_lab",
+        requirements: vec![opts.package_dir.clone().into_os_string()],
+    };
+    let (venv_python, kept) = install_venv_plugin(
+        &spec,
+        &Place {
+            extern_dir: &opts.extern_dir,
+            plugins_dir: &opts.plugins_dir,
+            python: &opts.python,
+            config_path: &opts.config_path,
+            platform: opts.platform,
+        },
+        runner,
+        log,
+    )?;
+    Ok(DosboxLabReport {
         venv_python,
         config_path: opts.config_path.clone(),
         venv_kept: kept,
@@ -690,14 +798,14 @@ pub fn default_extern_dir(start: &Path, config_path: &Path) -> PathBuf {
 pub fn find_plugins_dir(start: &Path) -> Result<PathBuf, String> {
     for dir in start.ancestors() {
         let plugins = dir.join("plugins");
-        if ["decovery-plugin-sdk", "ghidra", "unicorn-dos"]
+        if ["decovery-plugin-sdk", "ghidra", "unicorn-dos", "dosbox-lab"]
             .iter()
             .all(|name| plugins.join(name).is_dir())
         {
             return Ok(plugins);
         }
     }
-    Err("not inside the decovery repository; pass --plugins-dir <dir> (holding decovery-plugin-sdk, ghidra and unicorn-dos)".into())
+    Err("not inside the decovery repository; pass --plugins-dir <dir> (holding decovery-plugin-sdk, ghidra, unicorn-dos and dosbox-lab)".into())
 }
 
 fn sha256_file(path: &Path) -> Result<String, SetupError> {
@@ -983,6 +1091,7 @@ mod tests {
         std::fs::create_dir_all(repo.join("plugins/decovery-plugin-sdk")).unwrap();
         std::fs::create_dir_all(repo.join("plugins/ghidra")).unwrap();
         std::fs::create_dir_all(repo.join("plugins/unicorn-dos")).unwrap();
+        std::fs::create_dir_all(repo.join("plugins/dosbox-lab")).unwrap();
         std::fs::create_dir_all(repo.join("a/b")).unwrap();
         assert_eq!(
             find_plugins_dir(&repo.join("a/b")).unwrap(),
@@ -1135,5 +1244,69 @@ mod tests {
         assert_eq!(entry.command[0], report.venv_python.to_string_lossy());
         assert_eq!(entry.command[1..], ["-m", "decovery_unicorn_dos"]);
         assert!(entry.env.is_empty());
+    }
+
+    fn dosbox_options(root: &Path) -> DosboxLabOptions {
+        let plugins = root.join("plugins");
+        std::fs::create_dir_all(plugins.join("decovery-plugin-sdk")).unwrap();
+        std::fs::create_dir_all(plugins.join("dosbox-lab")).unwrap();
+        let package = root.join("dosbox-lab-src");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(package.join("pyproject.toml"), "").unwrap();
+        DosboxLabOptions {
+            extern_dir: root.join("extern dir"),
+            plugins_dir: plugins,
+            package_dir: package,
+            python: "py".into(),
+            config_path: root.join("cfg").join("config.toml"),
+            platform: TEST_PLATFORM,
+        }
+    }
+
+    #[test]
+    fn dosbox_lab_setup_installs_sdk_plugin_and_package() {
+        let dir = tempfile::tempdir().unwrap();
+        let opts = dosbox_options(dir.path());
+        let runner = FakeRunner::default();
+        let report = run_dosbox_lab_setup(&opts, &runner, &mut |_| {}).unwrap();
+        assert!(!report.venv_kept);
+        let calls = runner.calls.borrow();
+        let venv = calls
+            .iter()
+            .find(|c| c.contains(&"venv".to_string()))
+            .unwrap();
+        assert!(venv.last().unwrap().ends_with("dosbox-lab-venv"));
+        let pip = calls
+            .iter()
+            .find(|c| c.contains(&"pip".to_string()))
+            .unwrap();
+        assert!(pip.iter().any(|a| a.ends_with("dosbox-lab-src")));
+        assert!(pip.iter().any(|a| a.ends_with("decovery-plugin-sdk")));
+        assert!(pip.iter().any(|a| a.ends_with("dosbox-lab")));
+        let plugins = read_plugins_file(&opts.config_path).unwrap();
+        let entry = &plugins["dosbox-lab"];
+        assert_eq!(entry.command[0], report.venv_python.to_string_lossy());
+        assert_eq!(entry.command[1..], ["-m", "decovery_dosbox_lab"]);
+    }
+
+    #[test]
+    fn dosbox_lab_package_without_pyproject_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut opts = dosbox_options(dir.path());
+        opts.package_dir = dir.path().join("nowhere");
+        let runner = FakeRunner::default();
+        let err = run_dosbox_lab_setup(&opts, &runner, &mut |_| {}).unwrap_err();
+        assert!(err.to_string().contains("--package"), "{err}");
+        assert!(runner.calls.borrow().is_empty());
+        assert!(!opts.config_path.exists());
+    }
+
+    #[test]
+    fn missing_plugin_directory_names_the_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut opts = dosbox_options(dir.path());
+        opts.plugins_dir = dir.path().join("nowhere");
+        let err = run_dosbox_lab_setup(&opts, &FakeRunner::default(), &mut |_| {}).unwrap_err();
+        assert!(err.to_string().contains("--plugins-dir"), "{err}");
     }
 }

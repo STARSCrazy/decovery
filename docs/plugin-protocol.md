@@ -178,4 +178,5 @@ before running any job; the host then tries the next runner of its list.
 
 | Code | Meaning |
 |---|---|
+| `-32010` | `dosbox-lab` only: the dosbox-lab package or the DOSBox executable is missing; nothing was run |
 | `-32020` | `RUNNER_UNSUPPORTED`: some job's program cannot be run by this plugin; nothing was run |
