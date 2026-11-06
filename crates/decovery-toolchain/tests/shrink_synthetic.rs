@@ -201,3 +201,26 @@ int f(void)
     assert_eq!(shrunk.dropped, ["unused"]);
     assert_eq!(lines(&shrunk.text), lines(text));
 }
+
+#[test]
+fn definitions_survive_a_stray_closing_brace() {
+    // brace-split `#if` branches can leave a `}` the finder sees at the top level
+    let text = "int g(void)
+{
+#if A
+    if (a) {
+#endif
+    }
+    }
+    return 0;
+}
+int f(void)
+{
+    _asm nop
+}
+";
+    assert!(names(text).contains(&"f".to_string()), "{:?}", names(text));
+    let found = decovery_toolchain::find_cheats(text);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].function.as_deref(), Some("f"));
+}

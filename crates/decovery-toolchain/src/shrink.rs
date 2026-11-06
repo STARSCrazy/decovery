@@ -131,7 +131,8 @@ pub fn definitions(text: &str) -> Vec<Definition> {
             continue;
         }
         if c == b'}' {
-            depth -= 1;
+            // a stray `}` (brace-split `#if` branches) does not hide the rest of the file
+            depth = (depth - 1).max(0);
             i += 1;
             continue;
         }

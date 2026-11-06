@@ -155,8 +155,8 @@ enum Command {
         #[arg(long = "variant", value_name = "FILE")]
         variant: Vec<PathBuf>,
         /// Candidate definition of `--function` alone, spliced into its file and compiled in a file shrunk to what
-        /// the function needs when that gives the same code; UTF-8 or code page 437 (repeatable, at most 64 with
-        /// `--variant`).
+        /// the function needs when that gives the same code; an identical result is judged again on the full file;
+        /// UTF-8 or code page 437 (repeatable; at most 64 variants of both kinds together).
         #[arg(long = "function-source", value_name = "FILE")]
         function_source: Vec<PathBuf>,
     },

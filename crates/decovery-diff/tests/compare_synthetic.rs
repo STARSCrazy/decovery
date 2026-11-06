@@ -402,3 +402,43 @@ fn same_code_ignores_fixup_fields() {
     let other_kind = module(&code(0, 0, &[]), vec![abs(1, "g_"), abs(6, "h_")]);
     assert!(!same_code(&fs[0], &functions(&other_kind)[0]));
 }
+
+#[test]
+fn same_code_checks_every_own_section_fixup() {
+    // f_ calls into its own section through a self-relative fixup whose target offset is no symbol start (so the
+    // references do not name it), while offset plus field content does hit g_ at 0x20
+    let own = |offset: u32, field: u8| {
+        let mut code = vec![0xE8, field, 0, 0, 0, 0xC3];
+        code.resize(0x20, 0x90);
+        code.push(0xC3);
+        ObjectModule::new(
+            "t.c",
+            vec![Section::new(
+                "_TEXT",
+                "CODE",
+                SectionKind::Code,
+                32,
+                code,
+                vec![ObjReloc::new(
+                    1,
+                    4,
+                    RelocKind::Relative,
+                    RefTarget::Section { index: 0, offset },
+                    0,
+                    Frame::Unknown,
+                )],
+            )],
+            vec![
+                ObjSymbol::new("f_", 0, 0, true),
+                ObjSymbol::new("g_", 0, 0x20, true),
+            ],
+        )
+    };
+    let (a, b, c) = (own(0x10, 0x10), own(0x14, 0x0C), own(0x10, 0x33));
+    let first = |m| functions(m)[0].clone();
+    assert!(!same_code(&first(&a), &first(&b)), "another target");
+    assert!(
+        same_code(&first(&a), &first(&c)),
+        "only the field content differs"
+    );
+}
