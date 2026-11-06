@@ -43,14 +43,23 @@
 //! only the section's layout moved it) is a [`Blocker::DataLayout`] instead of a wrong reference.
 //! [`compare`] is [`compare_module`] with one placement.
 //!
+//! **Diagnosis** ([`diagnose`], port of the generic rules of Decomp's `nachbau/diagnose.py`) reads the aligned
+//! instruction pairs ([`instruction_pairs`], the alignment behind `instructions_differing`) and names known causes
+//! of a difference; with [`ModuleOptions::with_diagnosis`] a module comparison records the rule ids from the pairs
+//! it already has. [`classify_deviation`] tells slot- or register-only differences apart, [`classify_code`] the
+//! stage of an original function (port of `einstufung.py`).
+//!
 //! Deviations from Decomp, all outside the metrics: the table of functions of the same object used to name
 //! fixup-less calls (`intern`) holds only the function's own section (Decomp merged all code segments by
 //! offset); data names come only from [`SymbolView::name_at`] (Decomp also named addresses inside variables
 //! of known size, which only adds display hints when the name is known by address).
 
 mod anchors;
+mod classify;
 mod compare;
+mod diagnose;
 mod instructions;
+mod pairs;
 mod sequence;
 
 use std::collections::BTreeMap;
@@ -58,7 +67,10 @@ use std::collections::BTreeMap;
 use decovery_core::Address;
 use decovery_objects::FunctionView;
 
+pub use classify::{DeviationKind, Stage, classify_code, classify_deviation};
 pub use compare::{SharedFunctions, compare, compare_module, compare_module_with, same_code};
+pub use diagnose::{Finding, diagnose};
+pub use pairs::{Pair, PairKind, instruction_pairs, pairs_text};
 
 /// The name of an address in the original, and whether it is only a default name (`fun_0001A2B0`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -261,6 +273,9 @@ pub struct Comparison {
     pub verdict: Verdict,
     pub blockers: Vec<Blocker>,
     pub metrics: Metrics,
+    /// Ids of the diagnosis rules ([`diagnose`]) that apply to a differing function, when the comparison was asked
+    /// for them ([`ModuleOptions::diagnosis`]); empty otherwise and for identical functions.
+    pub diagnoses: Vec<String>,
 }
 
 /// A rebuilt function and where its original lives.
@@ -292,11 +307,24 @@ pub struct ModuleOptions {
     /// Frame bases fixed by configuration (`[rebuild.frames]`), by frame name (group or section); they override
     /// the consensus.
     pub frames: BTreeMap<String, Address>,
+    /// Compiler family (`turbo-c`, `watcom`) to diagnose differing functions for, from the instruction pairs the
+    /// comparison already has ([`Comparison::diagnoses`]); `None` skips the diagnosis.
+    pub diagnosis: Option<String>,
 }
 
 impl ModuleOptions {
     pub fn new(padding: bool, frames: BTreeMap<String, Address>) -> Self {
-        ModuleOptions { padding, frames }
+        ModuleOptions {
+            padding,
+            frames,
+            diagnosis: None,
+        }
+    }
+
+    /// The same options with the diagnosis for compiler `family`.
+    pub fn with_diagnosis(mut self, family: impl Into<String>) -> Self {
+        self.diagnosis = Some(family.into());
+        self
     }
 }
 
