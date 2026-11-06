@@ -6,7 +6,9 @@ import sys
 import threading
 import time
 import tempfile
+import types
 import unittest
+from unittest import mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -15,6 +17,7 @@ sys.path.insert(0, str(HERE.parent.parent / "decovery-plugin-sdk"))
 
 from decovery_dosbox_lab import (  # noqa: E402
     MEMORY_PER_INSTANCE_MB,
+    SESSION_SLACK_S,
     Backend,
     BatchResult,
     build_plugin,
@@ -70,7 +73,7 @@ class FakeBackend(Backend):
         self.calls = []
         self.scripts = []
 
-    def run_batch(self, mounts, command, timeout_s):
+    def run_batch(self, mounts, command, timeout_s, watch=None):
         self.calls.append((mounts, command, timeout_s))
         self.scripts.append((mounts[0].path / command).read_bytes().decode("cp437"))
         if isinstance(self.reply, Exception):
@@ -79,19 +82,26 @@ class FakeBackend(Backend):
 
 
 class ScriptBackend(Backend):
-    """Plays each batch file: echoes its job begin/end markers in order (every job succeeds). Records per call the
-    script name, the job numbers in run order, the script text, what the TMP directory held, and how many calls ran
-    at the same time. `stop_in` maps a job number to a batch status: the batch stops there (once) with that status."""
+    """Plays each batch file line by line, like the DOS shell would: echoes the job markers and `ECHO` text, keeps
+    `SET` variables (with `%NAME%` expansion), follows `GOTO N<i>` and a failing job's path to its `:N<i>` label, and
+    runs `CALL RUN <seconds> [<exit code>]` on a per-thread clock (`clock`), asking the plugin's watch every half
+    second; when the watch says stop, the session ends with status `timeout`. Any other `CALL` ends at once with 0.
+    Records per call the script name, the job numbers in run order, the script text, what the TMP directory held,
+    the limit, the clock at the end, and how many calls ran at the same time."""
 
-    def __init__(self, delay=0.2, stop_in=None):
+    def __init__(self, delay=0.2):
         self.delay = delay
-        self.stop_in = dict(stop_in or {})
         self.lock = threading.Lock()
+        self.local = threading.local()
         self.active = 0
         self.peak = 0
         self.calls = []
 
-    def run_batch(self, mounts, command, timeout_s):
+    def clock(self):
+        return self.local.now
+
+    def run_batch(self, mounts, command, timeout_s, watch=None):
+        self.local.now = 0.0
         script = (mounts[0].path / command).read_bytes().decode("cp437")
         tmp = re.search(r"SET TMP=C:\\(\w+)", script).group(1)
         tmp_files = sorted(f.name for f in (mounts[0].path / tmp).iterdir())
@@ -99,27 +109,62 @@ class ScriptBackend(Backend):
             self.active += 1
             self.peak = max(self.peak, self.active)
         time.sleep(self.delay)
-        out, order, status = [], [], "done"
-        for line in script.split("\r\n"):
-            marker = re.fullmatch(r"@ECHO (DECOVERY-JOB-(\d+)(-END)?)", line)
-            if not marker:
-                continue
-            number = int(marker.group(2))
-            out.append(marker.group(1) + "\r\n")
-            if marker.group(3) is None:
-                order.append(number)
-                with self.lock:
-                    stop = self.stop_in.pop(number, None)
-                if stop is not None:
-                    status = stop
-                    break
+        out, order = [], []
+        status = self.play(script.split("\r\n"), out, order, watch)
         with self.lock:
             self.active -= 1
             self.calls.append(
                 {"command": command, "order": order, "script": script, "tmp": tmp, "tmp_files": tmp_files,
-                 "timeout_s": timeout_s}
+                 "timeout_s": timeout_s, "ended_at": self.local.now}
             )
         return BatchResult(status, "".join(out))
+
+    def play(self, lines, out, order, watch):
+        env = {}
+
+        def expand(text):
+            return re.sub(r"%(\w+)%", lambda m: env.get(m.group(1).upper(), ""), text)
+
+        def stop():
+            return watch is not None and watch("".join(out))
+
+        job = None
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            i += 1
+            if marker := re.fullmatch(r"@ECHO (DECOVERY-JOB-(\d+)(-END)?)", line):
+                out.append(marker.group(1) + "\r\n")
+                if marker.group(3) is None:
+                    job = int(marker.group(2))
+                    order.append(job)
+                if stop():
+                    return "timeout"
+            elif line == "GOTO FINISH":
+                break
+            elif jump := re.fullmatch(r"GOTO (N\d+)", line):
+                i = lines.index(f":{jump.group(1)}") + 1
+            elif assign := re.fullmatch(r"SET ([^=]+)=(.*)", line):
+                value = expand(assign.group(2))
+                if value:
+                    env[assign.group(1).upper()] = value
+                else:
+                    env.pop(assign.group(1).upper(), None)
+            elif echo := re.fullmatch(r"ECHO (.*)", line):
+                out.append(expand(echo.group(1)) + "\r\n")
+            elif program := re.fullmatch(r"CALL RUN ([\d.]+)(?: (\d+))?", line):
+                remaining = float(program.group(1))
+                while remaining > 0:
+                    step = min(0.5, remaining)
+                    self.local.now += step
+                    remaining -= step
+                    if stop():
+                        return "timeout"
+                code = int(program.group(2) or 0)
+                if code:
+                    out.append(f"DECOVERY-EXIT-{code}-FAILED\r\n")
+                    i = lines.index(f":N{job}") + 1
+        return "done"
 
 
 class Workspace:
@@ -171,7 +216,8 @@ class ProtocolTest(unittest.TestCase):
 
     def test_goto_and_labels_are_invalid(self):
         ws = Workspace(self)
-        for line in ("GOTO X", "@goto x", ":X"):
+        for line in ("GOTO X", "@goto x", ":X", "IF X==X GOTO FINISH", "if exist a.c goto n0",
+                     "FOR %%F IN (*.C) DO GOTO X"):
             answers = run(build_plugin(lambda: FakeBackend(None)), request(1, "runner/run", ws.params([line])))
             self.assertEqual(answers[1]["error"]["code"], -32602, line)
 
@@ -200,7 +246,7 @@ class RunTest(unittest.TestCase):
         self.assertEqual(len(backend.calls), 1)
         mounts, command, timeout_s = backend.calls[0]
         self.assertEqual(command, "NB0.BAT")
-        self.assertEqual(timeout_s, 10)  # per-job limit times the number of jobs
+        self.assertEqual(timeout_s, 10 + SESSION_SLACK_S)  # backstop: per-job limit times the jobs, plus start-up
         self.assertEqual([(m.drive, m.read_only) for m in mounts], [("C", False), ("D", True)])
         script = backend.scripts[0]
         self.assertIn("@ECHO DECOVERY-JOB-0\r\n", script)
@@ -270,14 +316,14 @@ class InstanceTest(unittest.TestCase):
         backend = ScriptBackend()
         jobs = [["CC A.C"], ["CC B.C"], ["CC C.C"], ["CC D.C"], ["CC E.C"]]
         params = ws.params(*jobs, share=2, costs=[100, 10, 50, 30, 20], timeout_s=5)
-        answer = run(build_plugin(lambda: backend), request(1, "runner/run", params))[1]
+        answer = run_open(build_plugin(lambda: backend), request(1, "runner/run", params))
         self.assertEqual([j["status"] for j in answer["result"]["jobs"]], ["done"] * 5)  # merged in job order
         self.assertEqual(backend.peak, 2)  # two DOSBox instances at the same time
         calls = sorted(backend.calls, key=lambda c: c["command"])
         self.assertEqual([c["command"] for c in calls], ["NB0.BAT", "NB1.BAT"])
         # longest first, each job to the instance with the least work so far
         self.assertEqual([c["order"] for c in calls], [[0, 1], [2, 3, 4]])
-        self.assertEqual([c["timeout_s"] for c in calls], [10, 15])  # per-job limit times the instance's jobs
+        self.assertEqual([c["timeout_s"] for c in calls], [10 + SESSION_SLACK_S, 15 + SESSION_SLACK_S])
         self.assertEqual([c["tmp"] for c in calls], ["NBT0", "NBT1"])  # a TMP directory per instance
         self.assertEqual(calls[0]["tmp_files"], ["ZERO.COM"])
         self.assertEqual(sorted(p.name for p in ws.c.iterdir()), [])  # scripts and TMP directories removed
@@ -285,39 +331,65 @@ class InstanceTest(unittest.TestCase):
     def test_share_and_job_count_cap_instances(self):
         ws = Workspace(self)
         backend = ScriptBackend(delay=0.05)
-        run(build_plugin(lambda: backend), request(1, "runner/run", ws.params(["A"], ["B"], share=8)))
+        run_open(build_plugin(lambda: backend), request(1, "runner/run", ws.params(["A"], ["B"], share=8)))
         self.assertEqual(len(backend.calls), 2)  # not more instances than jobs
         backend = ScriptBackend(delay=0.05)
-        run(build_plugin(lambda: backend), request(1, "runner/run", ws.params(["A"], ["B"], ["C"], share=1)))
+        run_open(build_plugin(lambda: backend), request(1, "runner/run", ws.params(["A"], ["B"], ["C"], share=1)))
         self.assertEqual([c["order"] for c in backend.calls], [[0, 1, 2]])
 
     def test_longest_job_first(self):
         ws = Workspace(self)
         backend = ScriptBackend(delay=0)
         params = ws.params(["A"], ["B"], ["C"], ["D"], share=1, costs=[5, 700, 0, 40])
-        run(build_plugin(lambda: backend), request(1, "runner/run", params))
+        run_open(build_plugin(lambda: backend), request(1, "runner/run", params))
         self.assertEqual(backend.calls[0]["order"], [1, 3, 0, 2])
 
     def test_errorlevel_is_reset_before_each_job(self):
         ws = Workspace(self)
         backend = ScriptBackend(delay=0)
-        run(build_plugin(lambda: backend), request(1, "runner/run", ws.params(["CALL X.BAT"], ["Y"])))
+        run_open(build_plugin(lambda: backend), request(1, "runner/run", ws.params(["CALL X.BAT"], ["Y"])))
         script = backend.calls[0]["script"]
         for number in (0, 1):
-            self.assertIn(f"@ECHO DECOVERY-JOB-{number}\r\nC:\r\nCD \\\r\nSET TMP=C:\\NBT0\r\n"
-                          "C:\\NBT0\\ZERO.COM\r\n", script)
+            self.assertIn(f"@ECHO DECOVERY-JOB-{number}\r\nC:\r\nCD \\\r\nSET DECOVERY_SAVED0=%TMP%\r\n"
+                          "SET TMP=C:\\NBT0\r\nC:\\NBT0\\ZERO.COM\r\n", script)
 
-    def test_jobs_of_a_stopped_batch_run_again(self):
+    def test_hang_stops_the_session_within_the_call_budget(self):
         ws = Workspace(self)
-        backend = ScriptBackend(delay=0, stop_in={1: "timeout"})
-        params = ws.params(["A"], ["B"], ["C"], ["D"])
-        answer = run_open(build_plugin(lambda: backend), request(1, "runner/run", params))
+        backend = ScriptBackend(delay=0)
+        params = ws.params(["RUN 1"], ["RUN 1000"], ["RUN 1"], ["RUN 1"], timeout_s=10)
+        answer = run_open(build_plugin(lambda: backend, clock=backend.clock), request(1, "runner/run", params))
         jobs = answer["result"]["jobs"]
-        self.assertEqual([j["status"] for j in jobs], ["done", "timeout", "done", "done"])
-        self.assertIn("no end after 10 s", jobs[1]["message"])
-        self.assertIn("batch of 4 jobs", jobs[1]["message"])
-        self.assertEqual([c["order"] for c in backend.calls], [[0, 1], [2, 3]])  # a new session for the rest
-        self.assertEqual([c["timeout_s"] for c in backend.calls], [40, 20])
+        self.assertEqual([j["status"] for j in jobs], ["done", "timeout", "failed", "failed"])
+        self.assertEqual(jobs[1]["message"], "no end after 10 s")
+        for job in jobs[2:]:  # the host submits these once more (`is_job_not_run`)
+            self.assertTrue(job["message"].startswith("job not run"), job["message"])
+        self.assertEqual(len(backend.calls), 1)  # no second session inside the call
+        call = backend.calls[0]
+        self.assertLessEqual(call["timeout_s"], 4 * 10 + 30)  # within the host's call budget (T x jobs + 30 s)
+        self.assertLess(call["ended_at"], 1 + 10 + 1)  # stopped by the per-job limit, not by the backstop
+
+    def test_results_do_not_depend_on_the_number_of_instances(self):
+        jobs = [
+            ["SET FOO=one", "SET PATH=D:\\BIN", "ECHO [%FOO%] [%PATH%]", "RUN 3"],
+            ["ECHO [%FOO%] [%PATH%]", "RUN 9"],  # 9 s: within its own limit, whatever ran before it
+            ["RUN 2 3"],
+            ["RUN 15"],  # over the limit
+        ]
+        costs = [40, 30, 20, 10]  # one instance runs them in this order; four run one each
+        results = {}
+        for share in (1, 4):
+            ws = Workspace(self)
+            backend = ScriptBackend(delay=0)
+            params = ws.params(*jobs, timeout_s=10, share=share, costs=costs)
+            answer = run_open(build_plugin(lambda: backend, clock=backend.clock), request(1, "runner/run", params))
+            self.assertEqual(len(backend.calls), share)
+            results[share] = answer["result"]["jobs"]
+        self.assertEqual(results[1], results[4])
+        self.assertEqual([j["status"] for j in results[1]], ["done", "done", "done", "timeout"])
+        self.assertEqual(results[1][0]["stdout"], "[one] [D:\\BIN]\r\n")
+        self.assertEqual(results[1][1]["stdout"], "[] []\r\n")  # nothing left over from the job before
+        self.assertEqual(results[1][2]["exit_code"], 3)
+        self.assertEqual(results[1][3]["message"], "no end after 10 s")
 
     def test_batch_that_starts_no_job_is_not_repeated(self):
         ws = Workspace(self)
@@ -325,6 +397,38 @@ class InstanceTest(unittest.TestCase):
         answer = serve(self, backend, ws.params(["A"], ["B"]))
         self.assertEqual(len(backend.calls), 1)
         self.assertTrue(all(j["status"] == "failed" for j in answer["result"]["jobs"]))
+
+
+class BackendTest(unittest.TestCase):
+    """`DosboxLabBackend` against a stand-in `dosbox_lab` module."""
+
+    def lab(self, run_batch):
+        module = types.ModuleType("dosbox_lab")
+        module.Mount = lambda drive, host, cdrom=False: (drive, host, cdrom)
+        module.DmcpError = type("DmcpError", (Exception,), {})
+        module.run_batch = run_batch
+        patcher = mock.patch.dict(sys.modules, {"dosbox_lab": module})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_watch_is_passed_and_stopped_is_a_timeout(self):
+        calls = []
+
+        def run_batch(mounts, command, timeout_s=60.0, watch=None, snapshot=True):
+            calls.append((command, timeout_s, snapshot))
+            return {"status": "stopped" if watch("DECOVERY-JOB-0\r\n") else "done", "stdout_text": "x"}
+
+        self.lab(run_batch)
+        result = DosboxLabBackend().run_batch([], "NB0.BAT", 20.0, watch=lambda stdout: "JOB-0" in stdout)
+        self.assertEqual((result.status, result.stdout), ("timeout", "x"))
+        self.assertEqual(calls, [("NB0.BAT", 20.0, False)])  # the host snapshots its files itself
+
+    def test_dosbox_lab_without_watch_is_unavailable(self):
+        self.lab(lambda mounts, command, timeout_s=60.0: {"status": "done"})
+        with self.assertRaises(BackendError) as caught:
+            DosboxLabBackend().run_batch([], "NB0.BAT", 20.0)
+        self.assertEqual(caught.exception.code, BACKEND_UNAVAILABLE)
+        self.assertIn("too old", caught.exception.message)
 
 
 class SplitTest(unittest.TestCase):
@@ -345,6 +449,25 @@ class ScriptTest(unittest.TestCase):
         self.assertIn("\r\nTYPE A.TXT\r\n", script)
         self.assertIn("\r\nIF EXIST A.OBJ DEL A.OBJ\r\n", script)
         self.assertIn("\r\nFOR %%F IN (*.C) DO ECHO %%F\r\n", script)
+
+    def test_echo_dot_and_cd_dot_dot_are_internal(self):
+        script = build_script([["ECHO.", "CD..", "@CD.."]], "C")
+        self.assertIn("\r\nECHO.\r\n", script)
+        self.assertIn("\r\nCD..\r\n", script)
+        self.assertIn("\r\n@CD..\r\n", script)
+        self.assertNotIn("CALL", script)
+
+    def test_set_variables_are_restored_after_the_job(self):
+        script = build_script([["SET PATH=D:\\BIN", "@set foo=1", "A"]], "C", tmp_dir="NBT0")
+        self.assertIn(
+            "SET DECOVERY_SAVED0=%TMP%\r\nSET DECOVERY_SAVED1=%PATH%\r\nSET DECOVERY_SAVED2=%FOO%\r\n",
+            script,
+        )
+        self.assertIn(
+            ":N0\r\nSET TMP=%DECOVERY_SAVED0%\r\nSET DECOVERY_SAVED0=\r\nSET PATH=%DECOVERY_SAVED1%\r\n",
+            script,
+        )
+        self.assertIn("SET FOO=%DECOVERY_SAVED2%\r\nSET DECOVERY_SAVED2=\r\nSET DJ=\r\n", script)
 
     def test_ladder_reports_exact_errorlevel(self):
         script = build_script([["A"]], "C")
