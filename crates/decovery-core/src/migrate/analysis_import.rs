@@ -53,7 +53,7 @@ pub(super) struct Imported {
     accesses: Vec<DataAccess>,
 }
 
-/// `ausgabe/aufrufe.json`; the serde names are Decomp's keys (`decomp_format::keys::EDGES` and friends).
+/// `ausgabe/aufrufe.json`; the serde names are Decomp's keys, which exist only here.
 #[derive(Deserialize)]
 struct CallsFile {
     #[serde(rename = "kanten")]
