@@ -495,3 +495,38 @@ fn build_exit_codes() {
     assert_eq!(out.status.code(), Some(2), "{out:?}");
     assert!(String::from_utf8(out.stderr).unwrap().contains("missing.c"));
 }
+
+#[test]
+fn build_variants_ranks_and_sets_exit_code() {
+    let python = python_or_skip!();
+    let f = build_fixture::fixture(&python, "");
+    let mut worse = build_fixture::SUB.to_vec();
+    worse[6] = 0x33;
+    f.write_obj("V001", &[("_sub", &worse)]);
+    f.write_obj("V002", &[("_sub", build_fixture::SUB)]);
+    let source = "int sub(int a, int b)\n{\n    return a - b;\n}\n";
+    let dir = tempfile::tempdir().unwrap();
+    let (one, two) = (dir.path().join("one.c"), dir.path().join("two.c"));
+    std::fs::write(&one, source).unwrap();
+    std::fs::write(&two, source).unwrap();
+    let run = |variants: &[&std::path::Path]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_decovery"));
+        command.args(["build", "--function", "sub", "--json", "--workspace"]);
+        command.arg(f.root());
+        for v in variants {
+            command.arg("--variant").arg(v);
+        }
+        command.output().expect("run decovery")
+    };
+    let out = run(&[&one, &two]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["data"]["best"], 2);
+    assert_eq!(
+        value["data"]["variants"][1]["label"],
+        one.display().to_string()
+    );
+    // only the worse variant: exit 1
+    let out = run(&[&one]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+}
