@@ -259,7 +259,14 @@ pub fn compile(
             file.message = failure(&outcome, object_name);
             continue;
         }
-        let object = read(&build_dir.join(object_name))?;
+        // a produced object that cannot be read fails this file, not the build
+        let object = match read(&build_dir.join(object_name)) {
+            Ok(object) => object,
+            Err(e) => {
+                file.message = e.to_string();
+                continue;
+            }
+        };
         if let Err(e) = cache.put(&key, &object) {
             warnings.push(format!("object cache: cannot store {object_name}: {e}"));
         }
@@ -270,4 +277,54 @@ pub fn compile(
         let _ = std::fs::remove_dir_all(build_dir.join(format!("TMP{j:05}")));
     }
     Ok((files, warnings))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::RunnerError;
+
+    /// Reports every job as done with its object produced, but writes nothing: the object cannot be read.
+    struct ClaimsSuccess;
+
+    impl Runner for ClaimsSuccess {
+        fn name(&self) -> &str {
+            "claims-success"
+        }
+
+        fn run(
+            &self,
+            request: &RunRequest,
+            _cancel: Option<CancelToken>,
+        ) -> Result<Vec<JobOutcome>, RunnerError> {
+            Ok(request
+                .jobs
+                .iter()
+                .map(|job| JobOutcome::done_for_test(job.expected.clone()))
+                .collect())
+        }
+    }
+
+    #[test]
+    fn unreadable_object_fails_only_its_file() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("tools")).unwrap();
+        std::fs::write(root.path().join("tools/TCC.EXE"), b"fake").unwrap();
+        std::fs::write(
+            root.path().join("decovery.toml"),
+            "schema = 1\n[target]\nfile = \"t.exe\"\nsha256 = \"00\"\nformat = \"mz\"\nprocessor = \"x86\"\n\
+             [rebuild]\ncompiler = \"turbo-c-2.0\"\ntool_dir = \"tools\"\n",
+        )
+        .unwrap();
+        let ws = Workspace::open(root.path()).unwrap();
+        let build = root.path().join("build");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(build.join("A.C"), b"int a;\r\n").unwrap();
+        let profile = crate::profile("turbo-c-2.0").unwrap();
+        let runners: Vec<Box<dyn Runner>> = vec![Box::new(ClaimsSuccess)];
+        let sources = [("A.C".to_string(), String::new())];
+        let (files, _) = compile(&ws, &profile, &sources, &build, &runners, None).unwrap();
+        assert!(files[0].object.is_none());
+        assert!(files[0].message.contains("A.OBJ"), "{}", files[0].message);
+    }
 }
