@@ -183,6 +183,26 @@ enum SetupCommand {
         /// Python 3.12 or newer used to create the venv; default: `DECOVERY_PYTHON`, else `python`.
         #[arg(long, value_name = "EXE")]
         python: Option<String>,
+        /// Directory with `decovery-plugin-sdk` and `unicorn-dos`; default: `plugins/` of the repository.
+        #[arg(long, value_name = "DIR")]
+        plugins_dir: Option<PathBuf>,
+    },
+    /// Create a venv with the `dosbox-lab` plugin and the dosbox-lab Python package, and write
+    /// `[plugins.dosbox-lab]` into the user config. The DOSBox executable is not installed. Progress goes to
+    /// stderr.
+    DosboxLab {
+        /// Directory of the dosbox-lab Python package (holds its `pyproject.toml`; `python/` in its repository).
+        #[arg(long, value_name = "DIR")]
+        package: PathBuf,
+        /// Install directory; default: `extern/` next to the repository, else beside the user config.
+        #[arg(long = "extern", value_name = "DIR")]
+        extern_dir: Option<PathBuf>,
+        /// Python 3.12 or newer used to create the venv; default: `DECOVERY_PYTHON`, else `python`.
+        #[arg(long, value_name = "EXE")]
+        python: Option<String>,
+        /// Directory with `decovery-plugin-sdk` and `dosbox-lab`; default: `plugins/` of the repository.
+        #[arg(long, value_name = "DIR")]
+        plugins_dir: Option<PathBuf>,
     },
     /// Register the directory of a compiler (`[toolchains]` in the user config).
     Toolchain {
@@ -391,8 +411,28 @@ fn main() -> ExitCode {
             cli.json,
         )),
         Command::Setup {
-            what: SetupCommand::UnicornDos { extern_dir, python },
-        } => finish(setup_unicorn_dos(extern_dir, python, cli.json)),
+            what:
+                SetupCommand::UnicornDos {
+                    extern_dir,
+                    python,
+                    plugins_dir,
+                },
+        } => finish(setup_unicorn_dos(extern_dir, python, plugins_dir, cli.json)),
+        Command::Setup {
+            what:
+                SetupCommand::DosboxLab {
+                    package,
+                    extern_dir,
+                    python,
+                    plugins_dir,
+                },
+        } => finish(setup_dosbox_lab(
+            package,
+            extern_dir,
+            python,
+            plugins_dir,
+            cli.json,
+        )),
         Command::Setup {
             what: SetupCommand::Toolchain { profile, dir },
         } => finish(setup_toolchain(&profile, &dir, cli.json)),
@@ -519,6 +559,7 @@ fn setup_ghidra(
 fn setup_unicorn_dos(
     extern_dir: Option<PathBuf>,
     python: Option<String>,
+    plugins_dir: Option<PathBuf>,
     json: bool,
 ) -> Result<(), FacadeError> {
     let invalid = |e: String| FacadeError::Invalid(e);
@@ -527,7 +568,10 @@ fn setup_unicorn_dos(
         invalid("cannot locate the user config dir (APPDATA / HOME unset)".into())
     })?;
     let cwd = std::env::current_dir().map_err(|e| invalid(e.to_string()))?;
-    let plugins_dir = setup::find_plugins_dir(&cwd).map_err(invalid)?;
+    let plugins_dir = match plugins_dir {
+        Some(dir) => dir,
+        None => setup::find_plugins_dir(&cwd).map_err(invalid)?,
+    };
     let extern_dir = extern_dir.unwrap_or_else(|| setup::default_extern_dir(&cwd, &config_path));
     let absolute = |p: PathBuf| std::path::absolute(&p).unwrap_or(p);
     let options = setup::UnicornOptions {
@@ -547,6 +591,55 @@ fn setup_unicorn_dos(
     let response = Response::new(
         format!(
             "Plugin `unicorn-dos` installed in {}; registered in {}",
+            report.venv_python.display(),
+            report.config_path.display()
+        ),
+        serde_json::json!({
+            "venv_python": report.venv_python.display().to_string(),
+            "config": report.config_path.display().to_string(),
+            "venv_kept": report.venv_kept,
+        }),
+    );
+    print_summary(&response, json)
+}
+
+fn setup_dosbox_lab(
+    package: PathBuf,
+    extern_dir: Option<PathBuf>,
+    python: Option<String>,
+    plugins_dir: Option<PathBuf>,
+    json: bool,
+) -> Result<(), FacadeError> {
+    let invalid = |e: String| FacadeError::Invalid(e);
+    let platform = setup::Platform::current().map_err(invalid)?;
+    let config_path = decovery_facade::plugins::user_config_path().ok_or_else(|| {
+        invalid("cannot locate the user config dir (APPDATA / HOME unset)".into())
+    })?;
+    let cwd = std::env::current_dir().map_err(|e| invalid(e.to_string()))?;
+    let plugins_dir = match plugins_dir {
+        Some(dir) => dir,
+        None => setup::find_plugins_dir(&cwd).map_err(invalid)?,
+    };
+    let extern_dir = extern_dir.unwrap_or_else(|| setup::default_extern_dir(&cwd, &config_path));
+    let absolute = |p: PathBuf| std::path::absolute(&p).unwrap_or(p);
+    let options = setup::DosboxLabOptions {
+        extern_dir: absolute(extern_dir),
+        plugins_dir: absolute(plugins_dir),
+        package_dir: absolute(package),
+        python: python
+            .or_else(|| std::env::var("DECOVERY_PYTHON").ok())
+            .filter(|p| !p.is_empty())
+            .unwrap_or_else(|| "python".into()),
+        config_path,
+        platform,
+    };
+    let report = setup::run_dosbox_lab_setup(&options, &setup::SystemRunner, &mut |line| {
+        eprintln!("{line}")
+    })
+    .map_err(|e| invalid(e.to_string()))?;
+    let response = Response::new(
+        format!(
+            "Plugin `dosbox-lab` installed in {}; registered in {}. The DOSBox executable is not part of the package: build dosbox-lab or set DOSBOX_LAB_EXE",
             report.venv_python.display(),
             report.config_path.display()
         ),
