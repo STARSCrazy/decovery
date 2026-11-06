@@ -564,6 +564,13 @@ enum Target {
         section: u32,
         rel: i64,
     },
+    /// A position before the function start in its own section (32-bit): the function's jump table, whose
+    /// distance to the function depends on the code before it, matches by its entries; anything else (an unnamed
+    /// static) matches when the original has it at `same_distance`.
+    OwnTable {
+        table: u32,
+        same_distance: Address,
+    },
     /// No address can be determined (unknown symbol, group target).
     Unresolved,
     /// The target address overflows its space.
@@ -649,6 +656,20 @@ impl Site<'_> {
                             })
                             .flatten()
                     });
+                if owner.is_none() && target < i64::from(f.start) && self.bits == 32 {
+                    // before the function: its own jump table (checked entry by entry) or an unnamed static
+                    // at the same distance as in the original
+                    return match (
+                        u32::try_from(target),
+                        self.at.offset_by(target - i64::from(f.start)),
+                    ) {
+                        (Ok(table), Ok(same_distance)) => Target::OwnTable {
+                            table,
+                            same_distance,
+                        },
+                        _ => Target::Invalid,
+                    };
+                }
                 let resolved = match owner {
                     Some(s) => self
                         .lookup(&s.name)
@@ -791,6 +812,23 @@ impl Site<'_> {
                 };
                 if ok { Outcome::Decided(None) } else { wrong }
             }
+            Target::OwnTable {
+                table,
+                same_distance,
+            } => {
+                let Some(original_table) = relocation
+                    .filter(|r| r.kind == kind && u32::from(r.width) == field_width)
+                    .and_then(|r| r.target.offset_by(r.addend).ok())
+                else {
+                    return wrong;
+                };
+                if same(original_table, same_distance) || self.table_matches(table, original_table)
+                {
+                    Outcome::Decided(None)
+                } else {
+                    wrong
+                }
+            }
             Target::Unnamed { section, rel } if self.bits == 32 => {
                 // 32-bit: the section's linear position from the original's relocation (ADR 0006 item 7).
                 let observed = match (relocation, kind) {
@@ -822,6 +860,56 @@ impl Site<'_> {
             }
             _ => unchecked,
         }
+    }
+
+    /// Whether the rebuild's jump table at section offset `table` (consecutive 4-byte absolute entries into the
+    /// own section, up to the function start) and the original's table at `original` send every entry to the same
+    /// offset relative to the function start. A table without entries does not match.
+    fn table_matches(&self, table: u32, original: Address) -> bool {
+        let f = self.rebuild.f;
+        let Some(section) = f.module.sections.get(f.section as usize) else {
+            return false;
+        };
+        let (Some(at), Some(table_at)) = (self.at.linear(), original.linear()) else {
+            return false;
+        };
+        let mut entries = 0;
+        let mut offset = table;
+        while offset.saturating_add(4) <= f.start {
+            let Some(entry) = section.relocs.iter().find(|r| {
+                r.offset == offset
+                    && r.width == 4
+                    && r.kind == RelocKind::Absolute
+                    && matches!(r.target, RefTarget::Section { index, .. } if index == f.section)
+            }) else {
+                break;
+            };
+            let RefTarget::Section { offset: base, .. } = entry.target else {
+                break;
+            };
+            let Some(content) = section.data.get(offset as usize..offset as usize + 4) else {
+                break;
+            };
+            let rebuilt = i64::from(base) + signed(content) - i64::from(f.start);
+            let k = u64::from(offset - table);
+            let Some(entry_at) = u32::try_from(table_at + k).ok().map(Address::Flat) else {
+                return false;
+            };
+            let original_target = match relocation_at(self.program, entry_at) {
+                Some(r) => r.target.offset_by(r.addend).ok().and_then(|t| t.linear()),
+                None => self
+                    .program
+                    .read(entry_at, 4)
+                    .map(|b| u64::from(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))),
+            };
+            match original_target {
+                Some(t) if t as i64 - at as i64 == rebuilt => {}
+                _ => return false,
+            }
+            entries += 1;
+            offset += 4;
+        }
+        entries > 0
     }
 
     /// The original's target of a self-relative field read from its bytes, as a value in the address space.

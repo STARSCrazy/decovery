@@ -23,7 +23,9 @@
 //! same target as the original. Absolute fields need a [`Program`] relocation at the same place with the same
 //! kind and width whose target equals the symbol's address (via [`SymbolView::address_of`] of the undecorated
 //! name) plus the addend (field content plus fixup displacement). Own-section targets resolve through the
-//! function's own address (this includes its jump table, which Watcom places before the function start);
+//! function's own address; a 32-bit reference to the function's own jump table, which Watcom places before the
+//! function start at a distance that depends on the code before it, matches when the original's relocation
+//! points at a table whose entries lead to the same offsets of the function as the rebuild's entries;
 //! a target exactly at another symbol of the section resolves through that symbol's address, and a target
 //! behind the function through the function containing it. Self-relative fields have no relocation in a
 //! linked LE image when caller and callee share an object, so their original target is read from the original
@@ -37,6 +39,8 @@
 //! same place (MZ offsets) are checked against frame and section anchors established by consensus over all
 //! placements of one comparison; 16-bit selector fields against the frame anchor's segment. A 32-bit field whose
 //! target is an unnamed position in another section (a string in `CONST`) is checked against a section anchor.
+//! A dissenting field whose item equals the original at the position the field proposes (the item is unchanged,
+//! only the section's layout moved it) is a [`Blocker::DataLayout`] instead of a wrong reference.
 //! [`compare`] is [`compare_module`] with one placement.
 //!
 //! Deviations from Decomp, all outside the metrics: the table of functions of the same object used to name
@@ -189,6 +193,11 @@ pub enum Blocker {
     },
     /// The original bytes of the function's range are not in the program.
     OriginalUnavailable,
+    /// A reference to an unnamed data item (a string in `CONST`) that is unchanged but lies at another offset of
+    /// its section than in the original: the function's bytes may match, the module's data layout does not.
+    DataLayout {
+        at: u32,
+    },
     /// The source of the function contains inline assembly, `_emit` or machine code in `#pragma aux`; byte
     /// equality does not count as a rebuild.
     InlineAssembly,
@@ -204,6 +213,7 @@ impl Blocker {
             Blocker::WrongRelativeRef { .. } => "wrong-relative-ref",
             Blocker::InstructionsDiffer { .. } => "instructions-differ",
             Blocker::OriginalUnavailable => "original-unavailable",
+            Blocker::DataLayout { .. } => "data-layout",
             Blocker::InlineAssembly => "inline-assembly",
         }
     }
@@ -213,7 +223,8 @@ impl Blocker {
         match *self {
             Blocker::UncheckedRef { at }
             | Blocker::WrongAbsoluteRef { at }
-            | Blocker::WrongRelativeRef { at } => Some(at),
+            | Blocker::WrongRelativeRef { at }
+            | Blocker::DataLayout { at } => Some(at),
             _ => None,
         }
     }

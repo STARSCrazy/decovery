@@ -679,3 +679,293 @@ fn flat_unnamed_section_ref_uses_section_anchor() {
         vec![Blocker::WrongAbsoluteRef { at: 1 }]
     );
 }
+
+/// A function at section offset 0x10 loading its own jump table at offset 0 (two entries: +5 and +0 of the
+/// function); in the original the table lies 0x14 bytes before the function, its second entry going to `second`.
+fn own_table_case(second: u32) -> ModuleComparison {
+    let own = |offset: u32| {
+        ObjReloc::new(
+            offset,
+            4,
+            RelocKind::Absolute,
+            RefTarget::Section {
+                index: 0,
+                offset: 0,
+            },
+            0,
+            Frame::Unknown,
+        )
+    };
+    let mut text = vec![0x15, 0, 0, 0, 0x10, 0, 0, 0];
+    text.resize(0x10, 0x90);
+    text.extend_from_slice(&[0xB8, 0, 0, 0, 0, 0xC3, 0x90, 0x90]);
+    let m = ObjectModule::new(
+        "t.c",
+        vec![Section::new(
+            "_TEXT",
+            "CODE",
+            SectionKind::Code,
+            32,
+            text,
+            vec![own(0), own(4), own(0x11)],
+        )],
+        vec![ObjSymbol::new("f_", 0, 0x10, true)],
+    );
+    let (table, start) = (AT + 0x0C, AT + 0x20);
+    let mut original = vec![0xCCu8; 0x20];
+    original[0x0C..0x10].copy_from_slice(&(start + 5).to_le_bytes());
+    original[0x10..0x14].copy_from_slice(&second.to_le_bytes());
+    original.extend_from_slice(&[0xB8]);
+    original.extend_from_slice(&table.to_le_bytes());
+    original.extend_from_slice(&[0xC3, 0x90, 0x90]);
+    let p = flat_program(
+        &original,
+        &[],
+        vec![
+            absolute(table, start + 5),
+            absolute(table + 4, second),
+            absolute(start + 1, table),
+        ],
+    );
+    let fs = functions(&m);
+    compare_module(
+        &[Placement::new(fs[0].clone(), Address::Flat(start), None)],
+        &p,
+        &Symbols::default(),
+        &Decoration::watcom(),
+        &ModuleOptions::default(),
+    )
+}
+
+#[test]
+fn own_jump_table_is_matched_by_its_entries() {
+    let c = own_table_case(AT + 0x20);
+    assert_eq!(
+        c.functions[0].verdict,
+        Verdict::Identical,
+        "{:?}",
+        c.functions[0].blockers
+    );
+    let c = own_table_case(AT + 0x21);
+    assert_eq!(
+        c.functions[0].blockers,
+        vec![Blocker::WrongAbsoluteRef { at: 1 }]
+    );
+}
+
+/// Three `mov eax, offset CONST+n` (n = 0, 3, 6 over `"hi\0yo\0ab\0"`); in the original `"hi"` and `"ab"` keep
+/// their places relative to 0x20010, the second item lies at 0x20020 with the bytes `moved`.
+fn layout_case(moved: &[u8]) -> ModuleComparison {
+    let field = |offset: u32, rel: u32| {
+        ObjReloc::new(
+            offset,
+            4,
+            RelocKind::Absolute,
+            RefTarget::Section {
+                index: 1,
+                offset: rel,
+            },
+            0,
+            Frame::Unknown,
+        )
+    };
+    let mut code = Vec::new();
+    for _ in 0..3 {
+        code.extend_from_slice(&[0xB8, 0, 0, 0, 0]);
+    }
+    code.push(0xC3);
+    let m = ObjectModule::new(
+        "t.c",
+        vec![
+            Section::new(
+                "_TEXT",
+                "CODE",
+                SectionKind::Code,
+                32,
+                code,
+                vec![field(1, 0), field(6, 3), field(11, 6)],
+            ),
+            Section::new(
+                "CONST",
+                "DATA",
+                SectionKind::Data,
+                32,
+                b"hi\0yo\0ab\0".to_vec(),
+                vec![],
+            ),
+        ],
+        vec![ObjSymbol::new("f_", 0, 0, true)],
+    );
+    let targets = [0x20010u32, 0x20020, 0x20016];
+    let mut original = Vec::new();
+    for t in targets {
+        original.push(0xB8);
+        original.extend_from_slice(&t.to_le_bytes());
+    }
+    original.push(0xC3);
+    let mut data = vec![0u8; 0x20];
+    data[0x10..0x13].copy_from_slice(b"hi\0");
+    data[0x16..0x19].copy_from_slice(b"ab\0");
+    data.extend_from_slice(moved);
+    let p = flat_program(
+        &original,
+        &data,
+        vec![
+            absolute(AT + 1, targets[0]),
+            absolute(AT + 6, targets[1]),
+            absolute(AT + 11, targets[2]),
+        ],
+    );
+    let fs = functions(&m);
+    compare_module(
+        &[Placement::new(fs[0].clone(), Address::Flat(AT), None)],
+        &p,
+        &Symbols::default(),
+        &Decoration::watcom(),
+        &ModuleOptions::default(),
+    )
+}
+
+#[test]
+fn moved_unchanged_item_is_data_layout() {
+    let c = layout_case(b"yo\0");
+    assert_eq!(c.functions[0].verdict, Verdict::Differs);
+    assert_eq!(c.functions[0].blockers, vec![Blocker::DataLayout { at: 6 }]);
+    let c = layout_case(b"yx\0");
+    assert_eq!(
+        c.functions[0].blockers,
+        vec![Blocker::WrongAbsoluteRef { at: 6 }]
+    );
+}
+
+#[test]
+fn moved_string_with_other_trailing_items_is_data_layout() {
+    // CONST "hi\0yo\0zz\0ab\0", references to +0, +3 and +9; "zz" is unreferenced, so the item at +3 reaches to +9.
+    // In the original "yo\0" moved and is followed by other bytes.
+    let field = |offset: u32, rel: u32| {
+        ObjReloc::new(
+            offset,
+            4,
+            RelocKind::Absolute,
+            RefTarget::Section {
+                index: 1,
+                offset: rel,
+            },
+            0,
+            Frame::Unknown,
+        )
+    };
+    let mut code = Vec::new();
+    for _ in 0..3 {
+        code.extend_from_slice(&[0xB8, 0, 0, 0, 0]);
+    }
+    code.push(0xC3);
+    let m = ObjectModule::new(
+        "t.c",
+        vec![
+            Section::new(
+                "_TEXT",
+                "CODE",
+                SectionKind::Code,
+                32,
+                code,
+                vec![field(1, 0), field(6, 3), field(11, 9)],
+            ),
+            Section::new(
+                "CONST",
+                "DATA",
+                SectionKind::Data,
+                32,
+                b"hi\0yo\0zz\0ab\0".to_vec(),
+                vec![],
+            ),
+        ],
+        vec![ObjSymbol::new("f_", 0, 0, true)],
+    );
+    let targets = [0x20010u32, 0x20030, 0x20019];
+    let mut original = Vec::new();
+    for t in targets {
+        original.push(0xB8);
+        original.extend_from_slice(&t.to_le_bytes());
+    }
+    original.push(0xC3);
+    let mut data = vec![0u8; 0x30];
+    data[0x10..0x13].copy_from_slice(b"hi\0");
+    data[0x19..0x1C].copy_from_slice(b"ab\0");
+    data.extend_from_slice(b"yo\0qq\0");
+    let p = flat_program(
+        &original,
+        &data,
+        targets
+            .iter()
+            .zip([1, 6, 11])
+            .map(|(&t, o)| absolute(AT + o, t))
+            .collect(),
+    );
+    let fs = functions(&m);
+    let c = compare_module(
+        &[Placement::new(fs[0].clone(), Address::Flat(AT), None)],
+        &p,
+        &Symbols::default(),
+        &Decoration::watcom(),
+        &ModuleOptions::default(),
+    );
+    assert_eq!(c.functions[0].blockers, vec![Blocker::DataLayout { at: 6 }]);
+}
+
+#[test]
+fn unnamed_static_before_function_at_same_distance() {
+    // `mov eax, offset _TEXT+0` from a function at offset 0x10; offset 0 is an unnamed static, not a jump table
+    let mut text = vec![0x90u8; 0x10];
+    text.extend_from_slice(&[0xB8, 0, 0, 0, 0, 0xC3]);
+    let m = ObjectModule::new(
+        "t.c",
+        vec![Section::new(
+            "_TEXT",
+            "CODE",
+            SectionKind::Code,
+            32,
+            text,
+            vec![flat_reloc(
+                0x11,
+                RelocKind::Absolute,
+                RefTarget::Section {
+                    index: 0,
+                    offset: 0,
+                },
+            )],
+        )],
+        vec![ObjSymbol::new("f_", 0, 0x10, true)],
+    );
+    let case = |target: u32| {
+        let mut original = vec![0x90u8; 0x20];
+        original.push(0xB8);
+        original.extend_from_slice(&target.to_le_bytes());
+        original.push(0xC3);
+        let p = flat_program(&original, &[], vec![absolute(AT + 0x21, target)]);
+        let fs = functions(&m);
+        compare_module(
+            &[Placement::new(
+                fs[0].clone(),
+                Address::Flat(AT + 0x20),
+                None,
+            )],
+            &p,
+            &Symbols::default(),
+            &Decoration::watcom(),
+            &ModuleOptions::default(),
+        )
+    };
+    let c = case(AT + 0x10);
+    assert_eq!(
+        c.functions[0].verdict,
+        Verdict::Identical,
+        "{:?}",
+        c.functions[0].blockers
+    );
+    let c = case(AT + 0x0C);
+    assert_eq!(
+        c.functions[0].blockers,
+        vec![Blocker::WrongAbsoluteRef { at: 1 }]
+    );
+}

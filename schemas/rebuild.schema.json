@@ -59,11 +59,22 @@
               ],
               "properties": {
                 "kind": {
-                  "type": "string"
+                  "enum": [
+                    "bytes-differ",
+                    "unchecked-ref",
+                    "wrong-absolute-ref",
+                    "wrong-relative-ref",
+                    "instructions-differ",
+                    "original-unavailable",
+                    "data-layout",
+                    "inline-assembly"
+                  ],
+                  "description": "data-layout: a referenced data item (a string in CONST) is unchanged but lies at another offset of its section than in the original; inline-assembly: the source of the function contains inline assembly, _emit or #pragma aux code"
                 },
                 "at": {
                   "type": "integer",
-                  "minimum": 0
+                  "minimum": 0,
+                  "description": "offset in the function (refs, data-layout)"
                 },
                 "count": {
                   "type": "integer",

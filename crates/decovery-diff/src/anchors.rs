@@ -112,7 +112,9 @@ fn address_at(linear: i64, flat: bool) -> Option<Address> {
 
 /// Whether the item of `section` at `rel` differs from the original, the section lying at linear `section_at`. The
 /// item reaches from `rel` to the next boundary: the next referenced offset (`referenced`), the next symbol of the
-/// section, or the end of its initialised bytes. Fixup fields of the section are not compared.
+/// section, or the end of its initialised bytes; with `until_nul`, also its first zero byte (a C string ends
+/// there, the bytes after it belong to unreferenced items). Fixup fields of the section are not compared.
+#[allow(clippy::too_many_arguments)]
 fn item_differs(
     module: &ObjectModule,
     section: u32,
@@ -121,6 +123,7 @@ fn item_differs(
     section_at: i64,
     flat: bool,
     program: &Program,
+    until_nul: bool,
 ) -> bool {
     let Some(s) = module.sections.get(section as usize) else {
         return true;
@@ -142,7 +145,10 @@ fn item_differs(
                 .map(|y| i64::from(y.offset)),
         )
         .fold(len, i64::min);
-    let (start, end) = (rel as usize, end as usize);
+    let (start, mut end) = (rel as usize, end as usize);
+    if until_nul && let Some(nul) = s.data[start..end].iter().position(|&b| b == 0) {
+        end = start + nul + 1;
+    }
     let gaps: BTreeSet<usize> = s
         .relocs
         .iter()
@@ -165,6 +171,9 @@ struct SectionAnchor {
     tally: Tally,
     /// Referenced offsets (`rel`) whose item differs from the original.
     differing: BTreeSet<i64>,
+    /// Dissenting (rel, candidate) pairs whose item equals the original at the candidate's position: the item
+    /// exists unchanged, only at another offset of the section (data layout).
+    moved: BTreeSet<(i64, i64)>,
 }
 
 /// All anchors of one module comparison.
@@ -255,27 +264,47 @@ impl Anchors {
                 anchors.frames.get(&key.frame).map(|f| f.base)
             };
             let rels = section_rels.remove(&key).unwrap_or_default();
+            let bounds = referenced
+                .get(&(key.module, key.section))
+                .cloned()
+                .unwrap_or_default();
+            let moved: BTreeSet<(i64, i64)> = match (checked, frame_base) {
+                (true, Some(frame)) => votes
+                    .iter()
+                    .filter(|&&(_, candidate)| candidate != t.base)
+                    .filter(|&&(rel, candidate)| {
+                        !item_differs(
+                            module,
+                            key.section,
+                            rel,
+                            &bounds,
+                            frame + candidate,
+                            key.flat,
+                            program,
+                            true,
+                        )
+                    })
+                    .copied()
+                    .collect(),
+                _ => BTreeSet::new(),
+            };
             let differing = match (checked, frame_base) {
                 (false, _) => BTreeSet::new(),
-                (true, Some(frame)) => {
-                    let bounds = referenced
-                        .get(&(key.module, key.section))
-                        .cloned()
-                        .unwrap_or_default();
-                    rels.into_iter()
-                        .filter(|&rel| {
-                            item_differs(
-                                module,
-                                key.section,
-                                rel,
-                                &bounds,
-                                frame + t.base,
-                                key.flat,
-                                program,
-                            )
-                        })
-                        .collect()
-                }
+                (true, Some(frame)) => rels
+                    .into_iter()
+                    .filter(|&rel| {
+                        item_differs(
+                            module,
+                            key.section,
+                            rel,
+                            &bounds,
+                            frame + t.base,
+                            key.flat,
+                            program,
+                            false,
+                        )
+                    })
+                    .collect(),
                 (true, None) => {
                     let section = &module.sections[key.section as usize].name;
                     anchors.warnings.push(format!(
@@ -290,20 +319,35 @@ impl Anchors {
                 SectionAnchor {
                     tally: t,
                     differing,
+                    moved,
                 },
             );
         }
         anchors
     }
 
-    /// The blocker of a field: `wrong` if a condition fails, `unchecked` if one cannot be verified.
+    /// The blocker of a field: `wrong` if a condition fails, [`Blocker::DataLayout`] if the only failure is an
+    /// unchanged item at another section offset, `unchecked` if a condition cannot be verified.
     pub fn judge(&self, outcome: &Outcome, wrong: Blocker, unchecked: Blocker) -> Option<Blocker> {
         let conditions = match outcome {
             Outcome::Decided(b) => return *b,
             Outcome::Anchored(c) => c,
         };
         let mut unverified = false;
+        let mut layout = false;
         for condition in conditions {
+            if let Condition::Section {
+                key,
+                rel,
+                candidate,
+            } = condition
+                && self.sections.get(key).is_some_and(|s| {
+                    s.tally.base != *candidate && s.moved.contains(&(*rel, *candidate))
+                })
+            {
+                layout = true;
+                continue;
+            }
             let ok = match condition {
                 Condition::Frame {
                     frame, candidate, ..
@@ -327,6 +371,11 @@ impl Anchors {
             if !ok {
                 return Some(wrong);
             }
+        }
+        if layout {
+            return Some(Blocker::DataLayout {
+                at: wrong.at().unwrap_or(0),
+            });
         }
         unverified.then_some(unchecked)
     }
