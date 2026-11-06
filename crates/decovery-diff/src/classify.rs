@@ -3,7 +3,7 @@
 
 use decovery_x86::{DecodeOptions, decode_detailed};
 
-use crate::diagnose::{is_number, operands};
+use crate::diagnose::{is_byte_register, is_number, is_word_register, operands, same_sizes};
 use crate::pairs::{Pair, PairKind};
 
 /// What all differing pairs of a comparison change, when it is only the compiler's slot or register choice: the
@@ -30,7 +30,8 @@ impl DeviationKind {
     }
 }
 
-/// Every `[reg]`, `[reg+N]`, `[reg-N]` with `reg` a stack or frame register as `[reg+N]`.
+/// Every local slot as `[reg+N]`: `[esp]`, `[esp+N]`, `[esp-N]`, and `[ebp-N]` / `[bp-N]` (a frame register with a
+/// positive offset is a parameter, not a slot).
 fn stack_masked(t: &str) -> String {
     let mut out = String::with_capacity(t.len());
     let mut rest = t;
@@ -43,7 +44,12 @@ fn stack_masked(t: &str) -> String {
         let register = content.split(['+', '-']).next().unwrap_or("");
         let offset = &content[register.len()..];
         let plain_offset = offset.is_empty() || offset.get(1..).is_some_and(is_number);
-        if matches!(register, "esp" | "ebp" | "bp") && plain_offset {
+        let slot = match register {
+            "esp" => plain_offset,
+            "ebp" | "bp" => offset.starts_with('-') && plain_offset,
+            _ => false,
+        };
+        if slot {
             out.push_str(&format!("[{register}+N]"));
         } else {
             out.push_str(&rest[open..=close]);
@@ -55,29 +61,7 @@ fn stack_masked(t: &str) -> String {
 }
 
 fn is_general_register(w: &str) -> bool {
-    matches!(
-        w,
-        "ax" | "bx"
-            | "cx"
-            | "dx"
-            | "eax"
-            | "ebx"
-            | "ecx"
-            | "edx"
-            | "si"
-            | "di"
-            | "esi"
-            | "edi"
-            | "al"
-            | "ah"
-            | "bl"
-            | "bh"
-            | "cl"
-            | "ch"
-            | "dl"
-            | "dh"
-            | "ebp"
-    )
+    is_word_register(w) || is_byte_register(w) || w == "ebp"
 }
 
 /// Every general register as `R`.
@@ -113,7 +97,8 @@ fn pair_change(p: &Pair) -> Option<PairChange> {
     let (Some(a), Some(b)) = (&p.rebuild, &p.original) else {
         return None;
     };
-    if a.mnemonic != b.mnemonic {
+    // a changed operand size (char against int) is a type difference, not a slot or register choice
+    if a.mnemonic != b.mnemonic || !same_sizes(a, b) {
         return None;
     }
     let (a, b) = (operands(a).join(", "), operands(b).join(", "));
@@ -141,23 +126,7 @@ fn is_register_copy(p: &Pair) -> bool {
     let Some(d) = d else {
         return false;
     };
-    let copyable = |r: &str| {
-        matches!(
-            r,
-            "ax" | "bx"
-                | "cx"
-                | "dx"
-                | "eax"
-                | "ebx"
-                | "ecx"
-                | "edx"
-                | "si"
-                | "di"
-                | "esi"
-                | "edi"
-                | "ebp"
-        )
-    };
+    let copyable = |r: &str| is_word_register(r) || r == "ebp";
     d.mnemonic == "mov" && matches!(&operands(d)[..], [x, y] if copyable(x) && copyable(y))
 }
 
@@ -284,9 +253,9 @@ pub fn classify_code(
     for d in decoded.iter().filter(|d| !d.is_padding()) {
         let m = d.mnemonic.rsplit(' ').next().unwrap_or("");
         if STRONG.contains(&m) {
-            push_unique(&mut strong, m.to_string());
+            push_unique(&mut strong, d.mnemonic.clone());
         } else if WEAK.contains(&m) {
-            push_unique(&mut weak, m.to_string());
+            push_unique(&mut weak, d.mnemonic.clone());
         } else if bits == 32
             && m == "mov"
             && let Some(target) = operands(d).first()
@@ -334,6 +303,8 @@ mod tests {
         assert_eq!(stack_masked("eax, [esp]"), "eax, [esp+N]");
         assert_eq!(stack_masked("eax, [ebx+0x4]"), "eax, [ebx+0x4]");
         assert_eq!(stack_masked("ax, [bp+si]"), "ax, [bp+si]");
+        assert_eq!(stack_masked("ax, [bp+0x4]"), "ax, [bp+0x4]");
+        assert_eq!(stack_masked("ax, [bp-0x4]"), "ax, [bp+N]");
         assert_eq!(registers_masked("dx, [bp-0x2]"), "R, [bp-0x2]");
     }
 }

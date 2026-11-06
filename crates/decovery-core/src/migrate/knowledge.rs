@@ -66,6 +66,13 @@ pub const DIAGNOSES: &[(&str, &str)] = &[
     ("adressrechnung", "address-arithmetic"),
     ("lokale-reihenfolge", "local-order"),
     ("fruehes-return", "early-return"),
+    ("schalter-z", "turbo-c-z"),
+    ("ueberzaehliger-sprung", "extra-jump"),
+    ("vorzeichen", "sign-extension"),
+    ("register-mehr", "extra-register"),
+    ("ladereihenfolge", "load-order"),
+    ("sprungweite", "jump-width"),
+    ("laenge-ende", "length-end"),
     (
         "cw:byte-erweitern-zwischenwert",
         "cw:byte-extend-intermediate",
@@ -536,6 +543,44 @@ zauber = 1
             ["funktion.diagnose=neu", "funktion.gleichwertig.zauber"]
         );
         assert_eq!(cx.texts, 2);
+    }
+
+    #[test]
+    fn rebuild_diagnoses_of_the_generic_rules_are_english() {
+        let (t, cx) = convert(
+            "nachbau.toml",
+            r#"
+[[funktion]]
+adresse = "va:00010010"
+name = "f"
+ergebnis = "abweichend"
+diagnose = ["lokale-reihenfolge", "schalter-z", "ueberzaehliger-sprung", "fruehes-return", "konstante", "vorzeichen", "register-mehr", "ladereihenfolge", "operanden-tausch", "adressrechnung", "sprungweite", "laenge-ende"]
+"#,
+        );
+        let ids: Vec<&str> = t["function"][0]["diagnoses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "local-order",
+                "turbo-c-z",
+                "extra-jump",
+                "early-return",
+                "constant",
+                "sign-extension",
+                "extra-register",
+                "load-order",
+                "operand-swap",
+                "address-arithmetic",
+                "jump-width",
+                "length-end"
+            ]
+        );
+        assert!(cx.unmapped.is_empty(), "{:?}", cx.unmapped);
     }
 
     #[test]

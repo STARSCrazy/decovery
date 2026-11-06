@@ -441,3 +441,42 @@ fn module_comparison_records_rule_ids_only_when_asked() {
     assert_eq!(asked.metrics, plain.metrics);
     assert_eq!(asked.blockers, plain.blockers);
 }
+
+#[test]
+fn classify_size_change_is_none() {
+    // mov byte ptr [ebp-4],0; ret  against  mov dword ptr [ebp-8],0; ret: a type difference, not a slot
+    let p = pairs(
+        32,
+        &[0xC6, 0x45, 0xFC, 0x00, 0xC3],
+        &[0xC7, 0x45, 0xF8, 0x00, 0x00, 0x00, 0x00, 0xC3],
+    );
+    assert_eq!(p[0].kind, PairKind::Different);
+    assert!(classify_deviation(&p).is_none());
+}
+
+#[test]
+fn classify_parameter_slot_is_none() {
+    // mov ax,[bp+4]; ret  against  mov ax,[bp+6]; ret: another parameter, not a local slot
+    let p = pairs(16, &[0x8B, 0x46, 0x04, 0xC3], &[0x8B, 0x46, 0x06, 0xC3]);
+    assert!(classify_deviation(&p).is_none());
+}
+
+#[test]
+fn constant_needs_the_same_operand_size() {
+    // mov byte ptr [ebp-4],5; ret  against  mov word ptr [ebp-4],7; ret
+    let f = findings(
+        32,
+        &[0xC6, 0x45, 0xFC, 0x05, 0xC3],
+        &[0x66, 0xC7, 0x45, 0xFC, 0x07, 0x00, 0xC3],
+        "watcom",
+    );
+    assert!(!rules(&f).contains(&"constant"), "{:?}", rules(&f));
+    // the same size: a constant difference
+    let f = findings(
+        32,
+        &[0xC6, 0x45, 0xFC, 0x05, 0xC3],
+        &[0xC6, 0x45, 0xFC, 0x07, 0xC3],
+        "watcom",
+    );
+    assert_eq!(rules(&f), ["constant"]);
+}

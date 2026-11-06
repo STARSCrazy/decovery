@@ -352,15 +352,26 @@ pub(crate) struct Side<'a> {
     pub naming: Naming<'a>,
 }
 
-/// The aligned instruction pairs of both sides, judged (Decomp's `vergleiche_befehle`). The number of pairs that
-/// are not [`PairKind::Equal`] or [`PairKind::Form`] is Decomp's `Befehlsvergleich.abweichend`.
+/// Which pairs [`pairs`] hands back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Keep {
+    Always,
+    /// Only when some pair is not [`PairKind::Equal`] (what a diagnosis needs).
+    IfNotEqual,
+    Never,
+}
+
+/// The instruction comparison of both sides (Decomp's `vergleiche_befehle`): the number of differing pairs
+/// (Decomp's `Befehlsvergleich.abweichend`: not [`PairKind::Equal`] or [`PairKind::Form`]) and, as `keep` asks, the
+/// aligned, judged pairs (else empty).
 pub(crate) fn pairs(
     rebuild: &Side<'_>,
     original: &Side<'_>,
     bits: u32,
     byte_padding: bool,
     data_address: &dyn Fn(&str) -> Option<u64>,
-) -> Vec<Pair> {
+    keep: Keep,
+) -> (u32, Vec<Pair>) {
     let a = build(
         rebuild.code,
         bits,
@@ -394,10 +405,19 @@ pub(crate) fn pairs(
             _ => PairKind::OriginalOnly,
         })
         .collect();
+    let differing = kinds.iter().filter(|k| k.differs()).count() as u32;
+    let wanted = match keep {
+        Keep::Always => true,
+        Keep::IfNotEqual => kinds.iter().any(|&k| k != PairKind::Equal),
+        Keep::Never => false,
+    };
+    if !wanted {
+        return (differing, Vec::new());
+    }
     // every instruction is in exactly one pair: move the decoded instructions out
     let mut a: Vec<Option<Decoded>> = a.into_iter().map(|x| Some(x.d)).collect();
     let mut b: Vec<Option<Decoded>> = b.into_iter().map(|x| Some(x.d)).collect();
-    aligned
+    let pairs = aligned
         .into_iter()
         .zip(kinds)
         .map(|((x, y), kind)| {
@@ -407,7 +427,8 @@ pub(crate) fn pairs(
                 y.and_then(|y| b.get_mut(y)?.take()),
             )
         })
-        .collect()
+        .collect();
+    (differing, pairs)
 }
 
 #[cfg(test)]

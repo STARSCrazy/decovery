@@ -9,6 +9,8 @@
 //! such an operand is almost always filled by the linker. The Watcom-specific rules (`folgefunktion`,
 //! `vergleich-gespiegelt`, `gleiche-enden`) and the data-driven `cw:*` rules are not ported here.
 
+use std::cell::OnceCell;
+
 use decovery_x86::Decoded;
 
 use crate::pairs::{Pair, PairKind};
@@ -36,14 +38,21 @@ impl Finding {
     }
 }
 
-/// One instruction with normalized operands.
+/// One instruction; its operands are normalized on first use (most rules read only a few instructions).
 struct Ins<'a> {
     offset: u32,
     mnemonic: &'a str,
-    ops: Vec<String>,
+    d: &'a Decoded,
+    normalized: OnceCell<Vec<String>>,
     text: &'a str,
     shape: &'a str,
     branch: bool,
+}
+
+impl Ins<'_> {
+    fn ops(&self) -> &[String] {
+        self.normalized.get_or_init(|| operands(self.d))
+    }
 }
 
 struct View<'a> {
@@ -64,38 +73,41 @@ impl<'a> View<'a> {
 
 /// Number tokens of an operand as `0x…` (iced writes `0Ah`, `7FFFh` and small numbers in decimal).
 fn normalize_numbers(op: &str) -> String {
-    let chars: Vec<char> = op.chars().collect();
+    use std::fmt::Write;
+    let bytes = op.as_bytes();
+    let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
     let mut out = String::with_capacity(op.len() + 4);
     let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
-        let starts_word = i == 0 || !(chars[i - 1].is_ascii_alphanumeric() || chars[i - 1] == '_');
-        if c.is_ascii_digit() && starts_word {
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c.is_ascii_digit() && (i == 0 || !word(bytes[i - 1])) {
             let mut j = i;
-            while j < chars.len() && chars[j].is_ascii_hexdigit() {
+            while j < bytes.len() && bytes[j].is_ascii_hexdigit() {
                 j += 1;
             }
-            let digits: String = chars[i..j].iter().collect();
-            let hex = j < chars.len() && (chars[j] == 'h' || chars[j] == 'H');
+            // the run is ASCII, so `op[i..j]` is on char boundaries
+            let digits = &op[i..j];
+            let hex = j < bytes.len() && (bytes[j] == b'h' || bytes[j] == b'H');
+            let end = if hex { j + 1 } else { j };
             let value = if hex {
-                u64::from_str_radix(&digits, 16).ok()
+                u64::from_str_radix(digits, 16).ok()
             } else if digits.bytes().all(|b| b.is_ascii_digit()) {
                 digits.parse::<u64>().ok()
             } else {
                 None
             };
-            let end_ok = {
-                let k = if hex { j + 1 } else { j };
-                k >= chars.len() || !(chars[k].is_ascii_alphanumeric() || chars[k] == '_')
-            };
-            if let (Some(v), true) = (value, end_ok) {
-                out.push_str(&format!("{v:#x}"));
-                i = if hex { j + 1 } else { j };
+            if let Some(v) = value
+                && (end >= bytes.len() || !word(bytes[end]))
+            {
+                let _ = write!(out, "{v:#x}");
+                i = end;
                 continue;
             }
         }
-        out.push(c.to_ascii_lowercase());
-        i += 1;
+        // copy one whole character (non-ASCII text stays intact)
+        let len = op[i..].chars().next().map_or(1, char::len_utf8);
+        out.push_str(&op[i..i + len].to_ascii_lowercase());
+        i += len;
     }
     out
 }
@@ -137,38 +149,41 @@ fn ins(d: &Decoded) -> Ins<'_> {
     Ins {
         offset: d.offset,
         mnemonic: &d.mnemonic,
-        ops: operands(d),
+        d,
+        normalized: OnceCell::new(),
         text: &d.text,
         shape: &d.shape,
         branch: d.near_branch.is_some(),
     }
 }
 
-fn is_register(s: &str) -> bool {
+/// The memory operand sizes of a shape (`m1`, `m4`, ... in operand order): the operand text drops `byte ptr` and
+/// the like, the shape keeps them.
+pub(crate) fn memory_sizes(shape: &str) -> impl Iterator<Item = &str> {
+    shape
+        .split([' ', ','])
+        .filter(|w| w.len() > 1 && w.starts_with('m') && w[1..].bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// The memory operands of both instructions have the same sizes.
+pub(crate) fn same_sizes(a: &Decoded, b: &Decoded) -> bool {
+    memory_sizes(&a.shape).eq(memory_sizes(&b.shape))
+}
+
+/// 16- and 32-bit general registers without the stack and frame registers.
+pub(crate) fn is_word_register(s: &str) -> bool {
     matches!(
         s,
-        "ax" | "bx"
-            | "cx"
-            | "dx"
-            | "eax"
-            | "ebx"
-            | "ecx"
-            | "edx"
-            | "al"
-            | "ah"
-            | "bl"
-            | "bh"
-            | "cl"
-            | "ch"
-            | "dl"
-            | "dh"
-            | "si"
-            | "di"
-            | "esi"
-            | "edi"
-            | "bp"
-            | "ebp"
+        "ax" | "bx" | "cx" | "dx" | "si" | "di" | "eax" | "ebx" | "ecx" | "edx" | "esi" | "edi"
     )
+}
+
+pub(crate) fn is_byte_register(s: &str) -> bool {
+    matches!(s, "al" | "ah" | "bl" | "bh" | "cl" | "ch" | "dl" | "dh")
+}
+
+fn is_register(s: &str) -> bool {
+    is_word_register(s) || is_byte_register(s) || s == "bp" || s == "ebp"
 }
 
 fn number(s: &str) -> Option<i64> {
@@ -246,15 +261,15 @@ fn mask_absolute(op: &str) -> String {
 }
 
 fn joined(i: &Ins<'_>) -> String {
-    i.ops.join(", ")
+    i.ops().join(", ")
 }
 
 /// Operands of both sides of a pair with absolute memory addresses counted as equal (Decomp's
 /// `_vergleichbare_operanden`).
 fn comparable(a: &Ins<'_>, b: &Ins<'_>) -> (Vec<String>, Vec<String>) {
     (
-        a.ops.iter().map(|o| mask_absolute(o)).collect(),
-        b.ops.iter().map(|o| mask_absolute(o)).collect(),
+        a.ops().iter().map(|o| mask_absolute(o)).collect(),
+        b.ops().iter().map(|o| mask_absolute(o)).collect(),
     )
 }
 
@@ -271,8 +286,18 @@ fn local_mapping(views: &[View<'_>]) -> Option<LocalMap> {
         let (Some(a), Some(b)) = (&v.rebuild, &v.original) else {
             continue;
         };
-        let (ja, jb) = (joined(a), joined(b));
-        if a.shape != b.shape || without_locals(&ja) != without_locals(&jb) {
+        // a local slot is a base-only frame operand (`[bp-N]`), which the shape shows as `[bp]`
+        if a.shape != b.shape || !(a.shape.contains("[bp]") || a.shape.contains("[ebp]")) {
+            continue;
+        }
+        let ja = joined(a);
+        // equal pairs have equal bytes, so equal operands
+        let jb = if v.kind == PairKind::Equal {
+            ja.clone()
+        } else {
+            joined(b)
+        };
+        if without_locals(&ja) != without_locals(&jb) {
             continue;
         }
         for (x, y) in locals(&ja).into_iter().zip(locals(&jb)) {
@@ -319,7 +344,7 @@ fn local_order(_: &[View<'_>], bits: u8, mapping: Option<&LocalMap>) -> Option<F
 /// `mov memory,register` or `mov register,memory`; an instruction writing `register` first, a call or a jump stops.
 fn knows(seen: &[&Ins<'_>], memory: &str, register: &str) -> bool {
     for b in seen.iter().rev().take(6) {
-        let ops: Vec<&str> = b.ops.iter().map(String::as_str).collect();
+        let ops: Vec<&str> = b.ops().iter().map(String::as_str).collect();
         if b.mnemonic == "mov" && (ops == [memory, register] || ops == [register, memory]) {
             return true;
         }
@@ -370,11 +395,12 @@ fn turbo_c_z(views: &[View<'_>], bits: u8, _: Option<&LocalMap>) -> Option<Findi
                         .map(|(k, (x, y))| (k, x, y))
                         .collect();
                     if let [(k, x, y)] = diff[..] {
-                        if is_register(y) && (is_number(x) || knows(&seen_original, &nb.ops[k], y))
+                        if is_register(y)
+                            && (is_number(x) || knows(&seen_original, &nb.ops()[k], y))
                         {
                             add(Who::Original, &mut direction);
                         } else if is_register(x)
-                            && (is_number(y) || knows(&seen_rebuild, &og.ops[k], x))
+                            && (is_number(y) || knows(&seen_rebuild, &og.ops()[k], x))
                         {
                             add(Who::Rebuild, &mut direction);
                         }
@@ -384,7 +410,7 @@ fn turbo_c_z(views: &[View<'_>], bits: u8, _: Option<&LocalMap>) -> Option<Findi
                     (nb, og, &seen_original, Who::Original),
                     (og, nb, &seen_rebuild, Who::Rebuild),
                 ] {
-                    let (ops, r) = (&with_zero.ops, &with_register.ops);
+                    let (ops, r) = (&with_zero.ops(), &with_register.ops());
                     if with_zero.mnemonic == "cmp"
                         && ops.len() == 2
                         && number(&ops[1]) == Some(0)
@@ -399,7 +425,7 @@ fn turbo_c_z(views: &[View<'_>], bits: u8, _: Option<&LocalMap>) -> Option<Findi
                 }
             }
             (PairKind::RebuildOnly, Some(nb), _) if nb.mnemonic == "mov" => {
-                let ops = &nb.ops;
+                let ops = &nb.ops();
                 if ops.len() == 2
                     && is_register(&ops[0])
                     && ops[1].contains('[')
@@ -409,7 +435,7 @@ fn turbo_c_z(views: &[View<'_>], bits: u8, _: Option<&LocalMap>) -> Option<Findi
                 }
             }
             (PairKind::OriginalOnly, _, Some(og)) if og.mnemonic == "mov" => {
-                let ops = &og.ops;
+                let ops = &og.ops();
                 if ops.len() == 2
                     && is_register(&ops[0])
                     && ops[1].contains('[')
@@ -483,7 +509,7 @@ fn extra_jump(views: &[View<'_>], _: u8, _: Option<&LocalMap>) -> Option<Finding
 /// `xor ax,ax` / `mov ax,…` (32-bit: `eax`): setting the return value.
 fn sets_return_value(b: &Ins<'_>) -> bool {
     let accumulator = |r: &str| r == "ax" || r == "eax";
-    match (b.mnemonic, &b.ops[..]) {
+    match (b.mnemonic, b.ops()) {
         ("xor", [x, y]) => x == y && accumulator(x),
         ("mov", [x, _]) => accumulator(x),
         _ => false,
@@ -537,7 +563,12 @@ fn constant(views: &[View<'_>], _: u8, _: Option<&LocalMap>) -> Option<Finding> 
             continue;
         };
         let (a, b) = comparable(nb, og);
-        if nb.mnemonic != og.mnemonic || a.len() != b.len() || nb.branch || og.branch {
+        if nb.mnemonic != og.mnemonic
+            || a.len() != b.len()
+            || nb.branch
+            || og.branch
+            || !same_sizes(nb.d, og.d)
+        {
             continue;
         }
         let diff: Vec<(Option<i64>, Option<i64>)> = a
@@ -575,7 +606,7 @@ enum Extension {
 }
 
 fn extension(b: &Ins<'_>, before: Option<&Ins<'_>>, bits: u8) -> Option<Extension> {
-    let ops: Vec<&str> = b.ops.iter().map(String::as_str).collect();
+    let ops: Vec<&str> = b.ops().iter().map(String::as_str).collect();
     if matches!(b.mnemonic, "cbw" | "cwde" | "movsx") {
         return Some(Extension::Signed);
     }
@@ -593,7 +624,7 @@ fn extension(b: &Ins<'_>, before: Option<&Ins<'_>>, bits: u8) -> Option<Extensio
         && let Some(before) = before
     {
         let wide = format!("e{}x", &low[..1]);
-        if before.mnemonic == "xor" && before.ops == [wide.clone(), wide] {
+        if before.mnemonic == "xor" && before.ops() == [wide.clone(), wide] {
             return Some(Extension::Zero);
         }
     }
@@ -643,7 +674,7 @@ fn saved(instructions: &[&Ins<'_>]) -> Vec<String> {
         .iter()
         .take(6)
         .filter(|b| b.mnemonic == "push")
-        .filter_map(|b| match &b.ops[..] {
+        .filter_map(|b| match b.ops() {
             [r] if matches!(r.as_str(), "si" | "di" | "bx" | "ebx" | "esi" | "edi") => {
                 Some(r.clone())
             }
@@ -687,25 +718,12 @@ fn loads(instructions: &[&Ins<'_>]) -> Vec<u64> {
         .take(12)
         .filter(|b| {
             b.mnemonic == "mov"
-                && b.ops.first().is_some_and(|r| {
-                    matches!(
-                        r.as_str(),
-                        "ax" | "bx"
-                            | "cx"
-                            | "dx"
-                            | "si"
-                            | "di"
-                            | "eax"
-                            | "ebx"
-                            | "ecx"
-                            | "edx"
-                            | "esi"
-                            | "edi"
-                    )
-                })
+                && b.ops()
+                    .first()
+                    .is_some_and(|r| is_word_register(r.as_str()))
         })
         .filter_map(|b| {
-            b.ops
+            b.ops()
                 .iter()
                 .flat_map(|o| bracket_contents(o))
                 .find_map(|c| frame_slot(c, '+').map(|(_, n)| n))
@@ -750,7 +768,7 @@ fn sorted_mnemonics<'a>(v: &[&Ins<'a>]) -> Vec<&'a str> {
 fn sorted_operands<'s>(v: &[&'s Ins<'_>]) -> Vec<&'s str> {
     sorted(
         &v.iter()
-            .flat_map(|b| b.ops.iter().map(String::as_str))
+            .flat_map(|b| b.ops().iter().map(String::as_str))
             .collect::<Vec<_>>(),
     )
 }
@@ -778,28 +796,7 @@ fn generic_shape(shape: &str) -> String {
     let mut out = String::with_capacity(shape.len());
     let mut word = String::new();
     let flush = |word: &mut String, out: &mut String| {
-        let register = matches!(
-            word.as_str(),
-            "ax" | "bx"
-                | "cx"
-                | "dx"
-                | "eax"
-                | "ebx"
-                | "ecx"
-                | "edx"
-                | "si"
-                | "di"
-                | "esi"
-                | "edi"
-                | "al"
-                | "ah"
-                | "bl"
-                | "bh"
-                | "cl"
-                | "ch"
-                | "dl"
-                | "dh"
-        );
+        let register = is_word_register(word.as_str()) || is_byte_register(word.as_str());
         out.push_str(if register { "R" } else { word.as_str() });
         word.clear();
     };
@@ -895,7 +892,7 @@ fn address_arithmetic(views: &[View<'_>], _: u8, _: Option<&LocalMap>) -> Option
     let scaled = |bs: &[&Ins<'_>]| {
         bs.iter().any(|b| {
             b.mnemonic != "lea"
-                && b.ops.iter().any(|o| {
+                && b.ops().iter().any(|o| {
                     bracket_contents(o).any(|c| {
                         c.split('*')
                             .skip(1)
@@ -906,7 +903,7 @@ fn address_arithmetic(views: &[View<'_>], _: u8, _: Option<&LocalMap>) -> Option
     };
     let beforehand = |bs: &[&Ins<'_>]| {
         bs.iter().any(|b| {
-            b.mnemonic == "shl" || (b.mnemonic == "lea" && b.ops.iter().any(|o| o.contains('*')))
+            b.mnemonic == "shl" || (b.mnemonic == "lea" && b.ops().iter().any(|o| o.contains('*')))
         })
     };
     if scaled(&nb) && !scaled(&og) && beforehand(&og) {
