@@ -308,6 +308,7 @@ fn analyze_without_plugin_config_exits_2() {
     assert_eq!(out.status.code(), Some(2));
 }
 
+/// Decomp's `decomp.toml` (its workspace format is German; this is input of `decovery migrate`).
 const DECOMP_TOML: &str = r#"
 [ziel]
 datei = "spiel/PROGRAM.EXE"
@@ -319,14 +320,19 @@ segment = [
 ]
 "#;
 
-/// A Decomp workspace whose `ausgabe/` holds one function.
+/// Header of one generated Decomp function file (Decomp's German keys and phrases).
+const DECOMP_FUNCTION_HEADER: &str = "/* @adresse    va:00010010 .. va:0001001F (16 Bytes, datei 0x210)\n * @name       fun_00010010  [unbenannt]\n * @gerufen-von (keine)\n * @ruft       (keine)\n * @strings    (keine)\n * @globale    (keine)\n * @laufzeit   unbekannt\n * @nachbau    nicht-versucht\n */\n";
+/// Decomp's output directory for generated function files.
+const DECOMP_FUNCTIONS_PATH: &str = "ausgabe/funktionen/obj1";
+
+/// A Decomp workspace whose output directory holds one function.
 fn decomp_with_output() -> tempfile::TempDir {
     let from = tempfile::tempdir().unwrap();
     let f = from.path();
     std::fs::write(f.join("decomp.toml"), DECOMP_TOML).unwrap();
-    let dir = f.join("ausgabe/funktionen/obj1");
+    let dir = f.join(DECOMP_FUNCTIONS_PATH);
     std::fs::create_dir_all(&dir).unwrap();
-    let header = "/* @adresse    va:00010010 .. va:0001001F (16 Bytes, datei 0x210)\n * @name       fun_00010010  [unbenannt]\n * @gerufen-von (keine)\n * @ruft       (keine)\n * @strings    (keine)\n * @globale    (keine)\n * @laufzeit   unbekannt\n * @nachbau    nicht-versucht\n */\n";
+    let header = DECOMP_FUNCTION_HEADER;
     std::fs::write(
         dir.join("va_00010010_fun_00010010.c"),
         format!("{header}\nvoid f(void)\n{{\n  return;\n}}\n"),

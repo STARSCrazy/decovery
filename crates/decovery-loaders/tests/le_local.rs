@@ -10,6 +10,10 @@ use decovery_loaders::load_le;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+// Decomp's `decomp.toml` keys (its workspace is German).
+const DECOMP_KEY_TARGET: &str = "ziel";
+const DECOMP_KEY_FILE: &str = "datei";
+
 fn env_path(name: &str) -> PathBuf {
     PathBuf::from(std::env::var_os(name).unwrap_or_else(|| panic!("{name} is not set")))
 }
@@ -38,7 +42,7 @@ fn matches_decomp() {
         .unwrap()
         .parse()
         .unwrap();
-    let exe = workspace.join(config["ziel"]["datei"].as_str().unwrap());
+    let exe = workspace.join(config[DECOMP_KEY_TARGET][DECOMP_KEY_FILE].as_str().unwrap());
     let golden_path = env_path("DECOVERY_GOLDEN_DIR").join("le.json");
     let bytes = std::fs::read(&exe).unwrap();
     let golden: Value = serde_json::from_slice(&std::fs::read(golden_path).unwrap()).unwrap();
@@ -146,14 +150,14 @@ fn matches_decomp() {
             i64::from(r.length),
         );
         let theirs = (
-            num(&g["seite"]),
-            num(&g["objekt"]),
+            num(&g["page"]),
+            num(&g["object"]),
             num(&g["offset"]),
-            num(&g["art"]),
-            num(&g["ziel_objekt"]),
-            num(&g["ziel_offset"]),
-            g["kurz"].as_bool().unwrap(),
-            num(&g["laenge"]),
+            num(&g["kind"]),
+            num(&g["target_object"]),
+            num(&g["target_offset"]),
+            g["short_target"].as_bool().unwrap(),
+            num(&g["length"]),
         );
         assert_eq!(ours, theirs);
     }
