@@ -165,8 +165,58 @@ plugin.serve()
 """
 
 
+# A handler that starts a child process the way multiprocessing's spawn pools do. The child inherits the standard
+# input; if that were the protocol pipe, the child would block on it while the server waits for the next line.
+SPAWNING_PLUGIN = """
+import multiprocessing, sys, time
+sys.path.insert(0, sys.argv[1])
+from decovery_plugin import Plugin
+plugin = Plugin("spawn", "1")
+
+@plugin.method("spawn/child")
+def child(params, ctx):
+    p = multiprocessing.get_context("spawn").Process(target=time.sleep, args=(0.1,))
+    p.start()
+    p.join(20)
+    return p.exitcode
+
+plugin.serve()
+"""
+
+
+def ask(proc, request, seconds):
+    """Writes `request` and returns the parsed answer, or None when none comes within `seconds`."""
+    proc.stdin.write(json.dumps(request) + "\n")
+    proc.stdin.flush()
+    answer = []
+    reader = threading.Thread(target=lambda: answer.append(proc.stdout.readline()), daemon=True)
+    reader.start()
+    reader.join(seconds)
+    return json.loads(answer[0]) if answer else None
+
+
 @unittest.skipUnless(sys.platform == "win32", "the C-runtime fd lock is a Windows behaviour")
 class StdioProcessTests(unittest.TestCase):
+    def test_spawned_child_does_not_block_on_protocol_pipe(self):
+        sdk = os.path.join(os.path.dirname(__file__), "..")
+        proc = subprocess.Popen(
+            [sys.executable, "-c", SPAWNING_PLUGIN, sdk],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            encoding="utf-8",
+        )
+        try:
+            answer = ask(proc, req(1, "spawn/child"), 30)
+            self.assertIsNotNone(answer, "no answer within 30 s")
+            self.assertEqual(answer["result"], 0, "the child did not end: it blocked on the protocol pipe")
+            self.assertIsNotNone(ask(proc, req(2, "shutdown"), 10))
+            self.assertEqual(proc.wait(10), 0)
+        finally:
+            proc.kill()
+            proc.wait()
+            proc.stdin.close()
+            proc.stdout.close()
+
     def test_handler_touching_stdin_fd_does_not_block_on_pending_read(self):
         sdk = os.path.join(os.path.dirname(__file__), "..")
         proc = subprocess.Popen(
