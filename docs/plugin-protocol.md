@@ -184,8 +184,24 @@ Result: `{jobs: [{status: "done" | "timeout" | "failed", exit_code, stdout, mess
 request order. `done` carries the exit code of the last command that ran, `timeout` means the job did not end
 within `timeout_s` (the plugin stops it), `failed` carries a `message` (the emulator faulted, an unknown
 instruction, ...). `stdout` is the console output as text. The plugin does not report which files a job produced:
-the host snapshots drive `C:` before the call and derives that itself, and for a `timeout` it deletes the expected
-files that did not exist before.
+the host notes the expected files of drive `C:` (paths relative to it, subdirectories included) before the call and
+derives that itself, and for a `timeout` it deletes the expected files that did not exist before.
+
+**Time contract.** The host gives up on a call that has not answered within `timeout_s x ceil(jobs / share) + 30 s`
+(`share` = `options.jobs`, the number of jobs the plugin may run at once), kills the plugin's process tree and
+treats the call as failed for all its jobs. A plugin therefore keeps every part of its work inside that bound: it
+runs at most `ceil(jobs / share)` jobs one after another on any of its instances, bounds a session by `timeout_s x
+its jobs + 10 s` (start-up), and a job it has to run again after an instance died gets only the time that is left of
+the call's `timeout_s x ceil(jobs / share)`, or fails as "not run again". The host's slack covers start-up and
+teardown, not more rounds.
+
+**Progress.** A plugin may send one `$/progress` notification per ended job (`done` = jobs ended so far, `total` =
+the jobs of the request when it knows, `message` = which job and how long it took). The host passes them on, so a
+hung job is told from a slow compile by the events that stop coming.
+
+**Directories.** A job line `CD <dir>` (or `CHDIR`) changes the current directory of drive `C:` for the following
+lines of that job; the next job starts in the root again. The host uses it to compile a source in a directory of its
+own (`CD V001`, then the compiler on `NAME.C`).
 
 A plugin that cannot run some job's program (an unsupported CPU mode or DOS extender) answers error `-32020`
 before running any job; the host then tries the next runner of its list.

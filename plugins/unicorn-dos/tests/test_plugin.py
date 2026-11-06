@@ -69,6 +69,15 @@ def die(job):
     os._exit(3)
 
 
+def timeout_of(job):
+    """Worker that dies on its first attempt (`die_once`, a marker file) and answers with its time limit."""
+    marker = job.get("die_once")
+    if marker and not os.path.exists(marker):
+        Path(marker).touch()
+        os._exit(3)
+    return {"status": "done", "exit_code": 0, "stdout": str(job["timeout_s"]), "message": None}
+
+
 def answer_or_die(job):
     """Worker that dies for a job with `die`, or with `die_once` (a marker file) on the first attempt only, and
     answers every other job with exit code `n` after `sleep` seconds."""
@@ -258,6 +267,28 @@ class JobPoolTest(unittest.TestCase):
         plugin = build_plugin()
         run(plugin, request(1, "runner/run", ws.params(["ECHO a"])), request(2, "runner/run", ws.params(["ECHO b"])))
         self.assertEqual(len(pools), 1)
+
+    def test_rerun_after_a_broken_pool_gets_only_the_time_left(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = str(Path(tmp) / "marker")
+            pool = JobPool(workers=1, worker=timeout_of)
+            self.addCleanup(pool.close)
+            # dies once, the budget is 5 s: the second try may take at most that, not the job's 100 s
+            job = {"timeout_s": 100.0, "die_once": marker}
+            outcome = pool.run([job], budget_s=5.0)[0]
+        self.assertEqual(outcome["status"], "done")
+        self.assertLessEqual(float(outcome["stdout"]), 5.0)
+        self.assertGreater(float(outcome["stdout"]), 0.0)
+
+    def test_no_job_is_run_again_after_the_budget_is_used_up(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = str(Path(tmp) / "marker")
+            pool = JobPool(workers=1, worker=timeout_of)
+            self.addCleanup(pool.close)
+            outcome = pool.run([{"timeout_s": 100.0, "die_once": marker}], budget_s=0.0)[0]
+            self.assertTrue(Path(marker).exists())  # the first try ran (and died)
+        self.assertEqual(outcome["status"], "failed")
+        self.assertIn("budget", outcome["message"])
 
     def test_on_done_reports_each_job_as_it_ends(self):
         pool = JobPool(workers=2, worker=answer_or_die)

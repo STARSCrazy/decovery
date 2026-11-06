@@ -969,3 +969,132 @@ fn unnamed_static_before_function_at_same_distance() {
         vec![Blocker::WrongAbsoluteRef { at: 1 }]
     );
 }
+
+/// Own variants judged against prepared shared functions give what one module comparison over all of them gives.
+#[test]
+fn shared_functions_give_the_results_of_one_module_comparison() {
+    use decovery_diff::{SharedFunctions, compare_module_with};
+
+    // shared: `f0 = mov ax,[g2]` at 0, `f1` (g1 and two strings) at 8; the original has the same
+    let strings_code: &[u8] = &[0xA1, 0, 0, 0xB8, 0, 0, 0xBA, 3, 0, 0xC3];
+    let strings_original: &[u8] = &[0xA1, 0x10, 0, 0xB8, 0x40, 0, 0xBA, 0x43, 0, 0xC3];
+    let shared_module = module16(
+        &[LOAD, strings_code],
+        vec![
+            off16(1, sym("_g2")),
+            off16(9, sym("_g1")),
+            off16(12, data_at(0)),
+            off16(15, data_at(3)),
+        ],
+    );
+    let symbols = known_globals();
+    let own_at = seg(0, 0x20);
+    let decoration = Decoration::watcom();
+    let options = ModuleOptions::default();
+    let shared_fs = functions(&shared_module);
+    let shared_placements: Vec<Placement> = shared_fs
+        .iter()
+        .map(|f| Placement::new(f.clone(), seg(0, f.start as u16), None))
+        .collect();
+    let shared_cache_program = |own_original: &[u8], strings: &[u8]| {
+        program16(
+            &[&load(0x14), strings_original],
+            &[(0x20, own_original), (0x2040, strings)],
+            vec![],
+        )
+    };
+
+    // (the variant's own function, its fields) against the original bytes of that function
+    let cases: Vec<(&str, ObjectModule, Vec<u8>, &[u8])> = vec![
+        (
+            "agrees",
+            module16(&[LOAD], vec![off16(1, sym("_g1"))]),
+            load(0x10),
+            DATA,
+        ),
+        (
+            "dissents",
+            module16(&[LOAD], vec![off16(1, sym("_g2"))]),
+            load(0x10),
+            DATA,
+        ),
+        (
+            "string",
+            module16(&[LOAD], vec![off16(1, data_at(0))]),
+            load(0x40),
+            DATA,
+        ),
+        (
+            "string differs",
+            module16(&[LOAD], vec![off16(1, data_at(0))]),
+            load(0x40),
+            b"aX\0cdeX\0",
+        ),
+        (
+            "unknown",
+            module16(&[LOAD], vec![off16(1, sym("_nowhere"))]),
+            load(0x10),
+            DATA,
+        ),
+    ];
+    let mut verdicts = std::collections::BTreeSet::new();
+    for (name, own_module, original, strings) in &cases {
+        let program = shared_cache_program(original, strings);
+        let own_fs = functions(own_module);
+        let own: Vec<Placement> = own_fs
+            .iter()
+            .map(|f| Placement::new(f.clone(), own_at, None))
+            .collect();
+        // one module comparison over the own function and the shared ones
+        let all: Vec<Placement> = own.iter().chain(&shared_placements).cloned().collect();
+        let whole = compare_module(&all, &program, &symbols, &decoration, &options);
+        let prepared = SharedFunctions::new(
+            &shared_placements,
+            &program,
+            &symbols,
+            &decoration,
+            &options,
+        );
+        let split = compare_module_with(&own, &prepared, &program, &symbols, &decoration, &options);
+        assert_eq!(split.functions.len(), own.len(), "{name}");
+        assert_eq!(split.functions[0], whole.functions[0], "{name}");
+        let sorted = |w: &[String]| {
+            let mut v = w.to_vec();
+            v.sort();
+            v
+        };
+        assert_eq!(sorted(&split.warnings), sorted(&whole.warnings), "{name}");
+        let frame = |c: &ModuleComparison| {
+            c.anchors
+                .iter()
+                .filter(|a| a.section.is_none())
+                .map(|a| (a.frame.clone(), a.base, a.votes, a.dissent))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(frame(&split), frame(&whole), "{name}");
+        verdicts.insert(format!("{:?}", split.functions[0].verdict));
+    }
+    // the cases cover both outcomes
+    assert!(verdicts.len() >= 2, "{verdicts:?}");
+
+    // a shared function at the address of an own placement is left out, as one comparison places only the first
+    let own_module = module16(&[LOAD], vec![off16(1, sym("_g1"))]);
+    let own_fs = functions(&own_module);
+    let program = shared_cache_program(&load(0x10), DATA);
+    let own: Vec<Placement> = own_fs
+        .iter()
+        .map(|f| Placement::new(f.clone(), seg(0, 0), None))
+        .collect();
+    let prepared = SharedFunctions::new(
+        &shared_placements,
+        &program,
+        &symbols,
+        &decoration,
+        &options,
+    );
+    let split = compare_module_with(&own, &prepared, &program, &symbols, &decoration, &options);
+    let mut first_wins: Vec<Placement> = own.clone();
+    first_wins.extend(shared_placements.iter().skip(1).cloned());
+    let whole = compare_module(&first_wins, &program, &symbols, &decoration, &options);
+    assert_eq!(split.functions[0], whole.functions[0]);
+}

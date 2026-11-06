@@ -142,6 +142,13 @@ def execute_job(job: dict, machine_for: Callable[[str, Any], Any]) -> dict:
     return _outcome("done", exit_code, stdout, None)
 
 
+def _within(job: dict, left: float) -> dict:
+    """`job` with a time limit of at most `left` seconds (0: none is left)."""
+    if "timeout_s" not in job:
+        return job
+    return {**job, "timeout_s": max(0.0, min(float(job["timeout_s"]), left))}
+
+
 def _worker_failed(e: Exception) -> dict:
     return _outcome("failed", None, [], f"emulator worker: {type(e).__name__}: {e}")
 
@@ -200,9 +207,13 @@ class JobPool:
         jobs: list[dict],
         parallel: int | None = None,
         on_done: Callable[[int, dict], None] | None = None,
+        budget_s: float | None = None,
     ) -> list[dict]:
         """Outcomes in job order. At most `parallel` jobs (default: all workers) run at once, larger `cost` first.
-        `on_done(index, outcome)` is called, on the calling thread, as each job ends."""
+        `on_done(index, outcome)` is called, on the calling thread, as each job ends. `budget_s` is the time the whole
+        call may take (the host gives up after that plus its slack): a job that has to run again because the pool
+        broke gets only the time that is left of it, and none is run again after it is used up."""
+        deadline = None if budget_s is None else time.monotonic() + budget_s
         limit = max(1, min(parallel or self.workers, self.workers))
         order = sorted(range(len(jobs)), key=lambda i: -_cost(jobs[i]))  # stable: equal costs keep job order
         outcomes: list[dict | None] = [None] * len(jobs)
@@ -233,8 +244,10 @@ class JobPool:
         unfinished = [i for i in order if outcomes[i] is None]
         if unfinished:
             self._discard(pool)
+            left = None if deadline is None else deadline - time.monotonic()
+            again = [jobs[i] if left is None else _within(jobs[i], left) for i in unfinished]
             with ThreadPoolExecutor(min(limit, len(unfinished))) as threads:
-                for i, outcome in zip(unfinished, threads.map(self._alone, [jobs[i] for i in unfinished])):
+                for i, outcome in zip(unfinished, threads.map(self._alone, again)):
                     outcomes[i] = outcome
                     if on_done is not None:
                         on_done(i, outcome)
@@ -242,6 +255,8 @@ class JobPool:
 
     def _alone(self, job: dict) -> dict:
         """Run one job again in a fresh process of its own: if it dies once more, nothing else is lost."""
+        if job.get("timeout_s", 1) <= 0:
+            return _outcome("failed", None, [], "not run again: the time budget of the call is used up")
         pool = _spawn(1)
         try:
             return pool.submit(self.worker, job).result()

@@ -14,13 +14,14 @@ use std::path::Path;
 use std::time::Instant;
 
 use decovery_core::{Analysis, BlockerRecord, Program, VerdictId, Workspace};
-use decovery_diff::{Blocker, ModuleOptions};
+use decovery_diff::{Blocker, ModuleOptions, SharedFunctions};
 use decovery_objects::{ObjectFile, read_omf};
 use decovery_plugin::Progress;
 use decovery_toolchain::{
     CheatFinding, Profile, SourceJob, SourceSet, find_cheats, find_sources, rebuild_profile,
     to_dos_bytes,
 };
+use rayon::prelude::*;
 use serde_json::{Value, json};
 
 use super::build::{
@@ -205,26 +206,16 @@ struct Compare<'a> {
     program: &'a Program,
     options: &'a ModuleOptions,
     function: &'a str,
-    /// Last good objects of the other files.
-    others: &'a [(String, ObjectFile)],
+    /// The functions of the kept objects of the other files, prepared once for every variant.
+    shared: SharedFunctions<'a>,
 }
 
 impl Compare<'_> {
-    /// Compares the variant's `object` together with the other files' objects (one module comparison, as in a full
-    /// build) and returns the result for `function`. `text` is the variant source (LF) for the inline-assembly check.
-    fn run(
-        &self,
-        object: &ObjectFile,
-        text: &str,
-        warnings: &mut BTreeSet<String>,
-    ) -> VariantResult {
-        let mut objects: Vec<(usize, &str, &ObjectFile)> = vec![(0, "the variant", object)];
-        objects.extend(
-            self.others
-                .iter()
-                .enumerate()
-                .map(|(k, (name, object))| (k + 1, name.as_str(), object)),
-        );
+    /// Compares the variant's `object` together with the other files' functions (the anchors of one module comparison,
+    /// as in a full build) and returns the result for `function` and the comparison's warnings. `text` is the
+    /// variant source (LF) for the inline-assembly check. Independent of every other call.
+    fn run(&self, object: &ObjectFile, text: &str) -> (VariantResult, Vec<String>) {
+        let objects: Vec<(usize, &str, &ObjectFile)> = vec![(0, "the variant", object)];
         let mut hints = Vec::new();
         let (placements, placed) = place_objects(
             self.knowledge,
@@ -238,23 +229,30 @@ impl Compare<'_> {
         let Some(at) = placed.iter().position(|b| {
             b.source == 0 && (b.name == function || b.address.to_string() == function)
         }) else {
-            return VariantResult::unchecked(
-                "unchecked",
-                format!(
-                    "the object does not define {function} (or it has no counterpart in the original)"
+            return (
+                VariantResult::unchecked(
+                    "unchecked",
+                    format!(
+                        "the object does not define {function} (or it has no counterpart in the original)"
+                    ),
                 ),
+                Vec::new(),
             );
         };
-        let module = decovery_diff::compare_module(
+        let module = decovery_diff::compare_module_with(
             &placements,
+            &self.shared,
             self.program,
             self.knowledge,
             &self.profile.decoration,
             self.options,
         );
-        warnings.extend(module.warnings);
+        let warnings = module.warnings;
         let Some(comparison) = module.functions.get(at) else {
-            return VariantResult::unchecked("unchecked", format!("{function} was not compared"));
+            return (
+                VariantResult::unchecked("unchecked", format!("{function} was not compared")),
+                warnings,
+            );
         };
         let m = &comparison.metrics;
         let mut verdict = verdict_id(&comparison.verdict);
@@ -284,18 +282,21 @@ impl Compare<'_> {
                 None => found,
             });
         }
-        VariantResult {
-            index: 0,
-            label: None,
-            verdict: verdict.id(),
-            checked,
-            cheat,
-            instructions_differing: m.instructions_differing,
-            differing: m.differing,
-            refs_wrong: m.refs_wrong,
-            blockers,
-            message,
-        }
+        (
+            VariantResult {
+                index: 0,
+                label: None,
+                verdict: verdict.id(),
+                checked,
+                cheat,
+                instructions_differing: m.instructions_differing,
+                differing: m.differing,
+                refs_wrong: m.refs_wrong,
+                blockers,
+                message,
+            },
+            warnings,
+        )
     }
 }
 
@@ -390,7 +391,8 @@ pub(super) fn build_variants(
     let jobs_input: Vec<SourceJob> = groups
         .iter()
         .map(|g| SourceJob::new(dos_name.clone(), flags.clone()).in_dir(g.dir.clone()))
-        .collect();
+        .collect::<Result<_, _>>()
+        .map_err(toolchain)?;
     let Compiled {
         files: compiled,
         mut warnings,
@@ -434,6 +436,27 @@ pub(super) fn build_variants(
         let sizes = symbol_sizes(&ws);
         let program = crate::program::load(&ws)?;
         let options = ModuleOptions::new(profile.padding, rebuild.frames.clone());
+        // the kept objects' functions are placed and prepared once, whatever the number of variants
+        let kept: Vec<(usize, &str, &ObjectFile)> = others
+            .iter()
+            .enumerate()
+            .map(|(k, (name, object))| (k + 1, name.as_str(), object))
+            .collect();
+        let (kept_placements, _) = place_objects(
+            &knowledge,
+            &profile,
+            index.as_ref(),
+            &sizes,
+            &kept,
+            &mut Vec::new(),
+        );
+        let shared = SharedFunctions::new(
+            &kept_placements,
+            &program,
+            &knowledge,
+            &profile.decoration,
+            &options,
+        );
         let compare = Compare {
             knowledge: &knowledge,
             profile: &profile,
@@ -442,23 +465,37 @@ pub(super) fn build_variants(
             program: &program,
             options: &options,
             function,
-            others: &others,
+            shared,
         };
         let total = objects.iter().flatten().count() as u64;
-        let mut done = 0;
-        for (g, object) in objects.iter().enumerate() {
-            let Some(object) = object else { continue };
-            let text = request.variants[groups[g].first]
-                .source
-                .replace("\r\n", "\n");
-            compared[g] = Some(compare.run(object, &text, &mut compare_warnings));
-            done += 1;
-            progress(Progress::new(
-                done,
-                Some(total),
-                Some(format!("compared {done} of {total} variants")),
-            ));
-        }
+        // the variants are independent: all cores work on them, the calling thread reports as they end
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                objects
+                    .par_iter()
+                    .enumerate()
+                    .filter_map(|(g, object)| Some((g, object.as_ref()?)))
+                    .for_each_with(sender, |sender, (g, object)| {
+                        let text = request.variants[groups[g].first]
+                            .source
+                            .replace("\r\n", "\n");
+                        let _ = sender.send((g, compare.run(object, &text)));
+                    });
+            });
+            for done in 1..=total {
+                let Ok((g, (result, more))) = receiver.recv() else {
+                    break;
+                };
+                compared[g] = Some(result);
+                compare_warnings.extend(more);
+                progress(Progress::new(
+                    done,
+                    Some(total),
+                    Some(format!("compared {done} of {total} variants")),
+                ));
+            }
+        });
     }
     warnings.extend(compare_warnings);
 

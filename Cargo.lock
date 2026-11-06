@@ -335,6 +335,7 @@ dependencies = [
  "decovery-objects",
  "decovery-plugin",
  "decovery-toolchain",
+ "rayon",
  "serde",
  "serde_json",
  "tempfile",

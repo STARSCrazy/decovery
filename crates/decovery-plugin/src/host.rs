@@ -315,10 +315,17 @@ impl PluginHost {
     }
 }
 
+/// `%SystemRoot%\System32\taskkill.exe`, not whatever `PATH` finds first.
+fn taskkill() -> std::path::PathBuf {
+    std::env::var_os("SystemRoot")
+        .map(|root| Path::new(&root).join("System32").join("taskkill.exe"))
+        .unwrap_or_else(|| "taskkill".into())
+}
+
 /// Ends the plugin process and, where the platform has a way to, everything it started; then reaps it.
 fn kill_tree(child: &mut Child) {
     let killed_tree = cfg!(windows)
-        && Command::new("taskkill")
+        && Command::new(taskkill())
             .args(["/PID", &child.id().to_string(), "/T", "/F"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
