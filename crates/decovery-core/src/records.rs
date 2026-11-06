@@ -161,6 +161,18 @@ pub struct RebuildRecord {
 }
 
 impl RebuildRecord {
+    /// The state shown in counts and filters: decovery's verdict when the record has one (equivalent counts as
+    /// differing, its bytes differ; unchecked as an error), else Decomp's result. `Other` for unknown values.
+    pub fn effective_result(&self) -> RebuildResult {
+        match self.verdict {
+            Some(VerdictId::Identical) => RebuildResult::Identical,
+            Some(VerdictId::Equivalent | VerdictId::Differs) => RebuildResult::Differs,
+            Some(VerdictId::Unchecked) => RebuildResult::Error,
+            Some(VerdictId::Other) => RebuildResult::Other,
+            None => self.result,
+        }
+    }
+
     /// A record with only address, name and result set.
     pub fn new(address: Address, name: impl Into<String>, result: RebuildResult) -> Self {
         RebuildRecord {

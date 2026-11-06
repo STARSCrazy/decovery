@@ -411,3 +411,25 @@ fn find_code_reads_non_utf8_file_lossily() {
     assert_eq!(r.summary, "1 code lines");
     assert!(r.data.get("unreadable").is_none());
 }
+
+#[test]
+fn find_filter_and_status_use_verdict_over_result() {
+    let (d, _) = workspace();
+    // Decomp's byte rule says identical, decovery's verdict says differs: the verdict wins
+    std::fs::write(
+        d.path().join("knowledge/rebuild.toml"),
+        "schema = 1\n\n[[function]]\naddress = \"flat:00010010\"\nname = \"alpha\"\nresult = \"identical\"\nverdict = \"differs\"\n",
+    )
+    .unwrap();
+    let s = Session::open(d.path()).unwrap();
+    let filtered = |filter: FunctionFilter| {
+        let mut q = query(FindWhat::Functions, None);
+        q.filter = vec![filter];
+        find(&s, &q, Budget::default()).unwrap().data["total"].clone()
+    };
+    assert_eq!(filtered(FunctionFilter::Identical), 0);
+    assert_eq!(filtered(FunctionFilter::Differs), 1);
+    let r = status(&s).unwrap();
+    assert_eq!(r.data["rebuild"]["differs"], 1);
+    assert_eq!(r.data["rebuild"]["identical"], 0);
+}
