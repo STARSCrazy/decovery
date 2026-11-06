@@ -89,6 +89,8 @@ struct VariantResult {
     message: Option<String>,
     /// Function variants: whether the variant was compiled in the shrunk file, and why (not).
     shrunk: Option<(bool, String)>,
+    /// A shrunk variant judged identical, judged again on its full file: this is the full file's result.
+    confirmed_on_full: bool,
 }
 
 impl VariantResult {
@@ -105,6 +107,7 @@ impl VariantResult {
             blockers: Vec::new(),
             message: Some(message),
             shrunk: None,
+            confirmed_on_full: false,
         }
     }
 
@@ -137,6 +140,9 @@ impl VariantResult {
         if let Some((shrunk, reason)) = &self.shrunk {
             v["shrunk"] = json!(shrunk);
             v["shrink_reason"] = json!(reason);
+        }
+        if self.confirmed_on_full {
+            v["confirmed_on"] = json!("full");
         }
         v
     }
@@ -317,6 +323,7 @@ impl Compare<'_> {
                 blockers,
                 message,
                 shrunk: None,
+                confirmed_on_full: false,
             },
             warnings,
         )
@@ -367,8 +374,15 @@ struct Attempt {
 }
 
 /// The key of the shrink check of a file version: blake3 of the spliced file without the body of `function`, the
-/// profile id and the flags. Every attempt at the function in this version of the rest of the file shares it.
-fn shrink_key(spliced: &str, function: &str, profile: &str, flags: &str) -> String {
+/// profile id, its prelude, the flags and the staged headers (DOS name and blake3, as in the object cache key).
+/// Every attempt at the function in this version of the rest of the file shares it.
+fn shrink_key(
+    spliced: &str,
+    function: &str,
+    profile: &Profile,
+    flags: &str,
+    headers: &BTreeMap<String, String>,
+) -> String {
     let mut hasher = blake3::Hasher::new();
     match definitions(spliced).iter().find(|d| d.name == function) {
         Some(d) => {
@@ -379,9 +393,16 @@ fn shrink_key(spliced: &str, function: &str, profile: &str, flags: &str) -> Stri
             hasher.update(spliced.as_bytes());
         }
     }
-    for part in [profile, flags] {
+    let prelude = profile.prelude.join("\n");
+    for part in [profile.id.as_str(), prelude.as_str(), flags] {
         hasher.update(b"\0");
         hasher.update(part.as_bytes());
+    }
+    for (name, hash) in headers {
+        hasher.update(b"\0");
+        hasher.update(name.as_bytes());
+        hasher.update(b"=");
+        hasher.update(hash.as_bytes());
     }
     hasher.finalize().to_hex().to_string()
 }
@@ -473,15 +494,61 @@ fn judge_check(
     }
 }
 
+impl Compare<'_> {
+    /// Compares the objects of `groups` (all, or those in `only`) in parallel with [`Compare::run`] and stores each
+    /// result in `compared`; the calling thread reports progress as they end.
+    fn run_all(
+        &self,
+        objects: &[Option<ObjectFile>],
+        groups: &[Group],
+        only: Option<&BTreeSet<usize>>,
+        compared: &mut [Option<VariantResult>],
+        warnings: &mut BTreeSet<String>,
+        progress: &dyn Fn(Progress),
+    ) {
+        let selected: Vec<(usize, &ObjectFile)> = objects
+            .iter()
+            .enumerate()
+            .filter(|(g, _)| only.is_none_or(|only| only.contains(g)))
+            .filter_map(|(g, object)| Some((g, object.as_ref()?)))
+            .collect();
+        let total = selected.len() as u64;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                selected
+                    .par_iter()
+                    .for_each_with(sender, |sender, &(g, object)| {
+                        let _ = sender.send((g, self.run(object, &groups[g].text)));
+                    });
+            });
+            for done in 1..=total {
+                let Ok((g, (result, more))) = receiver.recv() else {
+                    break;
+                };
+                compared[g] = Some(result);
+                warnings.extend(more);
+                progress(Progress::new(
+                    done,
+                    Some(total),
+                    Some(format!("compared {done} of {total} variants")),
+                ));
+            }
+        });
+    }
+}
+
 /// `build` with variants: compiles the candidates of `request.variants` for `request.function` (all cache misses in
 /// one runner request), compares the function of each variant's object with the original and ranks the variants.
 /// Records, kept objects and output files stay untouched.
 ///
 /// A function variant is spliced into the current file. When the file can be shrunk, the shrunk file is compiled;
 /// whether it gives the function the same code as the full file is checked once per file version (key: the file
-/// without the function's body, profile and flags) by compiling both in the same request, and stored in
+/// without the function's body, profile, flags and headers) by compiling both in the same request, and stored in
 /// [`SHRINK_DIR`]. When it does not, the variant is judged on the full file (a second request compiles the full
-/// files that were not compiled yet).
+/// files that were not compiled yet). A shrunk variant judged identical is only a candidate: all candidates are
+/// judged again on their full files (one more request for those not compiled yet), and that result is final
+/// (`confirmed_on: "full"`).
 pub(super) fn build_variants(
     root: &Path,
     request: &BuildRequest,
@@ -537,6 +604,9 @@ pub(super) fn build_variants(
     let flags = flags_of(&file);
     let dos_name = file.to_ascii_uppercase();
 
+    let run_dir = new_run_dir(root)?;
+    let headers = stage_headers(&set, &run_dir.0)?;
+
     // what each variant compiles
     let count = request.variants.len();
     let mut errors: Vec<Option<String>> = vec![None; count];
@@ -569,7 +639,7 @@ pub(super) fn build_variants(
                             }
                         }
                         Some(shrunk) => {
-                            let key = shrink_key(&spliced, &c_name, &profile.id, &flags);
+                            let key = shrink_key(&spliced, &c_name, &profile, &flags, &headers);
                             dropped_of.insert(key.clone(), shrunk.dropped.len());
                             Attempt {
                                 full: spliced,
@@ -631,8 +701,6 @@ pub(super) fn build_variants(
         }
     }
 
-    let run_dir = new_run_dir(root)?;
-    let headers = stage_headers(&set, &run_dir.0)?;
     let output = |path: std::path::PathBuf| move |source| FacadeError::Output { path, source };
     let stage = |groups: &[Group]| -> Result<(), FacadeError> {
         for group in groups {
@@ -713,11 +781,8 @@ pub(super) fn build_variants(
         compiled.extend(more.files);
         warnings.extend(more.warnings);
     }
-    drop(run_dir);
-    let groups = texts.groups;
-    let jobs = compiled.iter().filter(|c| !c.cached).count();
-    let cached = compiled.len() - jobs;
-    let compile_ms = ms(compile_started.elapsed());
+    let mut compile_time = compile_started.elapsed();
+    let compile_first = compile_time;
 
     // objects of the distinct texts some variant is judged on
     let compare_started = Instant::now();
@@ -725,22 +790,31 @@ pub(super) fn build_variants(
         .filter(|&i| errors[i].is_none())
         .map(|i| ranked[i])
         .collect();
-    let mut group_errors: Vec<Option<String>> = vec![None; groups.len()];
+    let mut group_errors: Vec<Option<String>> = Vec::new();
     let mut objects: Vec<Option<ObjectFile>> = Vec::new();
-    objects.resize_with(groups.len(), || None);
-    for &g in &judged {
-        let file = &compiled[g];
-        match &file.object {
-            None => group_errors[g] = Some(failure_text(file)),
-            Some(bytes) => match read_omf(bytes, &dos_name) {
-                Ok(object) => objects[g] = Some(object),
-                Err(e) => group_errors[g] = Some(format!("cannot read the object: {e}")),
-            },
+    let read_objects = |judged: &BTreeSet<usize>,
+                        compiled: &[CompiledFile],
+                        objects: &mut Vec<Option<ObjectFile>>,
+                        group_errors: &mut Vec<Option<String>>| {
+        objects.resize_with(compiled.len(), || None);
+        group_errors.resize(compiled.len(), None);
+        for &g in judged {
+            let file = &compiled[g];
+            match &file.object {
+                None => group_errors[g] = Some(failure_text(file)),
+                Some(bytes) => match read_omf(bytes, &dos_name) {
+                    Ok(object) => objects[g] = Some(object),
+                    Err(e) => group_errors[g] = Some(format!("cannot read the object: {e}")),
+                },
+            }
         }
-    }
+    };
+    read_objects(&judged, &compiled, &mut objects, &mut group_errors);
 
     // judge each distinct variant like a full build: with the kept objects of the other files
-    let mut compared: Vec<Option<VariantResult>> = vec![None; groups.len()];
+    let mut compared: Vec<Option<VariantResult>> = vec![None; texts.groups.len()];
+    // variant -> the group of its full file, for shrunk variants judged identical (confirmed on the full file)
+    let mut confirmed: Vec<Option<usize>> = vec![None; count];
     let mut compare_warnings: BTreeSet<String> = BTreeSet::new();
     if objects.iter().any(Option::is_some) {
         let (others, more) = kept_objects(root, &set, &profile, &flags_of, &file, &headers);
@@ -781,34 +855,67 @@ pub(super) fn build_variants(
             function,
             shared,
         };
-        let total = objects.iter().flatten().count() as u64;
-        // the variants are independent: all cores work on them, the calling thread reports as they end
-        let (sender, receiver) = std::sync::mpsc::channel();
-        std::thread::scope(|scope| {
-            scope.spawn(|| {
-                objects
-                    .par_iter()
-                    .enumerate()
-                    .filter_map(|(g, object)| Some((g, object.as_ref()?)))
-                    .for_each_with(sender, |sender, (g, object)| {
-                        let _ = sender.send((g, compare.run(object, &groups[g].text)));
-                    });
-            });
-            for done in 1..=total {
-                let Ok((g, (result, more))) = receiver.recv() else {
-                    break;
-                };
-                compared[g] = Some(result);
-                compare_warnings.extend(more);
-                progress(Progress::new(
-                    done,
-                    Some(total),
-                    Some(format!("compared {done} of {total} variants")),
-                ));
+        compare.run_all(
+            &objects,
+            &texts.groups,
+            None,
+            &mut compared,
+            &mut compare_warnings,
+            progress,
+        );
+
+        // `identical` from a shrunk file is a candidate only: shrunk objects lack the anchor votes of the dropped
+        // functions, and one check serves bodies with other dependencies. Every candidate is judged again on its
+        // full file, all of them in one more request (equal texts once, the object cache first).
+        let first_groups = texts.groups.len();
+        for (i, attempt) in attempts.iter().enumerate() {
+            let shrunk = shrink_state[i].as_ref().is_some_and(|(shrunk, _)| *shrunk);
+            let identical = compared[ranked[i]]
+                .as_ref()
+                .is_some_and(|r| r.verdict == "identical");
+            let Some(attempt) = attempt.as_ref().filter(|_| shrunk && identical) else {
+                continue;
+            };
+            if errors[i].is_some() {
+                continue;
             }
-        });
+            match add(&mut texts, &attempt.full, format!("F{:03}", i + 1)) {
+                Ok(g) => confirmed[i] = Some(g),
+                Err(e) => errors[i] = Some(e),
+            }
+        }
+        if texts.groups.len() > first_groups {
+            let confirm_started = Instant::now();
+            let more = compile(&texts.groups[first_groups..])?;
+            compiled.extend(more.files);
+            warnings.extend(more.warnings);
+            compile_time += confirm_started.elapsed();
+        }
+        let to_judge: BTreeSet<usize> = confirmed
+            .iter()
+            .flatten()
+            .copied()
+            .filter(|&g| compared.get(g).is_none_or(Option::is_none))
+            .collect();
+        if !to_judge.is_empty() {
+            read_objects(&to_judge, &compiled, &mut objects, &mut group_errors);
+            compared.resize(compiled.len(), None);
+            compare.run_all(
+                &objects,
+                &texts.groups,
+                Some(&to_judge),
+                &mut compared,
+                &mut compare_warnings,
+                progress,
+            );
+        }
     }
     warnings.extend(compare_warnings);
+    drop(run_dir);
+    let groups = texts.groups;
+    let jobs = compiled.iter().filter(|c| !c.cached).count();
+    let cached = compiled.len() - jobs;
+    let compile_ms = ms(compile_time);
 
     // one result per variant, in the order of the request
     let mut results: Vec<VariantResult> = Vec::with_capacity(count);
@@ -817,7 +924,7 @@ pub(super) fn build_variants(
         let mut result = match &errors[i] {
             Some(error) => VariantResult::unchecked("error", format!("{name}: {error}")),
             None => {
-                let g = ranked[i];
+                let g = confirmed[i].unwrap_or(ranked[i]);
                 match (&group_errors[g], &compared[g]) {
                     (Some(error), _) => {
                         VariantResult::unchecked("error", format!("{name}: {error}"))
@@ -833,10 +940,14 @@ pub(super) fn build_variants(
         result.index = i + 1;
         result.label = variant.label.clone();
         result.shrunk = shrink_state[i].clone();
+        result.confirmed_on_full = confirmed[i].is_some();
         results.push(result);
     }
     results.sort_by_key(VariantResult::rank);
-    let compare_ms = ms(compare_started.elapsed());
+    // the confirmation compile ran inside the compare phase; it counts as compile time
+    let compare_ms = ms(compare_started
+        .elapsed()
+        .saturating_sub(compile_time.saturating_sub(compile_first)));
 
     let best = results.first().filter(|r| r.checked);
     let failed = results.iter().filter(|r| r.verdict == "error").count();
@@ -869,6 +980,7 @@ pub(super) fn build_variants(
                 "cached": cached,
                 "distinct": groups.len(),
                 "shrink_checks": checks.len(),
+                "confirmed": confirmed.iter().flatten().count(),
             },
         }),
     ))

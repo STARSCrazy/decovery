@@ -168,7 +168,7 @@ struct CodeCore {
     refs: BTreeMap<u32, String>,
     relative: BTreeSet<u32>,
     addends: BTreeMap<u32, i64>,
-    /// Unnamed own-section fixups: (field, target, self-relative), both relative to the function start.
+    /// Own-section fixups not in `refs`: (field, target, self-relative), both relative to the function start.
     own: Vec<(i64, i64, bool)>,
 }
 
@@ -207,10 +207,18 @@ impl CodeCore {
             .enumerate()
             .map(|(k, &b)| if gaps.contains(&(k as u32)) { 0 } else { b })
             .collect();
+        // every own-section fixup the references do not name, with its target computed like the naming does
+        // (`FunctionView::references`): absolute fields add their content (4 bytes when the fixups cover 4, else
+        // 2), self-relative ones are the fixup's offset
         let start = i64::from(f.start);
+        let section_gaps: BTreeSet<u32> = section
+            .relocs
+            .iter()
+            .flat_map(|r| r.offset..r.offset.saturating_add(u32::from(r.width)))
+            .collect();
         let own = f
             .relocs()
-            .filter(|r| r.offset - f.start < end)
+            .filter(|r| r.offset - f.start < end && !refs.contains_key(&(r.offset - f.start)))
             .filter_map(|r| {
                 let RefTarget::Section { index, offset } = r.target else {
                     return None;
@@ -218,21 +226,20 @@ impl CodeCore {
                 if index != f.section {
                     return None;
                 }
-                let field = section
-                    .data
-                    .get(r.offset as usize..)
-                    .map_or(&[][..], |d| &d[..d.len().min(usize::from(r.width))]);
-                let target = i64::from(offset) + signed(field);
-                let named = f
-                    .module
-                    .symbols
-                    .iter()
-                    .any(|s| s.section == f.section && i64::from(s.offset) == target);
-                (!named).then_some((
-                    i64::from(r.offset) - start,
-                    target - start,
-                    r.kind == RelocKind::Relative,
-                ))
+                let relative = r.kind == RelocKind::Relative;
+                let target = if relative {
+                    i64::from(offset)
+                } else {
+                    let p = r.offset;
+                    let wide = (p..p.saturating_add(4)).all(|q| section_gaps.contains(&q));
+                    let w = if wide { 4 } else { 2 };
+                    let field = section
+                        .data
+                        .get(p as usize..)
+                        .map_or(&[][..], |d| &d[..d.len().min(w)]);
+                    i64::from(offset) + signed(field)
+                };
+                Some((i64::from(r.offset) - start, target - start, relative))
             })
             .collect();
         Some(CodeCore {

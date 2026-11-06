@@ -1052,6 +1052,8 @@ fn function_variant_uses_shrunk_file() {
     let v = &response.data["variants"][0];
     assert_eq!(v["verdict"], "identical", "{v}");
     assert_eq!(v["shrunk"], true, "{v}");
+    // identical in the shrunk file: judged again on the full file, here the check's own compile
+    assert_eq!(v["confirmed_on"], "full", "{v}");
     assert_eq!(response.data["timing"]["shrink_checks"], 1);
     let records = shrink_records(&f);
     assert_eq!(records.len(), 1);
@@ -1120,16 +1122,18 @@ fn shrink_check_is_cached_per_file_version() {
     // another body of the same function: the file version is the same, only the attempt is compiled
     let changed = SUB_SOURCE.replace("a - b;", "a - b; /* again */");
     let response = run_functions(&f, "sub", &[&changed]);
-    assert_eq!(f.log("requests.log"), ["2", "1"]);
-    assert_eq!(f.log("calls.log").last().unwrap(), "V001/A.C");
+    // the shrunk attempt, then its confirmation on the full file
+    assert_eq!(f.log("requests.log"), ["2", "1", "1"]);
+    assert_eq!(f.log("calls.log")[2..], ["V001/A.C", "F001/A.C"]);
     assert_eq!(response.data["variants"][0]["shrunk"], true);
     assert_eq!(response.data["timing"]["shrink_checks"], 0);
     // another file version (the rest of the file changed): checked again
     f.write_source("a.c", &A_C.replace("a + b;", "a + b; /* changed */"));
     let response = run_functions(&f, "sub", &[SUB_SOURCE]);
     assert_eq!(response.data["timing"]["shrink_checks"], 1);
-    // the shrunk text has no body of add, so it is the first call's and comes from the object cache
-    assert_eq!(f.log("requests.log"), ["2", "1", "1"]);
+    // the shrunk text has no body of add, so it is the first call's and comes from the object cache; the check's
+    // full file also confirms the identical result
+    assert_eq!(f.log("requests.log"), ["2", "1", "1", "1"]);
     assert_eq!(f.log("calls.log").last().unwrap(), "F001/A.C");
     assert_eq!(shrink_records(&f).len(), 2);
 }
@@ -1157,11 +1161,15 @@ fn function_and_file_variant_rank_alike() {
     assert_eq!(order(&response), [1, 2, 3]);
     let v = response.data["variants"].as_array().unwrap();
     assert_eq!(v[1]["shrunk"], true);
+    assert_eq!(
+        v[1]["confirmed_on"], "full",
+        "its full file is variant 1's compile"
+    );
     assert!(v[0].get("shrunk").is_none(), "{}", v[0]);
     let judged = |v: &Value| {
         let mut v = v.clone();
         let object = v.as_object_mut().unwrap();
-        for key in ["index", "shrunk", "shrink_reason"] {
+        for key in ["index", "shrunk", "shrink_reason", "confirmed_on"] {
             object.remove(key);
         }
         v
@@ -1209,4 +1217,75 @@ fn function_file_is_found_by_its_definition() {
     request.function = Some("quick".to_string());
     build(f.root(), &request, &|_| {}).unwrap();
     assert_eq!(f.log("calls.log"), ["A.C", "Q.C"]);
+}
+
+#[test]
+fn shrunk_identical_is_confirmed_on_the_full_file() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    f.write_obj("F001", &[("_add", ADD), ("_sub", SUB)]);
+    f.write_obj("V001", &[("_sub", SUB)]);
+    run_functions(&f, "sub", &[SUB_SOURCE]);
+    // the next body: the shrunk file (checked valid for this file version) gives identical code, the full file not
+    let mut worse = SUB.to_vec();
+    worse[6] = 0x33;
+    f.write_obj("F001", &[("_add", ADD), ("_sub", &worse)]);
+    let changed = SUB_SOURCE.replace("a - b;", "a - b; /* other */");
+    let response = run_functions(&f, "sub", &[&changed]);
+    let v = &response.data["variants"][0];
+    assert_eq!(v["verdict"], "differs", "the full file decides: {v}");
+    assert_eq!(v["confirmed_on"], "full", "{v}");
+    assert_eq!(v["shrunk"], true, "{v}");
+    assert!(response.data["best"] == 1, "{}", response.data);
+    assert_eq!(f.log("requests.log"), ["2", "1", "1"]);
+    // a shrunk result that is not identical stays as it is
+    f.write_obj("V001", &[("_sub", &worse)]);
+    let third = SUB_SOURCE.replace("a - b;", "a - b; /* third */");
+    let response = run_functions(&f, "sub", &[&third]);
+    let v = &response.data["variants"][0];
+    assert_eq!(v["verdict"], "differs");
+    assert!(v.get("confirmed_on").is_none(), "{v}");
+    assert_eq!(f.log("requests.log"), ["2", "1", "1", "1"]);
+}
+
+#[test]
+fn candidates_are_confirmed_in_one_request() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    f.write_obj("F001", &[("_add", ADD), ("_sub", SUB)]);
+    f.write_obj("V001", &[("_sub", SUB)]);
+    run_functions(&f, "sub", &[SUB_SOURCE]);
+    for i in 1..=3 {
+        f.write_obj(&format!("V{i:03}"), &[("_sub", SUB)]);
+        f.write_obj(&format!("F{i:03}"), &[("_add", ADD), ("_sub", SUB)]);
+    }
+    let bodies: Vec<String> = (1..=3)
+        .map(|i| SUB_SOURCE.replace("a - b;", &format!("a - b; /* {i} */")))
+        .collect();
+    let response = run_functions(&f, "sub", &refs(&bodies));
+    assert_eq!(
+        f.log("requests.log"),
+        ["2", "3", "3"],
+        "three candidates, one request"
+    );
+    assert_eq!(response.data["timing"]["confirmed"], 3);
+    for v in response.data["variants"].as_array().unwrap() {
+        assert_eq!(v["verdict"], "identical", "{v}");
+        assert_eq!(v["confirmed_on"], "full", "{v}");
+    }
+}
+
+#[test]
+fn header_change_is_a_new_shrink_check() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    f.write_source("t.h", "#define T 1\n");
+    f.write_obj("F001", &[("_add", ADD), ("_sub", SUB)]);
+    f.write_obj("V001", &[("_sub", SUB)]);
+    let first = run_functions(&f, "sub", &[SUB_SOURCE]);
+    assert_eq!(first.data["timing"]["shrink_checks"], 1);
+    f.write_source("t.h", "#define T 2\n");
+    let second = run_functions(&f, "sub", &[SUB_SOURCE]);
+    assert_eq!(second.data["timing"]["shrink_checks"], 1, "checked again");
+    assert_eq!(shrink_records(&f).len(), 2);
 }
