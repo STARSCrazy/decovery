@@ -1,7 +1,7 @@
 """Fake `runner` plugin for the toolchain tests.
 
 Job commands: `WRITE <NAME> <text>` writes a file into the C mount, `EXIT <n>` sets the exit code,
-`SLEEP <s>` waits (a job over the timeout ends with status `timeout`), `UNSUPPORTED` answers error -32020
+`HANG` ignores everything (also the job timeout and `$/cancel`), `SLEEP <s>` waits (a job over the timeout ends with status `timeout`), `UNSUPPORTED` answers error -32020
 before any job runs (so does every call when FAKE_REFUSE_ALL=1), `ECHO <text>` appends a line to stdout,
 `SHARE` appends `share=<options.jobs>`, `COST` appends `cost=<the job's cost>`. FAKE_MAX_PARALLEL=<n> declares
 `max_parallel` for the runner capability.
@@ -41,6 +41,8 @@ def run_job(job, mounts, timeout_s, ctx, options):
             stdout.append(f"cost={job.get('cost')}")
         elif word == "ECHO":
             stdout.append(rest + "\r\n")
+        elif word == "HANG":
+            time.sleep(600)
         elif word == "SLEEP":
             wanted = float(rest)
             if time.monotonic() + wanted > deadline:
@@ -64,7 +66,11 @@ def run(params, ctx):
         raise RpcError(RUNNER_UNSUPPORTED, "program not supported by fake runner")
     mounts = {m["drive"]: m["path"] for m in params["mounts"]}
     options = params.get("options") or {}
-    return {"jobs": [run_job(j, mounts, params["timeout_s"], ctx, options) for j in jobs]}
+    results = []
+    for i, job in enumerate(jobs):
+        results.append(run_job(job, mounts, params["timeout_s"], ctx, options))
+        ctx.progress(i + 1, len(jobs), f"job {i + 1} of {len(jobs)} done")
+    return {"jobs": results}
 
 
 plugin.serve()

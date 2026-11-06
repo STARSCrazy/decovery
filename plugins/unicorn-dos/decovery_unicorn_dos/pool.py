@@ -119,6 +119,7 @@ def execute_job(job: dict, machine_for: Callable[[str, Any], Any]) -> dict:
         if remaining <= 0:
             return _outcome("timeout", None, stdout, timed_out)
         fs = DosFs({k: Path(v) for k, v in job["drives"].items()}, set(job["read_only"]), job.get("current", "C"))
+        fs.cwd[fs.current] = step.cwd
         try:
             result = _run_step(step, fs, remaining, machine_for)
         except EmulatorTimeout:
@@ -194,8 +195,14 @@ class JobPool:
                 self._pool = None
         pool.shutdown(wait=False, cancel_futures=True)
 
-    def run(self, jobs: list[dict], parallel: int | None = None) -> list[dict]:
-        """Outcomes in job order. At most `parallel` jobs (default: all workers) run at once, larger `cost` first."""
+    def run(
+        self,
+        jobs: list[dict],
+        parallel: int | None = None,
+        on_done: Callable[[int, dict], None] | None = None,
+    ) -> list[dict]:
+        """Outcomes in job order. At most `parallel` jobs (default: all workers) run at once, larger `cost` first.
+        `on_done(index, outcome)` is called, on the calling thread, as each job ends."""
         limit = max(1, min(parallel or self.workers, self.workers))
         order = sorted(range(len(jobs)), key=lambda i: -_cost(jobs[i]))  # stable: equal costs keep job order
         outcomes: list[dict | None] = [None] * len(jobs)
@@ -221,12 +228,16 @@ class JobPool:
                     broken = True  # this job or another one killed the pool
                 except Exception as e:  # a bug in the worker must not lose the other jobs
                     outcomes[i] = _worker_failed(e)
+                if outcomes[i] is not None and on_done is not None:
+                    on_done(i, outcomes[i])
         unfinished = [i for i in order if outcomes[i] is None]
         if unfinished:
             self._discard(pool)
             with ThreadPoolExecutor(min(limit, len(unfinished))) as threads:
                 for i, outcome in zip(unfinished, threads.map(self._alone, [jobs[i] for i in unfinished])):
                     outcomes[i] = outcome
+                    if on_done is not None:
+                        on_done(i, outcome)
         return outcomes  # type: ignore[return-value]
 
     def _alone(self, job: dict) -> dict:

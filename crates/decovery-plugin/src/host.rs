@@ -107,6 +107,8 @@ pub struct PluginHost {
 
 const INIT_TIMEOUT: Duration = Duration::from_secs(60);
 const POLL: Duration = Duration::from_millis(10);
+/// How long [`PluginHost`] waits for the end of the plugin's output after the plugin ended.
+const READER_GRACE: Duration = Duration::from_secs(2);
 
 impl PluginHost {
     /// Start `command` in `cwd` and perform the `initialize` handshake. Plugin stderr is inherited.
@@ -294,16 +296,39 @@ impl PluginHost {
                 Ok(Some(_)) => break,
                 Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL),
                 _ => {
-                    let _ = self.child.kill();
-                    let _ = self.child.wait();
+                    kill_tree(&mut self.child);
                     break;
                 }
             }
         }
+        // A descendant of the plugin (an emulator worker, DOSBox) can hold the plugin's stdout open after the plugin
+        // ended; its end of file would never come. Wait a moment for the reader, then leave it behind.
         if let Some(reader) = self.reader.take() {
-            let _ = reader.join();
+            let deadline = Instant::now() + READER_GRACE;
+            while !reader.is_finished() && Instant::now() < deadline {
+                std::thread::sleep(POLL);
+            }
+            if reader.is_finished() {
+                let _ = reader.join();
+            }
         }
     }
+}
+
+/// Ends the plugin process and, where the platform has a way to, everything it started; then reaps it.
+fn kill_tree(child: &mut Child) {
+    let killed_tree = cfg!(windows)
+        && Command::new("taskkill")
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+    if !killed_tree {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
 }
 
 impl Drop for PluginHost {

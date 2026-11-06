@@ -494,6 +494,17 @@ fn order(response: &Response) -> Vec<u64> {
 
 const SUB_SOURCE: &str = "int sub(int a, int b)\n{\n    return a - b;\n}\n";
 
+/// `n` different texts of the same function (equal texts are compiled once).
+fn texts(n: usize) -> Vec<String> {
+    (1..=n)
+        .map(|i| format!("{SUB_SOURCE}/* text {i} */\n"))
+        .collect()
+}
+
+fn refs(texts: &[String]) -> Vec<&str> {
+    texts.iter().map(String::as_str).collect()
+}
+
 #[test]
 fn variants_are_ranked() {
     let python = python_or_skip!();
@@ -507,7 +518,8 @@ fn variants_are_ranked() {
     f.write_obj("V001", &[("_add", ADD), ("_sub", &two)]);
     f.write_obj("V002", &[("_add", ADD), ("_sub", SUB)]);
     f.write_obj("V003", &[("_sub", &one)]);
-    let response = run_variants(&f, "sub", &[SUB_SOURCE, SUB_SOURCE, SUB_SOURCE]);
+    let t = texts(3);
+    let response = run_variants(&f, "sub", &refs(&t));
     assert_eq!(f.log("requests.log"), ["3"], "one runner request");
     assert_eq!(order(&response), [2, 3, 1]);
     let d = &response.data;
@@ -546,7 +558,8 @@ fn variant_compile_error_ranks_last() {
     // no V001.OBJ: the fake compiler fails
     f.write_obj("V002", &[("_sub", SUB)]);
     f.write_obj("V003", &[("_sub", SUB)]);
-    let response = run_variants(&f, "sub", &["int broken(", SUB_SOURCE, SUB_SOURCE]);
+    let t = texts(2);
+    let response = run_variants(&f, "sub", &["int broken(", &t[0], &t[1]]);
     assert_eq!(order(&response), [2, 3, 1]);
     assert_eq!(response.data["best"], 2);
     let last = &response.data["variants"][2];
@@ -555,7 +568,8 @@ fn variant_compile_error_ranks_last() {
         last["message"]
             .as_str()
             .unwrap()
-            .contains("V001.C(1): Error"),
+            .starts_with("variant 1: compiler exit code 1")
+            && last["message"].as_str().unwrap().contains("A.C(1): Error"),
         "{last}"
     );
     // nothing compiles: no best
@@ -573,7 +587,8 @@ fn variant_without_the_function_is_unchecked_and_ranks_last() {
     let mut two = SUB.to_vec();
     two[6] = 0x33;
     f.write_obj("V002", &[("_sub", &two)]);
-    let response = run_variants(&f, "sub", &[SUB_SOURCE, SUB_SOURCE]);
+    let t = texts(2);
+    let response = run_variants(&f, "sub", &refs(&t));
     assert_eq!(order(&response), [2, 1]);
     let last = &response.data["variants"][1];
     assert_eq!(last["verdict"], "unchecked");
@@ -588,7 +603,8 @@ fn variants_do_not_write_records() {
     let before = std::fs::read(f.rebuild_path()).unwrap();
     f.write_obj("V001", &[("_sub", SUB)]);
     f.write_obj("V002", &[("_sub", SUB)]);
-    run_variants(&f, "sub", &[SUB_SOURCE, SUB_SOURCE]);
+    let t = texts(2);
+    run_variants(&f, "sub", &refs(&t));
     assert_eq!(std::fs::read(f.rebuild_path()).unwrap(), before);
     let root = f.root();
     assert!(!root.join("cache/rebuild/obj").exists());
@@ -652,8 +668,8 @@ fn too_many_variants_is_rejected() {
     for i in 1..=64 {
         f.write_obj(&format!("V{i:03}"), &[("_sub", SUB)]);
     }
-    let many = vec![SUB_SOURCE; 64];
-    let response = run_variants(&f, "sub", &many);
+    let t = texts(64);
+    let response = run_variants(&f, "sub", &refs(&t));
     assert_eq!(response.data["variants"].as_array().unwrap().len(), 64);
     assert_eq!(f.log("requests.log"), ["64"]);
 }
@@ -709,4 +725,212 @@ fn function_selects_its_file_without_variants() {
     assert_eq!(f.log("calls.log"), ["Z.C"]);
     assert_eq!(response.data["files"].as_array().unwrap().len(), 1);
     assert_eq!(record(&f, "zed").verdict, Some(VerdictId::Identical));
+}
+
+// ---- variants, fix round 1 ----
+
+/// `mov ax,[var]` plus `nop`s up to `len` bytes and a `ret`; the offset field is `field` (the original's word).
+fn loader(field: u16, len: usize) -> Vec<u8> {
+    let [lo, hi] = field.to_le_bytes();
+    let mut code = vec![0xA1, lo, hi];
+    code.resize(len - 1, 0x90);
+    code.push(0xC3);
+    code
+}
+
+/// Three loaders in the original (add -> g1, sub -> g3, zed -> g3) with the globals at `0200:0010`, `0014`, `0018`
+/// (DGROUP at linear 0x2000), and the kept object of z.c (zed loads g3) from a full build of z.c. Variants of `sub`
+/// replace a.c, so `zed` is the only other function that votes on the anchor besides the variant's own `add`.
+fn anchored(f: &Fixture) {
+    f.patch_original(0x10, &loader(0x10, 11));
+    f.patch_original(0x20, &loader(0x18, 11));
+    f.patch_original(0x30, &loader(0x18, 5));
+    let mut symbols = std::fs::read_to_string(f.root().join("knowledge/symbols.toml")).unwrap();
+    for (name, off) in [("g1", 0x10), ("g2", 0x14), ("g3", 0x18)] {
+        symbols.push_str(&format!(
+            "\n[[symbol]]\naddress = \"seg:0200:{off:04X}\"\nkind = \"global\"\nname = \"{name}\"\nsource = \"human\"\nconfidence = \"confirmed\"\n"
+        ));
+    }
+    std::fs::write(f.root().join("knowledge/symbols.toml"), symbols).unwrap();
+    f.write_raw_obj(
+        "Z",
+        &build_fixture::omf_with_refs(&[("_zed", &loader(0, 5), "_g3")]),
+    );
+    run(f, &["z.c"]);
+    assert!(f.root().join("cache/rebuild/obj/z.obj").is_file());
+}
+
+#[test]
+fn variant_is_judged_with_the_anchors_of_the_other_files() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    anchored(&f);
+    // the variant's own add and the kept zed agree on DGROUP = 0x2000; sub loads g2 where the original has g3
+    f.write_raw_obj(
+        "V001",
+        &build_fixture::omf_with_refs(&[
+            ("_add", &loader(0, 11), "_g1"),
+            ("_sub", &loader(0, 11), "_g2"),
+        ]),
+    );
+    f.write_raw_obj(
+        "V002",
+        &build_fixture::omf_with_refs(&[
+            ("_add", &loader(0, 11), "_g1"),
+            ("_sub", &loader(0, 11), "_g3"),
+        ]),
+    );
+    let t = texts(2);
+    let response = run_variants(&f, "sub", &refs(&t));
+    assert_eq!(order(&response), [2, 1], "{}", response.data);
+    let v = response.data["variants"].as_array().unwrap();
+    assert_eq!(v[0]["verdict"], "identical", "{}", v[0]);
+    assert_eq!(v[1]["verdict"], "differs", "{}", v[1]);
+    assert!(
+        v[1]["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b["kind"] == "wrong-absolute-ref"),
+        "{}",
+        v[1]
+    );
+    assert_eq!(response.data["warnings"], serde_json::json!([]));
+
+    // an out-of-date kept object is left out (and said so): the anchor is then the variant's own, weaker one
+    f.write_source("z.c", &format!("{}/* changed */\n", build_fixture::Z_C));
+    let response = run_variants(&f, "sub", &refs(&t));
+    let warnings = strings(&response.data["warnings"]);
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("z.c") && w.contains("out of date")),
+        "{warnings:?}"
+    );
+}
+
+#[test]
+fn variant_shares_the_object_cache_with_a_full_build() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    run(&f, &["a.c"]);
+    assert_eq!(f.log("calls.log").len(), 1);
+    // the text of a.c itself: staged under its own name in a directory of its own, the same compile as the build
+    let response = run_variants(&f, "sub", &[A_C]);
+    assert_eq!(
+        f.log("calls.log").len(),
+        1,
+        "served from the cache of the build"
+    );
+    assert_eq!(response.data["timing"]["cached"], 1);
+    assert_eq!(response.data["variants"][0]["verdict"], "identical");
+}
+
+#[test]
+fn variant_is_compiled_under_the_name_of_its_file() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    f.write_obj("V001", &[("_sub", SUB)]);
+    run_variants(&f, "sub", &[SUB_SOURCE]);
+    // the job runs in the variant's directory and compiles A.C there, like the build does in the root
+    assert_eq!(f.log("calls.log"), ["V001/A.C"]);
+}
+
+#[test]
+fn equal_variant_texts_are_compiled_once() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    let mut worse = SUB.to_vec();
+    worse[6] = 0x33;
+    f.write_obj("V001", &[("_sub", SUB)]);
+    f.write_obj("V002", &[("_sub", &worse)]);
+    let t = texts(2);
+    // texts 1 and 3 are equal
+    let response = run_variants(&f, "sub", &[&t[0], &t[1], &t[0]]);
+    assert_eq!(f.log("requests.log"), ["2"]);
+    assert_eq!(response.data["timing"]["jobs"], 2);
+    assert_eq!(response.data["timing"]["distinct"], 2);
+    assert_eq!(order(&response), [1, 3, 2]);
+    let v = response.data["variants"].as_array().unwrap();
+    assert_eq!(v.len(), 3, "every variant gets a result");
+    assert_eq!(v[0]["verdict"], "identical");
+    assert_eq!(v[1]["verdict"], "identical");
+}
+
+#[test]
+fn variant_messages_name_the_variant_and_its_label() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    let mut request = variant_request(Some("sub"), &["int broken("]);
+    request.variants[0] = Variant::new("int broken(").with_label("first try");
+    let response = build(f.root(), &request, &|_| {}).unwrap();
+    let message = response.data["variants"][0]["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("variant 1 (first try): compiler exit code 1"),
+        "{message}"
+    );
+}
+
+#[test]
+fn variant_with_inline_asm_ranks_after_a_clean_variant_that_differs() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    let mut worse = SUB.to_vec();
+    worse[6] = 0x33;
+    f.write_obj("V001", &[("_sub", SUB)]);
+    f.write_obj("V002", &[("_sub", &worse)]);
+    let asm = "int sub(int a, int b)\n{\n    _asm nop;\n    return a - b;\n}\n";
+    let response = run_variants(&f, "sub", &[asm, SUB_SOURCE]);
+    // the clean variant differs by an instruction; the inline-assembly one is byte-identical but never best
+    assert_eq!(order(&response), [2, 1]);
+    assert_eq!(response.data["best"], 2);
+}
+
+#[test]
+fn variant_with_a_character_outside_cp437_is_an_error_result() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    f.write_obj("V002", &[("_sub", SUB)]);
+    let t = texts(1);
+    let response = run_variants(&f, "sub", &["int sub(void) { /* \u{20ac} */ }", &t[0]]);
+    let v = response.data["variants"].as_array().unwrap();
+    assert_eq!(v.len(), 2, "no variant is dropped");
+    assert_eq!(order(&response), [2, 1]);
+    assert_eq!(v[1]["verdict"], "error");
+    let message = v[1]["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("variant 1:") && message.contains("U+20AC"),
+        "{message}"
+    );
+}
+
+#[test]
+fn variants_take_one_file_at_most() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    let mut request = variant_request(Some("sub"), &[SUB_SOURCE]);
+    request.files = vec!["a.c".into(), "z.c".into()];
+    let error = build(f.root(), &request, &|_| {}).unwrap_err();
+    assert!(error.to_string().contains("at most one file"), "{error}");
+    request.files = vec!["nofile.c".into()];
+    let error = build(f.root(), &request, &|_| {}).unwrap_err();
+    assert!(error.to_string().contains("nofile.c"), "{error}");
+}
+
+#[test]
+fn variant_build_forwards_what_the_runner_reports_per_job() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    let t = texts(3);
+    for i in 1..=3 {
+        f.write_obj(&format!("V{i:03}"), &[("_sub", SUB)]);
+    }
+    let seen = std::cell::RefCell::new(Vec::new());
+    build(f.root(), &variant_request(Some("sub"), &refs(&t)), &|p| {
+        seen.borrow_mut().push(p.message.unwrap_or_default())
+    })
+    .unwrap();
+    let seen = seen.into_inner();
+    let jobs = seen.iter().filter(|m| m.contains(" of 3 done")).count();
+    assert_eq!(jobs, 3, "{seen:?}");
 }

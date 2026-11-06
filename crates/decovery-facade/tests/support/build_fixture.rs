@@ -96,6 +96,67 @@ pub fn omf(functions: &[(&str, &[u8])]) -> Vec<u8> {
     out
 }
 
+/// Like [`omf`], for functions that each load a word from a variable (`mov ax,[var]`, the offset field at byte 1):
+/// `(public name, bytes, variable)`. `_DATA` is in `DGROUP`; each field is a 16-bit offset fixup with frame `DGROUP`
+/// against the external symbol `variable` (`_g1`).
+pub fn omf_with_refs(functions: &[(&str, &[u8], &str)]) -> Vec<u8> {
+    let code: Vec<u8> = functions
+        .iter()
+        .flat_map(|(_, b, _)| b.iter().copied())
+        .collect();
+    let mut out = rec(0x80, &pstr("T.C"));
+    let names = ["_TEXT", "CODE", "_DATA", "DATA", "DGROUP"];
+    out.extend(rec(
+        0x96,
+        &names.iter().flat_map(|n| pstr(n)).collect::<Vec<_>>(),
+    ));
+    let mut text = vec![0x48];
+    text.extend_from_slice(&(code.len() as u16).to_le_bytes());
+    text.extend_from_slice(&[1, 2, 1]);
+    out.extend(rec(0x98, &text));
+    out.extend(rec(0x98, &[0x48, 4, 0, 3, 4, 1]));
+    out.extend(rec(0x9A, &[5, 0xFF, 2]));
+    let mut externals: Vec<&str> = Vec::new();
+    for (_, _, variable) in functions {
+        if !externals.contains(variable) {
+            externals.push(variable);
+        }
+    }
+    let mut extdef = Vec::new();
+    for name in &externals {
+        extdef.extend(pstr(name));
+        extdef.push(0);
+    }
+    out.extend(rec(0x8C, &extdef));
+    let mut pubdef = vec![0, 1];
+    let mut offset = 0u16;
+    for (name, bytes, _) in functions {
+        pubdef.extend(pstr(name));
+        pubdef.extend_from_slice(&offset.to_le_bytes());
+        pubdef.push(0);
+        offset += bytes.len() as u16;
+    }
+    out.extend(rec(0x90, &pubdef));
+    let mut ledata = vec![1, 0, 0];
+    ledata.extend_from_slice(&code);
+    out.extend(rec(0xA0, &ledata));
+    let mut fixups = Vec::new();
+    let mut at = 0u16;
+    for (_, bytes, variable) in functions {
+        let locat = 0xC400 | (at + 1); // segment-relative, 16-bit offset
+        fixups.extend_from_slice(&locat.to_be_bytes());
+        // frame method 1 (group), target method 2 (external) with displacement
+        fixups.extend_from_slice(&[0x12, 1]);
+        let external = externals.iter().position(|e| e == variable).unwrap_or(0) + 1;
+        fixups.push(external as u8);
+        fixups.extend_from_slice(&0u16.to_le_bytes());
+        at += bytes.len() as u16;
+    }
+    out.extend(rec(0x9C, &fixups));
+    out.extend(rec(0x8A, &[0]));
+    out
+}
+
 /// MZ file with a 32-byte header and a 0x100-byte image holding ADD, SUB and ZED at their addresses.
 fn mz() -> Vec<u8> {
     let mut image = vec![0x90u8; 0x100];
@@ -173,6 +234,19 @@ impl Fixture {
             omf(functions),
         )
         .unwrap();
+    }
+
+    /// Writes `<stem>.OBJ` from bytes (see [`omf_with_refs`]).
+    pub fn write_raw_obj(&self, stem: &str, bytes: &[u8]) {
+        std::fs::write(self.objects.path().join(format!("{stem}.OBJ")), bytes).unwrap();
+    }
+
+    /// Replaces the bytes of the original at `offset` of the image of `t.exe` (the image starts at file offset 32).
+    pub fn patch_original(&self, offset: usize, bytes: &[u8]) {
+        let path = self.root().join("t.exe");
+        let mut file = std::fs::read(&path).unwrap();
+        file[32 + offset..32 + offset + bytes.len()].copy_from_slice(bytes);
+        std::fs::write(path, file).unwrap();
     }
 
     pub fn write_source(&self, name: &str, text: &str) {

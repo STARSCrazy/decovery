@@ -34,4 +34,16 @@ def count(params, ctx):
     return params["n"]
 
 
+@plugin.method("echo/block", capability_version=1)
+def block(params, ctx):
+    """Starts a worker process, tells its pid (writes `marker`), then ignores everything for `seconds`."""
+    import subprocess
+
+    child = subprocess.Popen([sys.executable, "-c", f"import time; time.sleep({params['seconds']})"])
+    with open(params["marker"], "w", encoding="utf-8") as f:
+        f.write(str(child.pid))
+    time.sleep(params["seconds"])
+    return {}
+
+
 plugin.serve()

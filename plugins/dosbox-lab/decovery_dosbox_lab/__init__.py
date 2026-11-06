@@ -283,6 +283,7 @@ class _Watch:
         self.position = 0
         self.running: int | None = None
         self.since = 0.0
+        self.ended = 0
 
     def __call__(self, stdout: str) -> bool:
         now = self.clock()
@@ -291,6 +292,11 @@ class _Watch:
             if match.group(3) is not None:
                 self.running, self.since = int(match.group(3)), now
             else:
+                if match.group(2) is not None:
+                    # one event per ended job: a hang is told from a slow compile by the events that stop coming
+                    self.ended += 1
+                    elapsed = now - self.since
+                    self.ctx.progress(self.ended, None, f"job {int(match.group(2)) + 1} ended after {elapsed:.1f} s")
                 self.running = None
         self.position = max(self.position, complete)
         if self.ctx.cancelled:

@@ -3,8 +3,8 @@
 //! the programs as host processes.
 //!
 //! Drive `C:` is the build directory (writable), drive `D:` the tool directory (read-only). The host side,
-//! common to all runners, rejects command lines over 126 characters, snapshots drive `C:` before the call and
-//! reports as `produced` the expected files that are new or changed afterwards.
+//! common to all runners, rejects command lines over 126 characters, notes the expected files of drive `C:` before
+//! the call and reports as `produced` those that are new or changed afterwards.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use decovery_core::{PluginConfig, UserConfig, Workspace, plugin_config};
-use decovery_plugin::{CallOptions, CancelToken, PluginError, PluginHost};
+use decovery_plugin::{CallOptions, CancelToken, PluginError, PluginHost, Progress};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -169,6 +169,18 @@ pub trait Runner: Send + Sync {
         request: &RunRequest,
         cancel: Option<CancelToken>,
     ) -> Result<Vec<JobOutcome>, RunnerError>;
+
+    /// Like [`Runner::run`]; `progress` receives what the runner reports while it works (one event per finished
+    /// job, for runners that can). The default reports nothing.
+    fn run_reporting(
+        &self,
+        request: &RunRequest,
+        cancel: Option<CancelToken>,
+        progress: &dyn Fn(Progress),
+    ) -> Result<Vec<JobOutcome>, RunnerError> {
+        let _ = progress;
+        self.run(request, cancel)
+    }
 }
 
 /// What a runner reports per job, before the host adds `produced`.
@@ -183,21 +195,27 @@ struct RawJob {
     message: Option<String>,
 }
 
-type Snapshot = BTreeMap<String, (u64, Option<SystemTime>)>;
+/// Size and modification time of a file.
+type Stamp = (u64, Option<SystemTime>);
 
-fn snapshot(dir: &Path) -> Snapshot {
-    let mut map = Snapshot::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return map;
+/// The stamp of `name` (relative to `dir`, `/` or `\\` separated), if the file exists. A DOS side may have written
+/// it in another case; the directory is searched case-insensitively when the exact name is missing.
+fn stamp(dir: &Path, name: &str) -> Option<Stamp> {
+    let path = dir.join(name.replace('\\', "/"));
+    let of = |p: &Path| {
+        std::fs::metadata(p)
+            .ok()
+            .filter(std::fs::Metadata::is_file)
+            .map(|m| (m.len(), m.modified().ok()))
     };
-    for entry in entries.flatten() {
-        let Ok(meta) = entry.metadata() else { continue };
-        if meta.is_file() {
-            let name = entry.file_name().to_string_lossy().to_ascii_uppercase();
-            map.insert(name, (meta.len(), meta.modified().ok()));
-        }
-    }
-    map
+    of(&path).or_else(|| {
+        let wanted = path.file_name()?.to_string_lossy().to_ascii_uppercase();
+        std::fs::read_dir(path.parent()?)
+            .ok()?
+            .flatten()
+            .find(|e| e.file_name().to_string_lossy().to_ascii_uppercase() == wanted)
+            .and_then(|e| of(&e.path()))
+    })
 }
 
 fn c_mount(request: &RunRequest) -> Result<&Path, RunnerError> {
@@ -216,7 +234,11 @@ fn run_checked(
     call: impl FnOnce(&RunRequest) -> Result<Vec<RawJob>, RunnerError>,
 ) -> Result<Vec<JobOutcome>, RunnerError> {
     let c_dir = c_mount(request)?;
-    let before = snapshot(c_dir);
+    let before: Vec<Vec<Option<Stamp>>> = request
+        .jobs
+        .iter()
+        .map(|job| job.expected.iter().map(|n| stamp(c_dir, n)).collect())
+        .collect();
 
     let mut rejected: Vec<Option<String>> = Vec::new();
     let mut valid = Vec::new();
@@ -259,7 +281,7 @@ fn run_checked(
     let mut raw = raw.into_iter();
 
     let mut outcomes = Vec::new();
-    for (job, reject) in request.jobs.iter().zip(rejected) {
+    for ((job, reject), before) in request.jobs.iter().zip(rejected).zip(&before) {
         let raw = match reject {
             Some(message) => RawJob {
                 status: JobStatus::Failed,
@@ -272,23 +294,18 @@ fn run_checked(
                 .ok_or_else(|| RunnerError::Failed(format!("{runner}: missing job result")))?,
         };
         if raw.status == JobStatus::Timeout {
-            for name in &job.expected {
-                if !before.contains_key(&name.to_ascii_uppercase()) {
-                    let _ = std::fs::remove_file(c_dir.join(name));
+            for (name, was) in job.expected.iter().zip(before) {
+                if was.is_none() {
+                    let _ = std::fs::remove_file(c_dir.join(name.replace('\\', "/")));
                 }
             }
         }
-        let after = snapshot(c_dir);
         let produced = job
             .expected
             .iter()
-            .filter(|name| {
-                let key = name.to_ascii_uppercase();
-                after
-                    .get(&key)
-                    .is_some_and(|now| before.get(&key) != Some(now))
-            })
-            .cloned()
+            .zip(before)
+            .filter(|(name, was)| stamp(c_dir, name).is_some_and(|now| **was != Some(now)))
+            .map(|(name, _)| name.clone())
             .collect();
         outcomes.push(JobOutcome {
             status: raw.status,
@@ -310,6 +327,7 @@ pub struct PluginRunner {
     host: Mutex<Option<PluginHost>>,
     max_parallel: u32,
     slots: Arc<JobSlots>,
+    call_slack: Duration,
 }
 
 impl PluginRunner {
@@ -342,6 +360,7 @@ impl PluginRunner {
             host: Mutex::new(Some(host)),
             max_parallel,
             slots: global_slots(),
+            call_slack: CALL_SLACK,
         })
     }
 
@@ -351,10 +370,18 @@ impl PluginRunner {
         self
     }
 
+    /// Waits this long beyond the jobs' own time limits for the plugin's answer before it is given up on
+    /// (default 30 s).
+    pub fn with_call_slack(mut self, slack: Duration) -> Self {
+        self.call_slack = slack;
+        self
+    }
+
     fn call(
         &self,
         request: &RunRequest,
         cancel: Option<CancelToken>,
+        progress: Option<&dyn Fn(Progress)>,
     ) -> Result<Vec<RawJob>, RunnerError> {
         let guard = self.host.lock().unwrap_or_else(|p| p.into_inner());
         let host = guard
@@ -373,11 +400,13 @@ impl PluginRunner {
             "options": {"jobs": share.count()},
             "jobs": request.jobs.iter().map(|j| json!({"commands": j.commands, "cost": j.cost})).collect::<Vec<_>>(),
         });
-        // a hang in every job must still end within the call: the per-job limit times the jobs, as if serial
+        // a hang in every job must still end within the call: the per-job limit times the rounds the jobs need at
+        // the granted share, plus the slack
+        let rounds = jobs.div_ceil(share.count().max(1));
         let timeout = request
             .timeout
-            .saturating_mul(jobs)
-            .saturating_add(CALL_SLACK);
+            .saturating_mul(rounds)
+            .saturating_add(self.call_slack);
         let result = host
             .call(
                 &format!("{CAPABILITY}/run"),
@@ -385,7 +414,7 @@ impl PluginRunner {
                 CallOptions {
                     timeout,
                     cancel,
-                    on_progress: None,
+                    on_progress: progress,
                 },
             )
             .map_err(|e| match e {
@@ -411,7 +440,18 @@ impl Runner for PluginRunner {
         request: &RunRequest,
         cancel: Option<CancelToken>,
     ) -> Result<Vec<JobOutcome>, RunnerError> {
-        run_checked(&self.name, request, |sub| self.call(sub, cancel))
+        run_checked(&self.name, request, |sub| self.call(sub, cancel, None))
+    }
+
+    fn run_reporting(
+        &self,
+        request: &RunRequest,
+        cancel: Option<CancelToken>,
+        progress: &dyn Fn(Progress),
+    ) -> Result<Vec<JobOutcome>, RunnerError> {
+        run_checked(&self.name, request, |sub| {
+            self.call(sub, cancel, Some(progress))
+        })
     }
 }
 
@@ -514,6 +554,13 @@ fn parse_set(line: &str) -> Option<(&str, &str)> {
     Some((name.trim(), value))
 }
 
+/// The directory of a `CD <dir>` or `CHDIR <dir>` line.
+fn parse_cd(line: &str) -> Option<&str> {
+    let rest = line.trim();
+    let (word, dir) = rest.split_once(char::is_whitespace)?;
+    (word.eq_ignore_ascii_case("CD") || word.eq_ignore_ascii_case("CHDIR")).then(|| dir.trim())
+}
+
 fn failed(message: String, stdout: String) -> RawJob {
     RawJob {
         status: JobStatus::Failed,
@@ -528,7 +575,8 @@ fn native_job(
     job: &RunJob,
     cancel: Option<&CancelToken>,
 ) -> Result<RawJob, RunnerError> {
-    let cwd = c_mount(request)?;
+    let root = c_mount(request)?;
+    let mut cwd = root.to_path_buf();
     let cancelled = || cancel.is_some_and(CancelToken::is_cancelled);
     let deadline = Instant::now() + request.timeout;
     let mut env: BTreeMap<String, String> = BTreeMap::new();
@@ -538,6 +586,21 @@ fn native_job(
     for line in &job.commands {
         if let Some((name, value)) = parse_set(line) {
             env.insert(name.to_string(), map_token(value, &request.mounts));
+            continue;
+        }
+        if let Some(dir) = parse_cd(line) {
+            // like DOS: relative to the current directory of drive C, `\\` is its root
+            let target = map_token(dir, &request.mounts);
+            cwd = match dir.strip_prefix(['\\', '/']) {
+                Some(rest) => rest
+                    .split(['\\', '/'])
+                    .fold(root.to_path_buf(), |p, s| p.join(s)),
+                None if target != dir => PathBuf::from(target),
+                None => dir.split(['\\', '/']).fold(cwd, |p, s| p.join(s)),
+            };
+            if !cwd.is_dir() {
+                return Ok(failed(format!("CD {dir}: no such directory"), stdout));
+            }
             continue;
         }
         let tokens: Vec<String> = tokenize(line)
@@ -551,7 +614,7 @@ fn native_job(
         command
             .args(args)
             .envs(&env)
-            .current_dir(cwd)
+            .current_dir(&cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -695,10 +758,20 @@ pub fn run_with_fallback(
     request: &RunRequest,
     cancel: Option<CancelToken>,
 ) -> Result<(Vec<JobOutcome>, Vec<String>), RunnerError> {
+    run_with_fallback_reporting(runners, request, cancel, &|_| {})
+}
+
+/// [`run_with_fallback`] that passes what the runner reports while it works to `progress`.
+pub fn run_with_fallback_reporting(
+    runners: &[Box<dyn Runner>],
+    request: &RunRequest,
+    cancel: Option<CancelToken>,
+    progress: &dyn Fn(Progress),
+) -> Result<(Vec<JobOutcome>, Vec<String>), RunnerError> {
     let mut warnings = Vec::new();
     let mut last: Option<RunnerError> = None;
     for runner in runners {
-        match runner.run(request, cancel.clone()) {
+        match runner.run_reporting(request, cancel.clone(), progress) {
             Ok(outcomes) => return Ok((outcomes, warnings)),
             Err(e @ (RunnerError::Unsupported(_) | RunnerError::Unavailable(_))) => {
                 warnings.push(format!("runner {}: {e}; trying the next", runner.name()));

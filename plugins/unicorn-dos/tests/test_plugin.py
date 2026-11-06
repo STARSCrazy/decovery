@@ -259,6 +259,24 @@ class JobPoolTest(unittest.TestCase):
         run(plugin, request(1, "runner/run", ws.params(["ECHO a"])), request(2, "runner/run", ws.params(["ECHO b"])))
         self.assertEqual(len(pools), 1)
 
+    def test_on_done_reports_each_job_as_it_ends(self):
+        pool = JobPool(workers=2, worker=answer_or_die)
+        self.addCleanup(pool.close)
+        seen = []
+        pool.run([{"n": 1}, {"n": 2}, {"n": 3}], on_done=lambda i, outcome: seen.append((i, outcome["exit_code"])))
+        self.assertEqual(sorted(seen), [(0, 1), (1, 2), (2, 3)])
+
+    def test_plugin_reports_one_progress_event_per_job(self):
+        ws = Workspace(self)
+        plugin = build_plugin()
+        stdin = io.StringIO(json.dumps(request(1, "runner/run", ws.params(["ECHO a"], ["ECHO b"], ["ECHO c"]))) + chr(10))
+        stdout = io.StringIO()
+        plugin.serve(stdin=stdin, stdout=stdout)
+        messages = [json.loads(line) for line in stdout.getvalue().splitlines()]
+        progress = [m["params"] for m in messages if m.get("method") == "$/progress"]
+        self.assertEqual([p["done"] for p in progress], [1, 2, 3])
+        self.assertTrue(all(p["total"] == 3 and " of 3 done after " in p["message"] for p in progress), progress)
+
     def test_in_flight_jobs_stay_within_request_share(self):
         pool = JobPool(workers=4, worker=timed)
         self.addCleanup(pool.close)

@@ -1,7 +1,8 @@
 """Turns the command lines of a `runner/run` job into steps, like COMMAND.COM running them as a batch file.
 
 `SET NAME=value` changes the environment of the following lines (an empty value removes the variable), a leading
-`@` suppresses the echo of its line, `ECHO OFF`/`ECHO ON` switch the echo, `ECHO text` prints, `REM` does nothing.
+`@` suppresses the echo of its line, `ECHO OFF`/`ECHO ON` switch the echo, `ECHO text` prints, `REM` does nothing,
+`CD dir` (or `CHDIR`) changes the current directory of the following programs (an unknown directory ends the job).
 Any other line runs a program: with a path as given, otherwise from the current directory and then the `PATH`
 directories (the tool drive D:), trying `.COM`, `.EXE` and `.BAT` when no extension is given. A `.BAT` file (on the
 build drive C:) is read and its lines run in place, as with `CALL`.
@@ -44,6 +45,7 @@ class Step:
     dos_path: str | None = None
     args: str = ""
     host: str | None = None
+    cwd: str = ""  # current directory of the program ("run"), without leading backslash
 
 
 def _program_kind(data: bytes) -> tuple[str | None, str]:
@@ -150,6 +152,20 @@ def plan(
             if word == "ECHO":
                 steps.append(Step("echo", echo, text=rest))
                 continue
+            if word in ("CD", "CHDIR"):
+                steps.append(Step("noop", echo))
+                target = rest.strip()
+                if target:
+                    try:
+                        drive, host_dir = fs.resolve(target)
+                        ok = host_dir.is_dir()
+                    except DosError:
+                        ok = False
+                    if not ok:
+                        steps.append(Step("missing", None, text=f"Invalid directory: {target}"))
+                        continue
+                    fs.cwd[drive] = "\\".join(host_dir.relative_to(fs.drives[drive]).parts)
+                continue
             match = _SET.match(body)
             if match:
                 key, value = match[1].upper(), match[2]
@@ -183,6 +199,7 @@ def plan(
                     dos_path=dos_path,
                     args=args.strip(),
                     host=host,
+                    cwd=fs.cwd[fs.current],
                 )
             )
 
