@@ -9,6 +9,7 @@ use rayon::prelude::*;
 
 use crate::anchors::{Anchors, Condition, FLAT, Outcome, SectionKey, frame_name};
 use crate::instructions::{self, Naming, Side};
+use crate::pairs::Pair;
 use crate::{
     Blocker, CompareOptions, Comparison, Decoration, Metrics, ModuleComparison, ModuleOptions,
     NameAt, Placement, SymbolView, Verdict,
@@ -314,6 +315,7 @@ fn unchecked(bytes: u32, blocker: Option<Blocker>) -> Comparison {
             bytes,
             ..Metrics::default()
         },
+        diagnoses: Vec::new(),
     }
 }
 
@@ -341,6 +343,41 @@ pub fn compare(
     .unwrap_or_else(|| unchecked(len, None))
 }
 
+/// See [`crate::instruction_pairs`].
+pub(crate) fn instruction_pairs(
+    f: &FunctionView,
+    at: Address,
+    program: &Program,
+    symbols: &dyn SymbolView,
+    decoration: &Decoration,
+    options: &CompareOptions,
+) -> Vec<Pair> {
+    let rebuild = Rebuild::new(f);
+    let bits = f
+        .module
+        .sections
+        .get(f.section as usize)
+        .map_or(0, |s| u32::from(s.bits));
+    if bits != 16 && bits != 32 {
+        return Vec::new();
+    }
+    let (Some(original), Some(base)) = (program.read(at, rebuild.bytes.len()), base_of(at)) else {
+        return Vec::new();
+    };
+    instruction_comparison(
+        &rebuild,
+        at,
+        base,
+        original,
+        options.original_len,
+        program,
+        symbols,
+        decoration,
+        options.padding,
+        bits,
+    )
+}
+
 /// Compares every placement with its original. Anchors (ADR 0006) are established over all placements first,
 /// then each function is judged. See the crate documentation for the rules.
 pub fn compare_module(
@@ -356,7 +393,17 @@ pub fn compare_module(
     let prepared: Vec<Prepared> = placements
         .par_iter()
         .zip(module_of.par_iter())
-        .map(|(p, &module)| prepare(p, module, program, symbols, decoration, options.padding))
+        .map(|(p, &module)| {
+            prepare(
+                p,
+                module,
+                program,
+                symbols,
+                decoration,
+                options.padding,
+                options.diagnosis.as_deref(),
+            )
+        })
         .collect();
     let conditions = prepared
         .iter()
@@ -429,18 +476,25 @@ impl<'a> SharedFunctions<'a> {
             .par_iter()
             .zip(module_of.par_iter())
             .map(|(p, &module)| {
-                let conditions =
-                    match prepare(p, module, program, symbols, decoration, options.padding) {
-                        Prepared::Pending { fields, .. } => fields
-                            .into_iter()
-                            .filter_map(|f| match f.outcome {
-                                Outcome::Anchored(c) => Some(c),
-                                Outcome::Decided(_) => None,
-                            })
-                            .flatten()
-                            .collect(),
-                        Prepared::Done(_) => Vec::new(),
-                    };
+                let conditions = match prepare(
+                    p,
+                    module,
+                    program,
+                    symbols,
+                    decoration,
+                    options.padding,
+                    None,
+                ) {
+                    Prepared::Pending { fields, .. } => fields
+                        .into_iter()
+                        .filter_map(|f| match f.outcome {
+                            Outcome::Anchored(c) => Some(c),
+                            Outcome::Decided(_) => None,
+                        })
+                        .flatten()
+                        .collect(),
+                    Prepared::Done(_) => Vec::new(),
+                };
                 (p.at, conditions)
             })
             .collect();
@@ -467,7 +521,17 @@ pub fn compare_module_with(
     let prepared: Vec<Prepared> = own
         .par_iter()
         .zip(module_of.par_iter())
-        .map(|(p, &module)| prepare(p, module, program, symbols, decoration, options.padding))
+        .map(|(p, &module)| {
+            prepare(
+                p,
+                module,
+                program,
+                symbols,
+                decoration,
+                options.padding,
+                options.diagnosis.as_deref(),
+            )
+        })
         .collect();
     let own_at: BTreeSet<Address> = own.iter().map(|p| p.at).collect();
     let conditions = prepared
@@ -514,14 +578,20 @@ enum Prepared {
     Pending {
         metrics: Metrics,
         fields: Vec<Field>,
+        /// Ids of the diagnosis rules that apply ([`ModuleOptions::diagnosis`]).
+        diagnoses: Vec<String>,
     },
 }
 
 impl Prepared {
     fn finish(self, anchors: &Anchors) -> Comparison {
-        let (m, fields) = match self {
+        let (m, fields, diagnoses) = match self {
             Prepared::Done(c) => return c,
-            Prepared::Pending { metrics, fields } => (metrics, fields),
+            Prepared::Pending {
+                metrics,
+                fields,
+                diagnoses,
+            } => (metrics, fields, diagnoses),
         };
         let mut blockers = Vec::new();
         if m.differing > 0 {
@@ -537,19 +607,22 @@ impl Prepared {
                 count: m.instructions_differing,
             });
         }
+        let identical = blockers.is_empty();
         Comparison {
-            verdict: if blockers.is_empty() {
+            verdict: if identical {
                 Verdict::Identical
             } else {
                 Verdict::Differs
             },
             blockers,
             metrics: m,
+            diagnoses: if identical { Vec::new() } else { diagnoses },
         }
     }
 }
 
-/// First pass for one placement: Decomp's metrics and the classified fields. `module` indexes the modules of
+/// First pass for one placement: Decomp's metrics, the classified fields and, with a compiler family in
+/// `diagnosis`, the ids of the diagnosis rules (from the same instruction pairs). `module` indexes the modules of
 /// the comparison.
 fn prepare(
     placement: &Placement<'_>,
@@ -558,6 +631,7 @@ fn prepare(
     symbols: &dyn SymbolView,
     decoration: &Decoration,
     padding_option: bool,
+    diagnosis: Option<&str>,
 ) -> Prepared {
     let f = &placement.function;
     let at = placement.at;
@@ -664,8 +738,79 @@ fn prepare(
     }
 
     // --- Decomp's `_befehlsvergleich` ---
-    let original_span = placement
-        .original_len
+    let pairs = instruction_comparison(
+        &rebuild,
+        at,
+        base,
+        original,
+        placement.original_len,
+        program,
+        symbols,
+        decoration,
+        padding_option,
+        bits,
+    );
+    m.instructions_differing = pairs.iter().filter(|p| p.kind.differs()).count() as u32;
+    let diagnoses = match diagnosis {
+        Some(family) => crate::diagnose::diagnose(&pairs, bits as u8, family)
+            .into_iter()
+            .map(|f| f.rule)
+            .collect(),
+        None => Vec::new(),
+    };
+    drop(pairs);
+
+    // --- decovery's fields ---
+    // Fields inside padding behind the original's end (the following function's jump table) belong to the
+    // next function, as in Decomp's byte comparison.
+    let mut checks: Vec<(u32, Check)> = f
+        .relocs()
+        .map(|r| (r.offset - f.start, Check::Fixup(r)))
+        .filter(|(o, _)| !padding.contains(o))
+        .collect();
+    checks.extend(inner.iter().map(|(&o, n)| (o, Check::Internal(n))));
+    checks.sort_by_key(|&(o, _)| o);
+    let site = Site {
+        rebuild: &rebuild,
+        at,
+        base,
+        original,
+        program,
+        symbols,
+        decoration,
+        width,
+        bits,
+        module,
+    };
+    let fields = checks
+        .iter()
+        .map(|(offset, check)| site.classify(*offset, check))
+        .collect();
+    Prepared::Pending {
+        metrics: m,
+        fields,
+        diagnoses,
+    }
+}
+
+/// Decomp's `_befehlsvergleich` for one placement: the aligned, judged instruction pairs. `original` holds the
+/// original bytes over the rebuild's length.
+#[allow(clippy::too_many_arguments)]
+fn instruction_comparison(
+    rebuild: &Rebuild<'_>,
+    at: Address,
+    base: u64,
+    original: &[u8],
+    original_len: Option<u32>,
+    program: &Program,
+    symbols: &dyn SymbolView,
+    decoration: &Decoration,
+    padding_option: bool,
+    bits: u32,
+) -> Vec<Pair> {
+    let f = rebuild.f;
+    let code = &rebuild.bytes;
+    let original_span = original_len
         .and_then(|l| program.read(at, l as usize))
         .unwrap_or(original);
     let names: BTreeMap<u32, String> = rebuild
@@ -728,41 +873,13 @@ fn prepare(
             None
         }
     };
-    m.instructions_differing = instructions::differing(
+    instructions::pairs(
         &rebuild_side,
         &original_side,
         bits,
         padding_option,
         &data_address,
-    );
-
-    // --- decovery's fields ---
-    // Fields inside padding behind the original's end (the following function's jump table) belong to the
-    // next function, as in Decomp's byte comparison.
-    let mut checks: Vec<(u32, Check)> = f
-        .relocs()
-        .map(|r| (r.offset - f.start, Check::Fixup(r)))
-        .filter(|(o, _)| !padding.contains(o))
-        .collect();
-    checks.extend(inner.iter().map(|(&o, n)| (o, Check::Internal(n))));
-    checks.sort_by_key(|&(o, _)| o);
-    let site = Site {
-        rebuild: &rebuild,
-        at,
-        base,
-        original,
-        program,
-        symbols,
-        decoration,
-        width,
-        bits,
-        module,
-    };
-    let fields = checks
-        .iter()
-        .map(|(offset, check)| site.classify(*offset, check))
-        .collect();
-    Prepared::Pending { metrics: m, fields }
+    )
 }
 
 enum Check<'a> {

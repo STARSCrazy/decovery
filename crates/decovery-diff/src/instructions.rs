@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use decovery_x86::{DecodeOptions, Decoded, DecodedKind, FieldRole, decode_detailed};
 
+use crate::pairs::{Pair, PairKind};
 use crate::sequence::{Op, opcodes};
 
 /// Cells of the cost table above which the difflib-style alignment is used (Decomp's `_AUSRICHTEN_MAX`).
@@ -23,10 +24,9 @@ enum Target {
 
 #[derive(Debug, Clone)]
 struct Insn {
-    offset: u32,
+    /// The decoded instruction; handed on in the [`Pair`]s.
+    d: Decoded,
     raw: Vec<u8>,
-    mnemonic: String,
-    shape: String,
     table: bool,
     target: Option<Target>,
     /// Relocated byte positions inside the instruction.
@@ -135,11 +135,9 @@ fn insn(code: &[u8], base: u64, gaps: &BTreeSet<u32>, naming: &Naming<'_>, d: De
         }
     }
     Insn {
-        offset: k,
         raw: code.get(k as usize..end as usize).unwrap_or(&[]).to_vec(),
         table: matches!(d.kind, DecodedKind::JumpTable { .. }),
-        mnemonic: d.mnemonic,
-        shape: d.shape,
+        d,
         target,
         gaps: inner,
         refs,
@@ -200,7 +198,7 @@ fn judge(
     pairing: &HashMap<u32, u32>,
     data_address: &dyn Fn(&str) -> Option<u64>,
 ) -> Judgement {
-    if nb.shape != og.shape {
+    if nb.d.shape != og.d.shape {
         return Judgement::Different;
     }
     if nb.table {
@@ -247,11 +245,11 @@ type Pairs = Vec<(Option<usize>, Option<usize>)>;
 fn align(a: &[Insn], b: &[Insn]) -> Option<Pairs> {
     let common = a.len().min(b.len());
     let mut front = 0;
-    while front < common && a[front].shape == b[front].shape {
+    while front < common && a[front].d.shape == b[front].d.shape {
         front += 1;
     }
     let mut back = 0;
-    while back < common - front && a[a.len() - 1 - back].shape == b[b.len() - 1 - back].shape {
+    while back < common - front && a[a.len() - 1 - back].d.shape == b[b.len() - 1 - back].d.shape {
         back += 1;
     }
     let xa = &a[front..a.len() - back];
@@ -260,8 +258,8 @@ fn align(a: &[Insn], b: &[Insn]) -> Option<Pairs> {
     if (n + 1).saturating_mul(m + 1) > ALIGN_MAX {
         return None;
     }
-    let ma: Vec<&str> = xa.iter().map(|x| mnemonic_class(&x.mnemonic)).collect();
-    let mb: Vec<&str> = xb.iter().map(|x| mnemonic_class(&x.mnemonic)).collect();
+    let ma: Vec<&str> = xa.iter().map(|x| mnemonic_class(&x.d.mnemonic)).collect();
+    let mb: Vec<&str> = xb.iter().map(|x| mnemonic_class(&x.d.mnemonic)).collect();
     // way: 0 diagonal, 1 rebuild only (up), 2 original only (left)
     let mut way = vec![vec![0u8; m + 1]; n + 1];
     let mut prev: Vec<u64> = (0..=m as u64).map(|j| 5 * j).collect();
@@ -273,7 +271,7 @@ fn align(a: &[Insn], b: &[Insn]) -> Option<Pairs> {
         cur[0] = 5 * i as u64;
         way[i][0] = 1;
         for j in 1..=m {
-            let step = if xa[i - 1].shape == xb[j - 1].shape {
+            let step = if xa[i - 1].d.shape == xb[j - 1].d.shape {
                 0
             } else if ma[i - 1] == mb[j - 1] {
                 1
@@ -325,10 +323,10 @@ fn align_difflib(a: &[Insn], b: &[Insn]) -> Pairs {
     let mut ids: HashMap<&str, u32> = HashMap::new();
     for x in a.iter().chain(b) {
         let next = ids.len() as u32;
-        ids.entry(x.shape.as_str()).or_insert(next);
+        ids.entry(x.d.shape.as_str()).or_insert(next);
     }
-    let sa: Vec<u32> = a.iter().map(|x| ids[x.shape.as_str()]).collect();
-    let sb: Vec<u32> = b.iter().map(|x| ids[x.shape.as_str()]).collect();
+    let sa: Vec<u32> = a.iter().map(|x| ids[x.d.shape.as_str()]).collect();
+    let sb: Vec<u32> = b.iter().map(|x| ids[x.d.shape.as_str()]).collect();
     let mut out = Pairs::new();
     for (op, i1, i2, j1, j2) in opcodes(&sa, &sb) {
         match op {
@@ -354,14 +352,15 @@ pub(crate) struct Side<'a> {
     pub naming: Naming<'a>,
 }
 
-/// Number of differing instructions (Decomp's `Befehlsvergleich.abweichend`).
-pub(crate) fn differing(
+/// The aligned instruction pairs of both sides, judged (Decomp's `vergleiche_befehle`). The number of pairs that
+/// are not [`PairKind::Equal`] or [`PairKind::Form`] is Decomp's `Befehlsvergleich.abweichend`.
+pub(crate) fn pairs(
     rebuild: &Side<'_>,
     original: &Side<'_>,
     bits: u32,
     byte_padding: bool,
     data_address: &dyn Fn(&str) -> Option<u64>,
-) -> u32 {
+) -> Vec<Pair> {
     let a = build(
         rebuild.code,
         bits,
@@ -378,20 +377,37 @@ pub(crate) fn differing(
         byte_padding,
         &original.naming,
     );
-    let pairs = align(&a, &b).unwrap_or_else(|| align_difflib(&a, &b));
-    let pairing: HashMap<u32, u32> = pairs
+    let aligned = align(&a, &b).unwrap_or_else(|| align_difflib(&a, &b));
+    let pairing: HashMap<u32, u32> = aligned
         .iter()
-        .filter_map(|&(x, y)| Some((a[x?].offset, b[y?].offset)))
+        .filter_map(|&(x, y)| Some((a[x?].d.offset, b[y?].d.offset)))
         .collect();
-    pairs
+    let kinds: Vec<PairKind> = aligned
         .iter()
-        .filter(|&&(x, y)| match (x, y) {
-            (Some(x), Some(y)) => {
-                judge(&a[x], &b[y], &pairing, data_address) == Judgement::Different
-            }
-            _ => true,
+        .map(|&(x, y)| match (x, y) {
+            (Some(x), Some(y)) => match judge(&a[x], &b[y], &pairing, data_address) {
+                Judgement::Equal => PairKind::Equal,
+                Judgement::Form => PairKind::Form,
+                Judgement::Different => PairKind::Different,
+            },
+            (Some(_), None) => PairKind::RebuildOnly,
+            _ => PairKind::OriginalOnly,
         })
-        .count() as u32
+        .collect();
+    // every instruction is in exactly one pair: move the decoded instructions out
+    let mut a: Vec<Option<Decoded>> = a.into_iter().map(|x| Some(x.d)).collect();
+    let mut b: Vec<Option<Decoded>> = b.into_iter().map(|x| Some(x.d)).collect();
+    aligned
+        .into_iter()
+        .zip(kinds)
+        .map(|((x, y), kind)| {
+            Pair::new(
+                kind,
+                x.and_then(|x| a.get_mut(x)?.take()),
+                y.and_then(|y| b.get_mut(y)?.take()),
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]

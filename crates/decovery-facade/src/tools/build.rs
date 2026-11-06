@@ -265,7 +265,9 @@ pub fn build(
         Vec::new()
     } else {
         let program = crate::program::load(&ws)?;
-        let options = ModuleOptions::new(profile.padding, rebuild.frames.clone());
+        // the diagnosis reads the instruction pairs of the comparison: no second decode
+        let options = ModuleOptions::new(profile.padding, rebuild.frames.clone())
+            .with_diagnosis(profile.family.clone());
         let module = decovery_diff::compare_module(
             &placements,
             &program,
@@ -545,7 +547,7 @@ fn place_name<'a>(
 }
 
 /// Length of the original function at `address`: from the analysis, else the symbol's size.
-fn original_len(
+pub(super) fn original_len(
     index: Option<&decovery_core::AnalysisIndex<'_>>,
     symbol_sizes: &HashMap<Address, Option<u64>>,
     address: Address,
@@ -721,6 +723,7 @@ fn record(
     r.instructions_differing = m.instructions_differing;
     r.padding_bytes = m.padding;
     r.first_difference = m.first_difference;
+    r.diagnoses = c.diagnoses.clone();
     r.code_hash = Some(built.code_hash.clone());
     r.date = Some(date.to_string());
     r
@@ -781,7 +784,7 @@ fn keep_objects(
 }
 
 fn function_json(r: &RebuildRecord) -> Value {
-    json!({
+    let mut v = json!({
         "address": r.address.to_string(),
         "name": r.name,
         "file": r.file,
@@ -791,7 +794,11 @@ fn function_json(r: &RebuildRecord) -> Value {
         "bytes": r.bytes,
         "differing": r.differing,
         "instructions_differing": r.instructions_differing,
-    })
+    });
+    if !r.diagnoses.is_empty() {
+        v["diagnoses"] = json!(r.diagnoses);
+    }
+    v
 }
 
 fn respond(

@@ -11,7 +11,7 @@ use decovery_core::{
     BlockerRecord, Equivalence, RebuildRecord, RebuildResult, VerdictId, Workspace, read_rebuild,
     save_rebuild,
 };
-use decovery_facade::{BuildRequest, Response, Session, build, function_path};
+use decovery_facade::{Budget, BuildRequest, Response, Session, build, function_path};
 use serde_json::Value;
 
 fn run(f: &Fixture, files: &[&str]) -> Response {
@@ -1288,4 +1288,81 @@ fn header_change_is_a_new_shrink_check() {
     let second = run_functions(&f, "sub", &[SUB_SOURCE]);
     assert_eq!(second.data["timing"]["shrink_checks"], 1, "checked again");
     assert_eq!(shrink_records(&f).len(), 2);
+}
+
+#[test]
+fn diagnose_needs_rebuilt_object() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    // a record that names no file (as migrated from Decomp without one)
+    seed(
+        &f,
+        "schema = 1
+
+[[function]]
+address = \"seg:0000:0020\"
+name = \"sub\"
+result = \"differs\"
+",
+    );
+    let session = Session::open(f.root()).unwrap();
+    let e = decovery_facade::diagnose(&session, "sub", Budget::default()).unwrap_err();
+    assert_eq!(
+        e.to_string(),
+        "no rebuilt object for sub; run `decovery build <file>`"
+    );
+    run(&f, &["a.c"]);
+    std::fs::remove_file(f.root().join("cache/rebuild/obj/a.obj")).unwrap();
+    let session = Session::open(f.root()).unwrap();
+    let e = decovery_facade::diagnose(&session, "sub", Budget::default()).unwrap_err();
+    assert_eq!(
+        e.to_string(),
+        "no rebuilt object for sub; run `decovery build a.c`"
+    );
+}
+
+#[test]
+fn diagnose_reports_rules() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    // one ret more at the end than the original
+    let mut sub = SUB.to_vec();
+    sub.push(0xC3);
+    f.write_obj("A", &[("_add", ADD), ("_sub", &sub)]);
+    let built = run(&f, &["a.c"]);
+    assert_eq!(record(&f, "sub").diagnoses, ["length-end"]);
+    assert!(record(&f, "add").diagnoses.is_empty());
+    let shown = built.data["functions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == "sub")
+        .unwrap()
+        .clone();
+    assert_eq!(shown["diagnoses"][0], "length-end");
+
+    let session = Session::open(f.root()).unwrap();
+    let response = decovery_facade::diagnose(&session, "sub", Budget::default()).unwrap();
+    assert_eq!(response.summary, "sub: 1 finding (length-end)");
+    let d = &response.data;
+    assert_eq!(d["function"]["name"], "sub");
+    assert_eq!(d["function"]["file"], "a.c");
+    assert_eq!(d["findings"][0]["rule"], "length-end");
+    assert_eq!(
+        d["findings"][0]["text"],
+        "the rebuild has 1 more instruction(s) at the end"
+    );
+    assert!(d["deviation_kind"].is_null());
+    let text = d["pairs_text"].as_str().unwrap();
+    assert!(text.contains("+ 000B ret"), "{text}");
+
+    // a small budget moves the pairs into a handle
+    let small = decovery_facade::diagnose(&session, "sub", Budget { chars: 40 }).unwrap();
+    assert_eq!(small.handles.len(), 1);
+    assert!(
+        small.data["pairs_text"]
+            .as_str()
+            .unwrap()
+            .contains("truncated; full text: detail")
+    );
 }

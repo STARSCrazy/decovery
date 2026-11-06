@@ -65,6 +65,12 @@ enum Command {
         /// Function name or address.
         target: String,
     },
+    /// Why a rebuilt function differs from the original and what to try: findings of the diagnosis rules, the
+    /// kind of deviation and the instructions side by side. Reads the object of the last `build`.
+    Diagnose {
+        /// Function name or address.
+        target: String,
+    },
     /// Counts of named and rebuilt functions and the next thing to do.
     Status,
     /// Search functions, names, strings, generated code or cross references.
@@ -316,6 +322,7 @@ fn main() -> ExitCode {
             }
         }
         Command::Show { target } => finish(show(&cli.workspace, &target, cli.json)),
+        Command::Diagnose { target } => finish(diagnose(&cli.workspace, &target, cli.json)),
         Command::Status => finish(status(&cli.workspace, cli.json)),
         Command::Find {
             what,
@@ -743,6 +750,33 @@ fn show(workspace: &Path, target: &str, json: bool) -> Result<(), FacadeError> {
     }
     if response.data["analysis_stale"] == true {
         eprintln!("note: {}", decovery_facade::output::STALE_ANALYSIS);
+    }
+    Ok(())
+}
+
+fn diagnose(workspace: &Path, target: &str, json: bool) -> Result<(), FacadeError> {
+    let session = Session::open(workspace)?;
+    if json {
+        return print_json(&decovery_facade::diagnose(
+            &session,
+            target,
+            Budget::default(),
+        )?);
+    }
+    let response = decovery_facade::diagnose(&session, target, Budget { chars: usize::MAX })?;
+    let d = &response.data;
+    println!("{}", response.summary);
+    for f in d["findings"].as_array().into_iter().flatten() {
+        println!(
+            "  [{}] {} → {}",
+            f["rule"].as_str().unwrap_or(""),
+            f["text"].as_str().unwrap_or(""),
+            f["suggestion"].as_str().unwrap_or("")
+        );
+    }
+    if let Some(text) = d["pairs_text"].as_str() {
+        println!();
+        print!("{text}");
     }
     Ok(())
 }

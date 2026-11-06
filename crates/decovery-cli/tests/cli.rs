@@ -147,6 +147,18 @@ fn show_unknown_function_exits_2() {
 }
 
 #[test]
+fn diagnose_without_rebuild_exits_2() {
+    let dir = workspace();
+    let out = run(&dir, &["diagnose", "alpha"]);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8(out.stderr).expect("utf-8");
+    assert!(
+        stderr.contains("no rebuilt object for alpha; run `decovery build <file>`"),
+        "got {stderr:?}"
+    );
+}
+
+#[test]
 fn show_prints_text_and_json_envelope() {
     let dir = workspace();
     let out = run(&dir, &["show", "alpha"]);
