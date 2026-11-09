@@ -22,6 +22,8 @@ pub struct ObjectModule {
     pub symbols: Vec<ObjSymbol>,
     /// Segment groups (OMF `GRPDEF`), e.g. `DGROUP`.
     pub groups: Vec<Group>,
+    /// Program start address of a main module (OMF `MODEND`): section index and offset.
+    pub start: Option<(u32, u32)>,
 }
 
 /// A segment group: the member sections share one frame.
@@ -102,6 +104,8 @@ pub enum RefTarget {
         index: u32,
         offset: u32,
     },
+    /// A segment group (OMF target method T1), e.g. the selector of `mov dx, DGROUP`.
+    Group(String),
     Unknown,
 }
 
@@ -126,6 +130,7 @@ impl ObjectModule {
             sections,
             symbols,
             groups: Vec::new(),
+            start: None,
         }
     }
 

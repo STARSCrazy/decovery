@@ -187,7 +187,7 @@ impl<'a> FunctionView<'a> {
                         .map(|s| s.name.as_str())
                 }
             }
-            RefTarget::Unknown => None,
+            RefTarget::Group(_) | RefTarget::Unknown => None,
         }
     }
 }

@@ -58,6 +58,30 @@ functions it compares (`compare_module`: first pass collects, second pass checks
    before the function start (Watcom's jump table) is matched by the table, not its address: the original's
    relocation must point at a table whose consecutive entries lead to the same offsets relative to the function
    start as the rebuild's entries.
+10. **Startup frames** (amendment 2026-11-09). A frame base can come from the program's startup code instead of
+    votes. For an MZ target, `build` reads the startup object that `[rebuild.link]` links in (`startup`, from the
+    profile's library directory) and places its start address (OMF `MODEND`) at the program's entry point. The
+    startup gives frame bases only if its code section equals the original there outside its own fixup fields and
+    each of its 16-bit selector fields has a segment relocation of the original at the same place; the
+    original's segment value times 16 is then the base of the field's frame (a selector that targets a group,
+    `mov dx, DGROUP`, names the group). A frame whose selector fields give different bases gets none. The base is
+    fixed like a configured one (source `startup`): it overrides the consensus of rule 2, and `[rebuild.frames]`
+    overrides it, with a warning when the two differ. Rule 6 is unchanged: selector fields of the compared
+    functions still do not vote.
+
+    Why it is sound: no rebuilt code takes part, so no rebuild, right or wrong, can move the base. A wrong
+    selector in a compared function would vote for the very base it is then checked against; a lone one would
+    prove itself, which is why rule 6 stays. The startup object is the toolchain's library object, not a rebuild;
+    byte equality at the entry point plus a segment relocation exactly at each selector field means the original
+    loads that segment value for that frame. A startup from another library version differs in its bytes and
+    gives nothing. With the base known, rule 5 compares the referenced items, so a wrong string stays a
+    `WrongAbsoluteRef`.
+
+    Rejected: letting selector fields of compared functions vote (self-confirming, see above); searching the
+    image for the section's bytes (it picks the base that makes the rebuild match, and costs a scan of the
+    program); a program-wide consensus over all modules of a build (helps only when some module has named
+    targets with known addresses); deriving the base from the knowledge base (it records no frames; the segment
+    part of a recorded address is notation). `[rebuild.frames]` remains the way to pin a frame by hand.
 
 ## Consequences
 

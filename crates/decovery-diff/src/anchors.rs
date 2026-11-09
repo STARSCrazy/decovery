@@ -2,9 +2,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use decovery_core::{Address, Program};
+use decovery_core::{Address, Program, RelocKind};
 use decovery_objects::{Frame, ObjReloc, ObjectModule, RefTarget, SectionKind};
 
+use crate::compare::relocation_at;
 use crate::{Anchor, AnchorSource, Blocker};
 
 /// Frame of 32-bit section anchors: the flat model has one frame with base 0.
@@ -58,6 +59,7 @@ pub(crate) fn frame_name(module: &ObjectModule, reloc: &ObjReloc) -> Option<Stri
                 .group_of(index)
                 .map(|g| g.name.clone())
                 .or_else(|| section_name(index)),
+            RefTarget::Group(ref name) => Some(name.clone()),
             _ => None,
         },
         _ => None,
@@ -190,6 +192,7 @@ impl Anchors {
         conditions: impl IntoIterator<Item = &'c Condition>,
         modules: &[&ObjectModule],
         config: &BTreeMap<String, Address>,
+        startup: &BTreeMap<String, Address>,
         program: &Program,
     ) -> Anchors {
         let mut frame_votes: BTreeMap<String, BTreeSet<(i64, i64)>> = BTreeMap::new();
@@ -237,8 +240,29 @@ impl Anchors {
                 ));
                 continue;
             };
+            if let Some(proven) = startup.get(name).and_then(|a| a.linear())
+                && proven != base
+            {
+                anchors.warnings.push(format!(
+                    "frame {name}: configured address {address} differs from the startup code's base {proven:#x}"
+                ));
+            }
             let votes = frame_votes.remove(name).unwrap_or_default();
             if let Some(t) = tally(&votes, Some(base as i64)) {
+                anchors.frames.insert(name.clone(), t);
+            }
+        }
+        // the bases proven by the startup code (ADR 0006 item 10), unless configured
+        for (name, address) in startup {
+            if anchors.frames.contains_key(name) {
+                continue;
+            }
+            let Some(base) = address.linear() else {
+                continue;
+            };
+            let votes = frame_votes.remove(name).unwrap_or_default();
+            if let Some(mut t) = tally(&votes, Some(base as i64)) {
+                t.source = AnchorSource::Startup;
                 anchors.frames.insert(name.clone(), t);
             }
         }
@@ -404,4 +428,122 @@ impl Anchors {
         }
         out
     }
+}
+
+/// Frame bases proven by the program's startup code: [`startup_frames`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct StartupFrames {
+    /// Base of each frame named by a selector field of the startup code.
+    pub frames: BTreeMap<String, Address>,
+    /// Why the startup code gave no frames, or which frames it left out.
+    pub warnings: Vec<String>,
+}
+
+/// The frame bases the startup object `startup` proves in `program` (ADR 0006 item 10). The object's start address
+/// (OMF `MODEND`) is placed at the program's entry point; its code section must equal the original there outside
+/// its own fixup fields, and each of its 16-bit selector fields must have a segment relocation of the original at
+/// the same place. The original's segment value then is the base of the field's frame. A frame whose fields give
+/// different values gets no base. Never fails: without a base the result says why.
+pub fn startup_frames(startup: &ObjectModule, program: &Program) -> StartupFrames {
+    let mut out = StartupFrames::default();
+    let refuse = |out: &mut StartupFrames, why: String| {
+        out.warnings.push(format!(
+            "startup {}: {why}; no frame bases taken from it",
+            startup.name
+        ));
+    };
+    let Some((index, start)) = startup.start else {
+        refuse(&mut out, "no start address".to_string());
+        return out;
+    };
+    let Some(section) = startup
+        .sections
+        .get(index as usize)
+        .filter(|s| s.kind == SectionKind::Code && s.bits == 16)
+    else {
+        refuse(
+            &mut out,
+            "the start is not in a 16-bit code section".to_string(),
+        );
+        return out;
+    };
+    let Some(&entry) = program.entry_points.first() else {
+        refuse(&mut out, "the program has no entry point".to_string());
+        return out;
+    };
+    let Ok(section_at) = entry.offset_by(-i64::from(start)) else {
+        refuse(
+            &mut out,
+            format!("its start offset {start:#x} lies before the program entry {entry}"),
+        );
+        return out;
+    };
+    let Some(original) = program.read(section_at, section.data.len()) else {
+        refuse(
+            &mut out,
+            format!(
+                "its code ({} bytes) does not fit the program at {section_at}",
+                section.data.len()
+            ),
+        );
+        return out;
+    };
+    let gaps: BTreeSet<usize> = section
+        .relocs
+        .iter()
+        .flat_map(|r| r.offset as usize..r.offset as usize + usize::from(r.width))
+        .collect();
+    let differing = section
+        .data
+        .iter()
+        .zip(original)
+        .enumerate()
+        .filter(|&(i, (a, b))| a != b && !gaps.contains(&i))
+        .count();
+    if differing > 0 {
+        refuse(
+            &mut out,
+            format!("{differing} bytes differ from the original at the program entry {entry}"),
+        );
+        return out;
+    }
+    let mut bases: BTreeMap<String, BTreeSet<u64>> = BTreeMap::new();
+    for r in section
+        .relocs
+        .iter()
+        .filter(|r| r.kind == RelocKind::Selector && r.width == 2)
+    {
+        let Ok(field_at) = section_at.offset_by(i64::from(r.offset)) else {
+            continue;
+        };
+        let Some(base) = relocation_at(program, field_at)
+            .filter(|s| s.kind == RelocKind::Selector && s.width == 2)
+            .and_then(|s| s.target.linear())
+        else {
+            refuse(
+                &mut out,
+                format!("the original has no segment relocation at {field_at}"),
+            );
+            return out;
+        };
+        if let Some(frame) = frame_name(startup, r) {
+            bases.entry(frame).or_default().insert(base);
+        }
+    }
+    for (frame, values) in bases {
+        let mut values = values.into_iter();
+        match (values.next(), values.next()) {
+            (Some(base), None) => {
+                if let Some(at) = address_at(base as i64, false) {
+                    out.frames.insert(frame, at);
+                }
+            }
+            _ => out.warnings.push(format!(
+                "startup {}: its selector fields give frame {frame} different bases; none taken",
+                startup.name
+            )),
+        }
+    }
+    out
 }

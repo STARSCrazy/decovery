@@ -483,7 +483,13 @@ pub fn compare_module(
             Outcome::Decided(_) => None,
         })
         .flatten();
-    let anchors = Anchors::collect(conditions, &modules, &options.frames, program);
+    let anchors = Anchors::collect(
+        conditions,
+        &modules,
+        &options.frames,
+        &options.startup_frames,
+        program,
+    );
     let functions = prepared
         .into_par_iter()
         .map(|p| p.finish(&anchors))
@@ -619,7 +625,13 @@ pub fn compare_module_with(
                 .filter(|(at, _)| !own_at.contains(at))
                 .flat_map(|(_, conditions)| conditions.iter()),
         );
-    let anchors = Anchors::collect(conditions, &modules, &options.frames, program);
+    let anchors = Anchors::collect(
+        conditions,
+        &modules,
+        &options.frames,
+        &options.startup_frames,
+        program,
+    );
     let functions = prepared
         .into_par_iter()
         .map(|p| p.finish(&anchors))
@@ -985,7 +997,7 @@ enum Target {
 }
 
 /// The original's relocation whose field starts exactly at `at`.
-fn relocation_at(program: &Program, at: Address) -> Option<&Relocation> {
+pub(crate) fn relocation_at(program: &Program, at: Address) -> Option<&Relocation> {
     program
         .relocations_in(at, 1)
         .iter()

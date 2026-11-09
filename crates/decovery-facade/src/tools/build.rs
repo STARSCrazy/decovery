@@ -6,8 +6,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use decovery_core::{
-    Address, Analysis, BlockerRecord, RebuildRecord, RebuildResult, VerdictId, Workspace,
-    merge_rebuild, read_rebuild, read_user_config, save_rebuild, today, write_atomic,
+    Address, Analysis, BlockerRecord, Program, RebuildRecord, RebuildResult, TargetFormat,
+    VerdictId, Workspace, merge_rebuild, read_rebuild, read_user_config, save_rebuild, today,
+    write_atomic,
 };
 use decovery_diff::{Blocker, Comparison, ModuleOptions, Placement, SymbolView, Verdict};
 use decovery_objects::{FunctionView, ObjectFile, functions, read_omf};
@@ -15,6 +16,7 @@ use decovery_plugin::Progress;
 use decovery_toolchain::{
     CheatFinding, CompiledFile, Profile, SourceJob, SourceSet, compile_planned, definitions,
     find_cheats, find_sources, open_runners, plan_compile, rebuild_profile, stage_text,
+    startup_object,
 };
 use serde_json::{Value, json};
 
@@ -55,6 +57,52 @@ pub(super) struct RunDir(pub(super) PathBuf);
 impl Drop for RunDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The frame bases the startup object of `[rebuild.link]` proves in the original (ADR 0006 item 10), for an MZ
+/// target; why the startup gives none goes into `warnings`.
+pub(super) fn startup_frames(
+    ws: &Workspace,
+    profile: &Profile,
+    program: &Program,
+    warnings: &mut Vec<String>,
+) -> BTreeMap<String, Address> {
+    if ws.config.target.format != TargetFormat::Mz {
+        return BTreeMap::new();
+    }
+    let path = match startup_object(ws, profile) {
+        Ok(Some(path)) => path,
+        Ok(None) => return BTreeMap::new(),
+        Err(e) => {
+            warnings.push(format!("no startup object for the frame bases: {e}"));
+            return BTreeMap::new();
+        }
+    };
+    let name = file_name(&path);
+    let object = match std::fs::read(&path) {
+        Ok(bytes) => read_omf(&bytes, &name).map_err(|e| e.to_string()),
+        Err(e) => Err(e.to_string()),
+    };
+    match object {
+        Ok(object) => match object.modules.first() {
+            Some(module) => {
+                let found = decovery_diff::startup_frames(module, program);
+                warnings.extend(found.warnings);
+                found.frames
+            }
+            None => {
+                warnings.push(format!("startup object {} has no module", path.display()));
+                BTreeMap::new()
+            }
+        },
+        Err(e) => {
+            warnings.push(format!(
+                "cannot read the startup object {}: {e}",
+                path.display()
+            ));
+            BTreeMap::new()
+        }
     }
 }
 
@@ -269,6 +317,7 @@ pub fn build(
         let program = crate::program::load(&ws)?;
         // the diagnosis reads the instruction pairs of the comparison: no second decode
         let options = ModuleOptions::new(profile.padding, rebuild.frames.clone())
+            .with_startup_frames(startup_frames(&ws, &profile, &program, &mut warnings))
             .with_diagnosis(profile.family.clone());
         let module = decovery_diff::compare_module(
             &placements,

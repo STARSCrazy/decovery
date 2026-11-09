@@ -7,7 +7,7 @@ use decovery_core::{
 };
 use decovery_diff::{
     Anchor, AnchorSource, Blocker, CompareOptions, Decoration, ModuleComparison, ModuleOptions,
-    NameAt, Placement, SymbolView, Verdict, compare, compare_module,
+    NameAt, Placement, SymbolView, Verdict, compare, compare_module, startup_frames,
 };
 use decovery_objects::{
     Frame, Group, ObjReloc, ObjSymbol, ObjectModule, RefTarget, Section, SectionKind, functions,
@@ -495,6 +495,204 @@ fn section_frame_is_the_section_itself() {
         c.functions[0].blockers,
         vec![Blocker::WrongAbsoluteRef { at: 7 }]
     );
+}
+
+// --- startup frames (ADR 0006 item 10) ---
+
+/// The startup object: `mov dx, DGROUP; ret`, its selector field targets the group (frame of the target), the start
+/// address at offset 0 of `_TEXT`.
+fn startup16(code: &[u8], selectors: &[u32]) -> ObjectModule {
+    let relocs = selectors
+        .iter()
+        .map(|&at| {
+            ObjReloc::new(
+                at,
+                2,
+                RelocKind::Selector,
+                RefTarget::Group("DGROUP".to_string()),
+                0,
+                Frame::Target,
+            )
+        })
+        .collect();
+    let mut m = ObjectModule::new(
+        "c0.obj",
+        vec![Section::new(
+            "_TEXT",
+            "CODE",
+            SectionKind::Code,
+            16,
+            code.to_vec(),
+            relocs,
+        )],
+        vec![],
+    );
+    m.groups = vec![Group::new("DGROUP", vec![])];
+    m.start = Some((0, 0));
+    m
+}
+
+const STARTUP: &[u8] = &[0xBA, 0, 0, 0xC3];
+/// The original's startup at `seg:0010:0000` (the entry point), loading segment 0x0200 (MZ relocation at the field).
+const STARTUP_AT: usize = 0x100;
+
+fn segment_reloc(at: usize, segment: u16) -> Relocation {
+    Relocation::new(
+        seg(0x10, (at - STARTUP_AT) as u16),
+        RelocKind::Selector,
+        2,
+        seg(segment, 0),
+        0,
+    )
+}
+
+/// `mov ax,offset _DATA+0; mov dx,offset _DATA+3; ret`: only unnamed references, no named global and no selector;
+/// the original's fields are 0x40 and 0x43, its `_DATA` bytes `strings` at linear 0x2040, its startup code
+/// `startup` at the entry point with the given segment relocations.
+fn unnamed_case(
+    strings: &[u8],
+    startup: &[u8],
+    relocations: Vec<Relocation>,
+) -> (ObjectModule, Program) {
+    let code: &[u8] = &[0xB8, 0, 0, 0xBA, 3, 0, 0xC3];
+    let m = module16(&[code], vec![off16(1, data_at(0)), off16(4, data_at(0))]);
+    let original: &[u8] = &[0xB8, 0x40, 0, 0xBA, 0x43, 0, 0xC3];
+    let mut p = program16(
+        &[original],
+        &[(0x2040, strings), (STARTUP_AT, startup)],
+        relocations,
+    );
+    p.entry_points = vec![seg(0x10, 0)];
+    (m, p)
+}
+
+fn with_startup(frames: BTreeMap<String, Address>) -> ModuleOptions {
+    ModuleOptions::default().with_startup_frames(frames)
+}
+
+#[test]
+fn startup_frame_checks_unnamed_references() {
+    let (m, p) = unnamed_case(
+        DATA,
+        &[0xBA, 0x00, 0x02, 0xC3],
+        vec![segment_reloc(STARTUP_AT + 1, 0x200)],
+    );
+    // without a frame base the strings are not compared
+    let before = run16(&m, &p, &Symbols::default(), &ModuleOptions::default());
+    assert_eq!(before.warnings.len(), 1, "{:?}", before.warnings);
+    assert!(before.warnings[0].contains("frame DGROUP has no anchor"));
+
+    let found = startup_frames(&startup16(STARTUP, &[1]), &p);
+    assert!(found.warnings.is_empty(), "{:?}", found.warnings);
+    assert_eq!(
+        found.frames,
+        BTreeMap::from([("DGROUP".to_string(), seg(0x200, 0))])
+    );
+    let c = run16(&m, &p, &Symbols::default(), &with_startup(found.frames));
+    assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+    assert_eq!(c.functions[0].verdict, Verdict::Identical);
+    let a = anchor(&c, "DGROUP", None);
+    assert_eq!(
+        (a.base, a.votes, a.source),
+        (0x2000, 0, AnchorSource::Startup)
+    );
+    assert_eq!(anchor(&c, "DGROUP", Some("_DATA")).base, 0x40);
+}
+
+#[test]
+fn wrong_string_differs_under_startup_frame() {
+    // the original's second string is "cXef": the rebuild's "cdef" is a wrong item
+    let (m, p) = unnamed_case(
+        b"ab\0cXef\0",
+        &[0xBA, 0x00, 0x02, 0xC3],
+        vec![segment_reloc(STARTUP_AT + 1, 0x200)],
+    );
+    let found = startup_frames(&startup16(STARTUP, &[1]), &p);
+    let c = run16(&m, &p, &Symbols::default(), &with_startup(found.frames));
+    assert_eq!(c.functions[0].verdict, Verdict::Differs);
+    assert_eq!(
+        c.functions[0].blockers,
+        vec![Blocker::WrongAbsoluteRef { at: 4 }]
+    );
+}
+
+#[test]
+fn startup_unlike_the_original_gives_no_frame() {
+    // another startup (`mov cx, …`) at the entry: its selector proves nothing, the strings stay uncompared
+    let (m, p) = unnamed_case(
+        b"ab\0cXef\0",
+        &[0xB9, 0x00, 0x02, 0xC3],
+        vec![segment_reloc(STARTUP_AT + 1, 0x200)],
+    );
+    let found = startup_frames(&startup16(STARTUP, &[1]), &p);
+    assert!(found.frames.is_empty());
+    assert!(
+        found.warnings[0].contains("1 bytes differ"),
+        "{:?}",
+        found.warnings
+    );
+    let c = run16(&m, &p, &Symbols::default(), &with_startup(found.frames));
+    assert!(
+        c.anchors.iter().all(|a| a.section.is_some()),
+        "{:?}",
+        c.anchors
+    );
+    assert!(c.warnings[0].contains("frame DGROUP has no anchor"));
+}
+
+#[test]
+fn startup_selector_without_segment_relocation_gives_no_frame() {
+    let (_, p) = unnamed_case(DATA, &[0xBA, 0x00, 0x02, 0xC3], vec![]);
+    let found = startup_frames(&startup16(STARTUP, &[1]), &p);
+    assert!(found.frames.is_empty());
+    assert!(
+        found.warnings[0].contains("no segment relocation"),
+        "{:?}",
+        found.warnings
+    );
+}
+
+#[test]
+fn startup_selectors_disagreeing_give_no_frame() {
+    // `mov dx, DGROUP; mov ax, DGROUP; ret`, the original loads two different segments
+    let code: &[u8] = &[0xBA, 0, 0, 0xB8, 0, 0, 0xC3];
+    let (_, p) = unnamed_case(
+        DATA,
+        &[0xBA, 0x00, 0x02, 0xB8, 0x10, 0x02, 0xC3],
+        vec![
+            segment_reloc(STARTUP_AT + 1, 0x200),
+            segment_reloc(STARTUP_AT + 4, 0x210),
+        ],
+    );
+    let found = startup_frames(&startup16(code, &[1, 4]), &p);
+    assert!(found.frames.is_empty());
+    assert!(
+        found.warnings[0].contains("different bases"),
+        "{:?}",
+        found.warnings
+    );
+}
+
+#[test]
+fn configured_frame_overrides_startup_frame() {
+    let (m, p) = unnamed_case(
+        DATA,
+        &[0xBA, 0x00, 0x02, 0xC3],
+        vec![segment_reloc(STARTUP_AT + 1, 0x200)],
+    );
+    let found = startup_frames(&startup16(STARTUP, &[1]), &p);
+    let mut options = with_startup(found.frames);
+    options.frames.insert("DGROUP".to_string(), seg(0x201, 0));
+    let c = run16(&m, &p, &Symbols::default(), &options);
+    let a = anchor(&c, "DGROUP", None);
+    assert_eq!((a.base, a.source), (0x2010, AnchorSource::Config));
+    assert!(
+        c.warnings[0].contains("differs from the startup"),
+        "{:?}",
+        c.warnings
+    );
+    // the strings are compared at the configured base, where they are not
+    assert_eq!(c.functions[0].verdict, Verdict::Differs);
 }
 
 // --- 32-bit ---

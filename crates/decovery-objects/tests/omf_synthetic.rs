@@ -427,6 +427,27 @@ fn undefined_frame_thread_is_unknown() {
     assert_eq!(f.modules[0].sections[0].relocs[0].frame, Frame::Unknown);
 }
 
+#[test]
+fn modend_start_and_group_target() {
+    // startup-like: `mov dx, DGROUP; ret`, the selector targets group 1 (T1) with frame F5; the start address is
+    // SEGDEF 1 + 2 (frame F0 SEGDEF 1, target T0 SEGDEF 1, displacement 2)
+    let mut parts = grouped();
+    parts.push(ledata(1, 0, &[0xBA, 0, 0, 0xC3]));
+    parts.push(rec(0x9C, &[0xC8, 0x01, 0x55, 0x01]));
+    parts.push(rec(0x8A, &[0xC1, 0x00, 0x01, 0x01, 0x02, 0x00]));
+    let f = read_omf(&parts.concat(), "c0.obj").unwrap();
+    let m = &f.modules[0];
+    assert_eq!(m.start, Some((0, 2)));
+    let r = &m.sections[0].relocs[0];
+    assert_eq!((r.offset, r.width, r.kind), (1, 2, RelocKind::Selector));
+    assert_eq!(r.target, RefTarget::Group("DGROUP".into()));
+    assert_eq!(r.frame, Frame::Target);
+
+    // a module without a start address
+    let f = read_omf(&obj(&grouped()), "t.obj").unwrap();
+    assert_eq!(f.modules[0].start, None);
+}
+
 mod writer {
     use decovery_core::RelocKind;
     use decovery_objects::{

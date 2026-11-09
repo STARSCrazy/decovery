@@ -40,7 +40,9 @@
 //! placements of one comparison; 16-bit selector fields against the frame anchor's segment. A 32-bit field whose
 //! target is an unnamed position in another section (a string in `CONST`) is checked against a section anchor.
 //! A dissenting field whose item equals the original at the position the field proposes (the item is unchanged,
-//! only the section's layout moved it) is a [`Blocker::DataLayout`] instead of a wrong reference.
+//! only the section's layout moved it) is a [`Blocker::DataLayout`] instead of a wrong reference. A frame base can
+//! also come from the program's startup code ([`startup_frames`]): the toolchain's startup object, placed at the
+//! program entry and equal to the original there, names the frame of each segment relocation of the original.
 //! [`compare`] is [`compare_module`] with one placement.
 //!
 //! **Diagnosis** ([`diagnose`], port of the generic rules of Decomp's `nachbau/diagnose.py`) reads the aligned
@@ -69,6 +71,7 @@ use std::collections::BTreeMap;
 use decovery_core::Address;
 use decovery_objects::FunctionView;
 
+pub use anchors::{StartupFrames, startup_frames};
 pub use classify::{DeviationKind, Stage, classify_code, classify_deviation};
 pub use compare::{
     InsertCode, SharedFunctions, compare, compare_module, compare_module_with, insert_code,
@@ -314,6 +317,9 @@ pub struct ModuleOptions {
     /// Frame bases fixed by configuration (`[rebuild.frames]`), by frame name (group or section); they override
     /// the consensus.
     pub frames: BTreeMap<String, Address>,
+    /// Frame bases proven by the program's startup code ([`startup_frames`], ADR 0006 item 10); they override the
+    /// consensus, a configured frame overrides them.
+    pub startup_frames: BTreeMap<String, Address>,
     /// Compiler family (`turbo-c`, `watcom`) to diagnose differing functions for, from the instruction pairs the
     /// comparison already has ([`Comparison::diagnoses`]); `None` skips the diagnosis.
     pub diagnosis: Option<String>,
@@ -324,8 +330,15 @@ impl ModuleOptions {
         ModuleOptions {
             padding,
             frames,
+            startup_frames: BTreeMap::new(),
             diagnosis: None,
         }
+    }
+
+    /// The same options with the frame bases proven by the startup code ([`startup_frames`]).
+    pub fn with_startup_frames(mut self, frames: BTreeMap<String, Address>) -> Self {
+        self.startup_frames = frames;
+        self
     }
 
     /// The same options with the diagnosis for compiler `family`.
@@ -340,6 +353,8 @@ impl ModuleOptions {
 #[non_exhaustive]
 pub enum AnchorSource {
     Config,
+    /// The selector fields of the program's startup code ([`startup_frames`]).
+    Startup,
     Consensus,
 }
 

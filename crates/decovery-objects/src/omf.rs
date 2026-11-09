@@ -202,6 +202,8 @@ struct State {
     current: Current,
     pending: Vec<Pending>,
     easy: bool,
+    /// MODEND start address: section index (0-based) and offset.
+    start: Option<(u32, u32)>,
 }
 
 fn read_module(
@@ -221,6 +223,7 @@ fn read_module(
         current: Current::None,
         pending: Vec::new(),
         easy: false,
+        start: None,
     };
     let mut name = file_name.to_string();
     let mut i = 0;
@@ -297,6 +300,8 @@ fn read_module(
                 st.current = Current::Skip;
             }
             0x9C | 0x9D => fixupp(&mut st, &mut rd, gross)?,
+            // a start address the reader cannot follow is left out, the module itself still reads
+            0x8A | 0x8B => st.start = modend(&st, &mut rd, gross).unwrap_or(None),
             _ if !KNOWN.contains(&t) => *unknown.entry(t).or_insert(0) += 1,
             _ => {}
         }
@@ -518,6 +523,39 @@ fn fixupp(st: &mut State, rd: &mut Rd, gross: bool) -> Result<(), ObjectError> {
     Ok(())
 }
 
+/// The start address of a main module: kept when it names a segment of the module (target method T0/T4); a start
+/// at an external symbol or a group is left out.
+fn modend(st: &State, rd: &mut Rd, gross: bool) -> Result<Option<(u32, u32)>, ObjectError> {
+    if rd.at_end() {
+        return Ok(None);
+    }
+    let module_type = rd.u8()?;
+    if module_type & 0x40 == 0 {
+        return Ok(None);
+    }
+    let fd = rd.u8()?;
+    if fd & 0x80 == 0 && (fd >> 4) & 7 < 3 {
+        rd.index()?; // frame datum
+    }
+    let (method, index) = if fd & 0x08 != 0 {
+        match st.threads[usize::from(fd & 3)] {
+            Some((m, i)) => (Some(m), i),
+            None => (None, 0),
+        }
+    } else {
+        (Some(fd & 3), rd.index()?)
+    };
+    let disp = if fd & 0x04 == 0 {
+        rd.uint(if gross { 4 } else { 2 })?
+    } else {
+        0
+    };
+    Ok(
+        (method == Some(0) && (1..=st.sections.len() as u32).contains(&index))
+            .then(|| (index - 1, disp)),
+    )
+}
+
 fn finish(name: String, mut st: State) -> ObjectModule {
     let pending = std::mem::take(&mut st.pending);
     for p in pending {
@@ -529,6 +567,10 @@ fn finish(name: String, mut st: State) -> ObjectModule {
             Some(2) if p.index > 0 && (p.index as usize) < st.exts.len() => {
                 RefTarget::Symbol(st.exts[p.index as usize].clone())
             }
+            Some(1) => match st.groups.get((p.index as usize).wrapping_sub(1)) {
+                Some(g) => RefTarget::Group(g.name.clone()),
+                None => RefTarget::Unknown,
+            },
             _ => RefTarget::Unknown,
         };
         let addend = match target {
@@ -563,5 +605,6 @@ fn finish(name: String, mut st: State) -> ObjectModule {
         sections: st.sections,
         symbols: st.symbols,
         groups: st.groups,
+        start: st.start,
     }
 }

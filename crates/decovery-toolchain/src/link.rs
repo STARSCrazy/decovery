@@ -1,6 +1,6 @@
 //! Linking compiled objects into a program with the profile's linker, in one runner job.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use decovery_core::{LinkConfig, Workspace, read_user_config};
@@ -127,4 +127,32 @@ pub(crate) fn run_linker(
         }
     };
     Ok((linked, warnings))
+}
+
+/// The host path of the startup object `[rebuild.link]` links in (`startup`, default [`DEFAULT_STARTUP`]): the
+/// profile's library directory on the tool drive `D:` inside the tool directory. `None` when the workspace has no
+/// `[rebuild.link]`, the profile no linker, or the library directory is not on `D:`.
+pub fn startup_object(
+    ws: &Workspace,
+    profile: &Profile,
+) -> Result<Option<PathBuf>, ToolchainError> {
+    let (Some(config), Some(linker)) = (
+        ws.config.rebuild.as_ref().and_then(|r| r.link.as_ref()),
+        profile.linker.as_ref(),
+    ) else {
+        return Ok(None);
+    };
+    let Some(library) = linker
+        .library_dir
+        .strip_prefix("D:")
+        .or_else(|| linker.library_dir.strip_prefix("d:"))
+    else {
+        return Ok(None);
+    };
+    let user = read_user_config().map_err(|e| ToolchainError::Invalid(e.to_string()))?;
+    let mut path = tool_dir(profile, ws.config.rebuild.as_ref(), &user, &ws.root)?;
+    path.extend(library.split(['\\', '/']).filter(|p| !p.is_empty()));
+    let startup = config.startup.as_deref().unwrap_or(DEFAULT_STARTUP);
+    path.push(format!("{startup}.{}", profile.object_extension));
+    Ok(Some(path))
 }

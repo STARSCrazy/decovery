@@ -25,7 +25,7 @@ pub use le_link::{
     LE_STUB_FILE, SegmentPlan, build_insert, le_linker, le_module, link_le, module_name,
     response_file, segment_plan, usable_inserts,
 };
-pub use link::{DEFAULT_STARTUP, Linked, link};
+pub use link::{DEFAULT_STARTUP, Linked, link, startup_object};
 pub use runner::{
     JobOutcome, JobStatus, Mount, NativeRunner, PluginRunner, RunJob, RunRequest, Runner,
     RunnerError, open_runners, run_with_fallback, run_with_fallback_reporting,
