@@ -356,6 +356,9 @@ pub enum AnchorSource {
     /// The selector fields of the program's startup code ([`startup_frames`]).
     Startup,
     Consensus,
+    /// A section without agreed votes whose bytes occur exactly once in its frame, at the position one of its
+    /// votes names (ADR 0006 item 4, amendment 2026-11-09).
+    Content,
 }
 
 /// A frame anchor (`section` is `None`: linear base of the frame) or a section anchor (offset of the OBJ section

@@ -57,6 +57,26 @@ functions it compares (`compare_module`: first pass collects, second pass checks
    while the right one became `DataLayout`. 32-bit frames are flat (base 0) and never take a consensus; 32-bit
    section anchors follow the section rule. On the first parity target five functions whose module holds a single
    reference into its constant data became `unchecked-ref` (`docs/parity/phase-2.md`).
+   *Amendment 2026-11-09 (content anchor):* a section without agreed votes is anchored by its own bytes when they
+   name exactly one position. The pattern is the section's initialised bytes with every byte of its own fixup
+   fields as a wildcard; it needs at least 4 bytes that are not wildcards, not all of them equal. When the frame
+   base is known (configured, startup, consensus; 32-bit: base 0) and the pattern occurs exactly once in the
+   original inside the frame (16-bit: occurrences starting in the 64 KiB from the frame base; 32-bit: the whole
+   program), and that occurrence starts at `frame + candidate` of one of the section's votes, the section anchor
+   is that candidate (source `content`). The section is then judged as an agreed one: fields proposing the
+   candidate are checked by item 5, the other votes are dissent (`WrongAbsoluteRef`, or `DataLayout` under item 8),
+   and the anchor appears in the result without a warning. Otherwise the section keeps no anchor (warning,
+   `UncheckedRef`). A tie with such content goes to the candidate where the content lies, not to the lowest one.
+   One scan per unagreed section over its frame, filtered on the first byte that is not a wildcard; never per
+   field.
+   Why it is sound: the evidence is the whole section, not the referenced item. An item with the same bytes
+   elsewhere can still exist, but the complete section, in the rebuild's order, cannot occur at a second place
+   without failing uniqueness, and the position must also be one a field names, so a field pointing at another
+   copy or at unrelated bytes is not confirmed. Short or uniform sections (a few bytes, zero fill) are excluded
+   because such patterns recur by chance. It differs from the search item 10 rejects: that search would pick a
+   frame base wherever the rebuild's bytes happen to match; here the frame base is already fixed and the content
+   only has to agree with a position a vote names. On the first parity target the five `unchecked-ref` functions
+   of the previous amendment became `identical`; no function Decomp records as differing became identical.
 5. **Item bytes.** When the frame anchor is known, the bytes of each referenced item of an anchored data section
    must equal the original at `frame + section anchor + item offset`. An item reaches from its referenced offset to
    the next boundary: the next distinct referenced offset into the same section (over all compared functions of
@@ -130,7 +150,8 @@ functions it compares (`compare_module`: first pass collects, second pass checks
 
 - A single function compared alone (`compare`) anchors only on its own fields; one reference to one variable
   stays unchecked (item 4, amendment 2026-11-09) unless a configured or startup base decides its frame; a lone
-  reference into a section stays unchecked as well. The check
+  reference into a section stays unchecked as well, unless the section's content anchors it (item 4, content
+  anchor). The check
   grows stronger with the number of functions compared together, which is why `build` compares whole OBJs
   (`compare_module`) and why a frame can be pinned in `[rebuild.frames]`.
 - A rebuild that consistently refers to the wrong variable in most of its fields moves the consensus; the

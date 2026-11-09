@@ -861,6 +861,11 @@ fn flat_results_unchanged() {
 
 /// `mov eax,offset CONST+0; ret` against an original whose relocation points at `strings`.
 fn flat_string_case(strings: &[u8]) -> ModuleComparison {
+    flat_section_case(b"hi\0", strings)
+}
+
+/// `mov eax, offset CONST` with `CONST` holding `section`; the original holds `strings` at 0x20010.
+fn flat_section_case(section: &[u8], strings: &[u8]) -> ModuleComparison {
     let m = ObjectModule::new(
         "t.c",
         vec![
@@ -884,7 +889,7 @@ fn flat_string_case(strings: &[u8]) -> ModuleComparison {
                 "DATA",
                 SectionKind::Data,
                 32,
-                b"hi\0".to_vec(),
+                section.to_vec(),
                 vec![],
             ),
         ],
@@ -1559,7 +1564,8 @@ fn lone_flat_reference_into_bss_is_unchecked() {
 #[test]
 fn tied_section_votes_with_equal_items_are_not_identical() {
     // `_DATA` holds two words, both 1. f0 reads a (+0, right: the original reads 0x40), f1 reads b (+2) where the
-    // original also reads a: 1:1, and the lower base (0x3E) would make f1 identical by equal bytes
+    // original also reads a: 1:1, and the lower base (0x3E) would make f1 identical by equal bytes. A second copy of
+    // the section's bytes at 0x100 keeps its content from naming the position.
     let mut m = module16(
         &[&load(0), &load(2)],
         vec![off16(1, data_at(0)), off16(9, data_at(0))],
@@ -1567,7 +1573,7 @@ fn tied_section_votes_with_equal_items_are_not_identical() {
     m.sections[1].data = vec![1, 0, 1, 0];
     let p = program16(
         &[&load(0x40), &load(0x40)],
-        &[(0x2040, &[1, 0, 1, 0])],
+        &[(0x2040, &[1, 0, 1, 0]), (0x2100, &[1, 0, 1, 0])],
         vec![],
     );
     let mut options = ModuleOptions::default();
@@ -1632,7 +1638,13 @@ fn tied_flat_section_votes_with_equal_items_are_not_identical() {
     ];
     let p = flat_program(
         &original,
-        &[1, 0, 0, 0, 1, 0, 0, 0],
+        // a second copy of the section's bytes keeps its content from naming the position
+        &[
+            [1, 0, 0, 0, 1, 0, 0, 0],
+            [0xCC; 8],
+            [1, 0, 0, 0, 1, 0, 0, 0],
+        ]
+        .concat(),
         vec![absolute(AT + 1, 0x20000), absolute(AT + 9, 0x20000)],
     );
     let placements: Vec<Placement> = functions(&m)
@@ -1650,4 +1662,254 @@ fn tied_flat_section_votes_with_equal_items_are_not_identical() {
         assert_eq!(f.blockers, vec![Blocker::UncheckedRef { at: 1 }]);
     }
     assert!(c.anchors.is_empty(), "{:?}", c.anchors);
+}
+
+// --- section anchor by unique content (ADR 0006 item 4, amendment 2026-11-09, content anchor) ---
+
+/// `_DATA` holds `section` (its own fixups `section_relocs`, extra symbols at `data_symbols`); function `i` loads
+/// `_DATA + rels[i].0`, its original field is `rels[i].1`. DGROUP is configured at 0x2000; `extra` bytes are
+/// written into the original image at their linear addresses.
+fn content16_case(
+    section: &[u8],
+    section_relocs: Vec<ObjReloc>,
+    data_symbols: &[u32],
+    rels: &[(u16, u16)],
+    extra: &[(usize, &[u8])],
+) -> ModuleComparison {
+    let codes: Vec<Vec<u8>> = rels.iter().map(|&(rel, _)| load(rel)).collect();
+    let code_refs: Vec<&[u8]> = codes.iter().map(Vec::as_slice).collect();
+    let relocs = (0..rels.len() as u32)
+        .map(|i| off16(8 * i + 1, data_at(0)))
+        .collect();
+    let mut m = module16(&code_refs, relocs);
+    m.sections[1].data = section.to_vec();
+    m.sections[1].relocs = section_relocs;
+    for (i, &offset) in data_symbols.iter().enumerate() {
+        m.symbols
+            .push(ObjSymbol::new(format!("d{i}_"), 1, offset, false));
+    }
+    let originals: Vec<Vec<u8>> = rels.iter().map(|&(_, field)| load(field)).collect();
+    let original_refs: Vec<&[u8]> = originals.iter().map(Vec::as_slice).collect();
+    let p = program16(&original_refs, extra, vec![]);
+    let mut options = ModuleOptions::default();
+    options.frames.insert("DGROUP".to_string(), seg(0x200, 0));
+    run16(&m, &p, &Symbols::default(), &options)
+}
+
+const HELLO: &[u8] = b"hello\0";
+
+fn no_section_anchor(c: &ModuleComparison) {
+    assert!(
+        c.anchors.iter().all(|a| a.section.is_none()),
+        "{:?}",
+        c.anchors
+    );
+    assert!(
+        c.warnings
+            .iter()
+            .any(|w| w.contains("section _DATA has no anchor")),
+        "{:?}",
+        c.warnings
+    );
+}
+
+#[test]
+fn lone_vote_with_unique_section_content_is_anchored() {
+    // 16-bit: the whole of `_DATA` occurs once in DGROUP, at the position the lone field names
+    let c = content16_case(HELLO, vec![], &[], &[(0, 0x40)], &[(0x2040, HELLO)]);
+    assert_eq!(
+        c.functions[0].verdict,
+        Verdict::Identical,
+        "{:?}",
+        c.functions[0].blockers
+    );
+    let a = anchor(&c, "DGROUP", Some("_DATA"));
+    assert_eq!(
+        (a.base, a.votes, a.dissent, a.source),
+        (0x40, 1, 0, AnchorSource::Content)
+    );
+    assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+
+    // flat: the same with the frame base 0
+    let c = flat_section_case(HELLO, HELLO);
+    assert_eq!(
+        c.functions[0].verdict,
+        Verdict::Identical,
+        "{:?}",
+        c.functions[0].blockers
+    );
+    let a = anchor(&c, "FLAT", Some("CONST"));
+    assert_eq!(
+        (a.base, a.votes, a.dissent, a.source),
+        (0x20010, 1, 0, AnchorSource::Content)
+    );
+    assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+}
+
+#[test]
+fn lone_vote_with_repeated_section_content_stays_unchecked() {
+    // a second copy of the section's bytes in DGROUP: the content names no position
+    let c = content16_case(
+        HELLO,
+        vec![],
+        &[],
+        &[(0, 0x40)],
+        &[(0x2040, HELLO), (0x2100, HELLO)],
+    );
+    assert_eq!(
+        c.functions[0].blockers,
+        vec![Blocker::UncheckedRef { at: 1 }]
+    );
+    no_section_anchor(&c);
+
+    // flat: a second copy further on in the program
+    let mut strings = HELLO.to_vec();
+    strings.resize(0x40, 0xCC);
+    strings.extend_from_slice(HELLO);
+    let c = flat_section_case(HELLO, &strings);
+    assert_eq!(
+        c.functions[0].blockers,
+        vec![Blocker::UncheckedRef { at: 1 }]
+    );
+    assert!(c.anchors.is_empty(), "{:?}", c.anchors);
+}
+
+#[test]
+fn short_section_content_stays_unchecked() {
+    // fewer than 4 bytes
+    let c = content16_case(b"hi\0", vec![], &[], &[(0, 0x40)], &[(0x2040, b"hi\0")]);
+    assert_eq!(
+        c.functions[0].blockers,
+        vec![Blocker::UncheckedRef { at: 1 }]
+    );
+    no_section_anchor(&c);
+
+    // 5 bytes, 2 of them a fixup field: fewer than 4 bytes that are not wildcards
+    let section_relocs = vec![ObjReloc::new(
+        1,
+        2,
+        RelocKind::Absolute,
+        sym("_x"),
+        0,
+        Frame::Group("DGROUP".to_string()),
+    )];
+    let c = content16_case(
+        &[1, 0, 0, 2, 3],
+        section_relocs,
+        &[],
+        &[(0, 0x40)],
+        &[(0x2040, &[1, 0xAB, 0xCD, 2, 3])],
+    );
+    assert_eq!(
+        c.functions[0].blockers,
+        vec![Blocker::UncheckedRef { at: 1 }]
+    );
+    no_section_anchor(&c);
+
+    // all bytes equal: a fill pattern, not content
+    let c = content16_case(&[7; 8], vec![], &[], &[(0, 0x40)], &[(0x2040, &[7; 8])]);
+    assert_eq!(
+        c.functions[0].blockers,
+        vec![Blocker::UncheckedRef { at: 1 }]
+    );
+    no_section_anchor(&c);
+}
+
+#[test]
+fn content_found_elsewhere_than_the_vote_stays_unchecked() {
+    // `_DATA` is "he" (referenced) and "llo\0" (a symbol of its own). The field names 0x40, where the original
+    // holds "he" but then other bytes; the whole section lies once at 0x80. The content names a position no vote
+    // proposes: no anchor.
+    let c = content16_case(
+        HELLO,
+        vec![],
+        &[2],
+        &[(0, 0x40)],
+        &[(0x2040, b"heXYZ\0"), (0x2080, HELLO)],
+    );
+    assert_eq!(
+        c.functions[0].blockers,
+        vec![Blocker::UncheckedRef { at: 1 }]
+    );
+    no_section_anchor(&c);
+}
+
+#[test]
+fn tie_with_unique_content_picks_the_matching_candidate() {
+    // f0 reads +0 and proposes 0x40, f1 reads +2 and proposes 0x30: 1:1. The section lies at 0x40, so f0 is right
+    // and f1 is wrong, although a tie-break would have taken the lower 0x30.
+    const SECTION: &[u8] = &[0x11, 0x22, 0x33, 0x44];
+    let c = content16_case(
+        SECTION,
+        vec![],
+        &[],
+        &[(0, 0x40), (2, 0x32)],
+        &[(0x2040, SECTION)],
+    );
+    assert_eq!(
+        c.functions[0].verdict,
+        Verdict::Identical,
+        "{:?}",
+        c.functions[0].blockers
+    );
+    assert_eq!(
+        c.functions[1].blockers,
+        vec![Blocker::WrongAbsoluteRef { at: 1 }]
+    );
+    let a = anchor(&c, "DGROUP", Some("_DATA"));
+    assert_eq!(
+        (a.base, a.votes, a.dissent, a.source),
+        (0x40, 1, 1, AnchorSource::Content)
+    );
+    assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+
+    // the section at 0x30: now f1 is right and f0 wrong
+    let c = content16_case(
+        SECTION,
+        vec![],
+        &[],
+        &[(0, 0x40), (2, 0x32)],
+        &[(0x2030, SECTION)],
+    );
+    assert_eq!(
+        c.functions[0].blockers,
+        vec![Blocker::WrongAbsoluteRef { at: 1 }]
+    );
+    assert_eq!(
+        c.functions[1].verdict,
+        Verdict::Identical,
+        "{:?}",
+        c.functions[1].blockers
+    );
+    assert_eq!(anchor(&c, "DGROUP", Some("_DATA")).base, 0x30);
+}
+
+#[test]
+fn fixup_bytes_in_section_are_wildcards() {
+    // `_DATA` holds a pointer at offset 2; the original's bytes there are its loaded value
+    let section_relocs = vec![ObjReloc::new(
+        2,
+        2,
+        RelocKind::Absolute,
+        sym("_x"),
+        0,
+        Frame::Group("DGROUP".to_string()),
+    )];
+    let c = content16_case(
+        &[0x11, 0x22, 0, 0, 0x33, 0x44],
+        section_relocs,
+        &[],
+        &[(0, 0x40)],
+        &[(0x2040, &[0x11, 0x22, 0xAB, 0xCD, 0x33, 0x44])],
+    );
+    assert_eq!(
+        c.functions[0].verdict,
+        Verdict::Identical,
+        "{:?}",
+        c.functions[0].blockers
+    );
+    assert_eq!(
+        anchor(&c, "DGROUP", Some("_DATA")).source,
+        AnchorSource::Content
+    );
 }

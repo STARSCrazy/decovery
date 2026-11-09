@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use decovery_core::{Address, Program, RelocKind};
-use decovery_objects::{Frame, ObjReloc, ObjectModule, RefTarget, SectionKind};
+use decovery_objects::{Frame, ObjReloc, ObjectModule, RefTarget, Section, SectionKind};
 
 use crate::compare::relocation_at;
 use crate::{Anchor, AnchorSource, Blocker};
@@ -197,6 +197,78 @@ fn item_check(
     }
 }
 
+/// The position `section`'s own bytes give it (ADR 0006 item 4, amendment 2026-11-09, content anchor): the
+/// section's initialised bytes, its fixup fields as wildcards, must occur exactly once in the original inside the
+/// frame at linear `frame` (16-bit: the 64 KiB from `frame`; flat: the whole program), and there at the position
+/// one of `votes` (rel, candidate) names. At least 4 bytes must not be wildcards, and not all of them equal (a
+/// fill pattern names no position). One scan over the frame, filtered on the first byte that is not a wildcard.
+fn content_anchor(
+    section: &Section,
+    votes: &BTreeSet<(i64, i64)>,
+    frame: i64,
+    flat: bool,
+    program: &Program,
+) -> Option<i64> {
+    let pattern = &section.data;
+    let mut wild = vec![false; pattern.len()];
+    for r in &section.relocs {
+        let start = r.offset as usize;
+        let end = start.saturating_add(usize::from(r.width)).min(wild.len());
+        if start < end {
+            wild[start..end].fill(true);
+        }
+    }
+    let fixed: Vec<u8> = pattern
+        .iter()
+        .zip(&wild)
+        .filter(|&(_, &w)| !w)
+        .map(|(&b, _)| b)
+        .collect();
+    if fixed.len() < 4 || fixed.iter().all(|&b| b == fixed[0]) {
+        return None;
+    }
+    let lead = wild.iter().position(|&w| !w)?;
+    let matches = |bytes: &[u8]| {
+        bytes
+            .iter()
+            .zip(pattern)
+            .zip(&wild)
+            .all(|((a, b), &w)| w || a == b)
+    };
+    // occurrence starts lie in [frame, end)
+    let end = if flat { 1i64 << 32 } else { frame + 0x1_0000 };
+    let mut found = None;
+    for region in &program.regions {
+        let Some(start) = region.start.linear().and_then(|s| i64::try_from(s).ok()) else {
+            continue;
+        };
+        let data = &region.data;
+        let Some(last) = data.len().checked_sub(pattern.len()) else {
+            continue;
+        };
+        let lo = (frame - start).max(0);
+        let hi = (end - start).min(last as i64 + 1);
+        if lo >= hi {
+            continue;
+        }
+        let (lo, hi) = (lo as usize, hi as usize);
+        for i in lo..hi {
+            if data[i + lead] != pattern[lead] || !matches(&data[i..i + pattern.len()]) {
+                continue;
+            }
+            if found.is_some() {
+                return None;
+            }
+            found = Some(start + i as i64 - frame);
+        }
+    }
+    let candidate = found?;
+    votes
+        .iter()
+        .any(|&(_, c)| c == candidate)
+        .then_some(candidate)
+}
+
 #[derive(Debug)]
 struct SectionAnchor {
     tally: Tally,
@@ -344,7 +416,31 @@ impl Anchors {
                 .get(&(key.module, key.section))
                 .cloned()
                 .unwrap_or_default();
-            if !t.agreed() {
+            // without agreed votes the section's own bytes can name the position (content anchor); the section
+            // then is judged like an agreed one, the other votes being its dissent
+            let content = match (t.agreed(), checked, frame_base) {
+                (false, true, Some(frame)) => content_anchor(
+                    &module.sections[key.section as usize],
+                    &votes,
+                    frame,
+                    key.flat,
+                    program,
+                ),
+                _ => None,
+            };
+            let t = match content {
+                Some(base) => {
+                    let agreeing = votes.iter().filter(|&&(_, c)| c == base).count() as u32;
+                    Tally {
+                        base,
+                        votes: agreeing,
+                        dissent: votes.len() as u32 - agreeing,
+                        source: AnchorSource::Content,
+                    }
+                }
+                None => t,
+            };
+            if !t.agreed() && content.is_none() {
                 // no anchor (item 4, amendment 2026-11-09): a lone vote or a tie names no position; equal bytes at
                 // the field's own position can be another item with the same value
                 let wrong = match (checked, frame_base) {
