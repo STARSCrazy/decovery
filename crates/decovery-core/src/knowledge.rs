@@ -26,6 +26,8 @@ pub enum ClaimSource {
     Analysis,
     Agent,
     Import,
+    /// Proven by decovery from the map of a `link` whose program is identical to the original.
+    Link,
     /// A value this version does not know; kept so the record is not lost.
     ///
     /// Not written back; writers refuse it.
@@ -120,8 +122,9 @@ impl LineComment {
     }
 }
 
-/// A function, global or label with its claims.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// A function, global or label with its claims. Keys this version does not know are kept in `extra` and written
+/// back.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Symbol {
     pub address: Address,
@@ -147,6 +150,9 @@ pub struct Symbol {
     pub locals: Vec<LocalVariable>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub line_comments: Vec<LineComment>,
+    /// Keys this version does not know.
+    #[serde(flatten)]
+    pub extra: toml::Table,
 }
 
 impl Symbol {
@@ -167,12 +173,13 @@ impl Symbol {
             library: None,
             locals: Vec::new(),
             line_comments: Vec::new(),
+            extra: toml::Table::new(),
         }
     }
 }
 
 /// On-disk form of `knowledge/symbols.toml`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct SymbolsFile {
     pub schema: u32,

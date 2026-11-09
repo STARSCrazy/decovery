@@ -7,8 +7,8 @@ call appends its job count to `requests.log` (all in FAKE_OMF_DIR). The staged s
 `sources/<D>/<X.C>` (`sources/<X.C>` without a `CD` line) in FAKE_OMF_DIR.
 
 A job whose last command runs TLINK is a link job: its command line is appended to `link.log`, it fails when an
-object of the line is missing in the C mount, else copies `REBUILD.EXE` from FAKE_OMF_DIR into the C mount (exit 0)
-or, without that file, prints a linker error and exits 2.
+object of the line is missing in the C mount, else copies `REBUILD.EXE` from FAKE_OMF_DIR into the C mount (exit 0),
+with `REBUILD.MAP` beside it when FAKE_OMF_DIR has one, or, without the EXE, prints a linker error and exits 2.
 
 A job whose last command runs WLINK is an LE link job: its command line goes to `link.log`, the files it links
 (`NB.OBJ`, `NB.LNK`, `STUB.EXE`) are copied to `linked/` in FAKE_OMF_DIR, and `REBUILD.EXE` from FAKE_OMF_DIR is
@@ -46,6 +46,9 @@ def link_job(job, c_root):
     if not os.path.isfile(exe):
         return {"status": "done", "exit_code": 2, "stdout": "Error: Undefined symbol _main in module C0S\r\n"}
     shutil.copyfile(exe, os.path.join(c_root, "REBUILD.EXE"))
+    linker_map = os.path.join(OBJECTS, "REBUILD.MAP")
+    if os.path.isfile(linker_map):
+        shutil.copyfile(linker_map, os.path.join(c_root, "REBUILD.MAP"))
     return {"status": "done", "exit_code": 0, "stdout": "Turbo Link Version 2.0\r\n"}
 
 

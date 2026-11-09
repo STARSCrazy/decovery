@@ -22,3 +22,9 @@ command = 'D:\TLINK {flags} {library_dir}\{startup} {objects},{output},,{librari
 library_dir = 'D:\LIB'
 startup = "C0S"
 output = "{name}.EXE"
+
+[linker.map]
+format = "tlink"
+file = "{name}.MAP"
+flag = "/m"
+suppress = ["/x"]

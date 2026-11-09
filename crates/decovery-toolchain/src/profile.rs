@@ -51,6 +51,76 @@ pub struct LinkerSpec {
     /// set; `None` when the toolchain has no separate startup object.
     #[serde(default)]
     pub startup: Option<String>,
+    /// The map file the linker can write; `None` when decovery does not read this linker's map.
+    #[serde(default)]
+    pub map: Option<MapSpec>,
+}
+
+/// How a linker writes a map file with its public symbols.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct MapSpec {
+    /// Layout of the map file.
+    pub format: MapFormat,
+    /// Pattern of the map file name, e.g. `{name}.MAP`.
+    pub file: String,
+    /// Option that makes the linker list the public symbols (added to the link flags when missing).
+    pub flag: String,
+    /// Options that suppress the map (removed from the link flags).
+    #[serde(default)]
+    pub suppress: Vec<String>,
+}
+
+/// Layout of a linker map file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum MapFormat {
+    /// Borland TLINK: segment list, then publics as `SSSS:OOOO name` relative to the load segment.
+    Tlink,
+}
+
+impl MapSpec {
+    /// `flags` with the suppressing options removed and `flag` added when missing. Options start with `/` or `-`
+    /// and may be written together (`/c/x/i`); they compare case-insensitively and with either switch character.
+    pub fn flags(&self, flags: &str) -> String {
+        fn same(a: &str, b: &str) -> bool {
+            !a.is_empty()
+                && a.trim_start_matches(['/', '-'])
+                    .eq_ignore_ascii_case(b.trim_start_matches(['/', '-']))
+        }
+        let mut has_flag = false;
+        let mut words: Vec<String> = Vec::new();
+        for word in flags.split_whitespace() {
+            let mut kept = String::new();
+            let mut start = 0;
+            let bytes = word.as_bytes();
+            for i in 1..=bytes.len() {
+                if i == bytes.len() || bytes[i] == b'/' || bytes[i] == b'-' {
+                    let option = &word[start..i];
+                    if !self.suppress.iter().any(|s| same(option, s)) {
+                        has_flag |= same(option, &self.flag);
+                        kept.push_str(option);
+                    }
+                    start = i;
+                }
+            }
+            if !kept.is_empty() {
+                words.push(kept);
+            }
+        }
+        if !has_flag && !self.flag.is_empty() {
+            // written onto the last options when they use the same switch character: the line stays as long
+            match words.last_mut() {
+                Some(last) if last.chars().next() == self.flag.chars().next() => {
+                    last.push_str(&self.flag)
+                }
+                _ => words.push(self.flag.clone()),
+            }
+        }
+        words.join(" ")
+    }
 }
 
 fn accepts_start_option() -> bool {
@@ -278,6 +348,18 @@ mod tests {
     }
 
     #[test]
+    fn map_flags_replace_the_suppressing_option() {
+        let map = profile("turbo-c-2.0").unwrap().linker.unwrap().map.unwrap();
+        assert_eq!(map.flags("/c/x/i"), "/c/i/m");
+        assert_eq!(map.flags("/c /X /i"), "/c /i/m");
+        assert_eq!(map.flags("/x"), "/m");
+        assert_eq!(map.flags(""), "/m");
+        assert_eq!(map.flags("/c/M"), "/c/M");
+        assert_eq!(map.flags("-x -s"), "-s /m");
+        assert_eq!(map.flags("-m"), "-m");
+    }
+
+    #[test]
     fn embedded_profiles_parse() {
         assert_eq!(profiles().len(), EMBEDDED.len());
         assert!(profiles().iter().all(|p| !p.padding));
@@ -289,8 +371,15 @@ mod tests {
         assert_eq!(w10.runners, ["dosbox-lab"]);
         assert!(w10.linker.as_ref().unwrap().start_option);
         assert_eq!(w10.linker.as_ref().unwrap().startup, None);
+        assert_eq!(w10.linker.as_ref().unwrap().map, None);
         let tc = profile("turbo-c-2.0").unwrap();
-        assert_eq!(tc.linker.unwrap().startup.as_deref(), Some("C0S"));
+        let tc_linker = tc.linker.unwrap();
+        assert_eq!(tc_linker.startup.as_deref(), Some("C0S"));
+        let map = tc_linker.map.unwrap();
+        assert_eq!(
+            (map.format, map.file.as_str()),
+            (MapFormat::Tlink, "{name}.MAP")
+        );
         assert_eq!(
             w10.assembler.unwrap().command.unwrap(),
             "WASM -zq -fo={output} {input}"

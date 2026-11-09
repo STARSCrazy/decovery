@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use build_fixture::{Fixture, fixture};
 use decovery_core::{
-    Analysis, AnalyzedFunction, ProgramRecord, RebuildResult, Workspace, read_program_record,
-    save_program_record,
+    Analysis, AnalyzedFunction, ClaimSource, Confidence, ProgramRecord, RebuildResult, SymbolKind,
+    Workspace, read_program_record, save_program_record,
 };
 use decovery_facade::{Response, link};
 use serde_json::Value;
@@ -122,7 +122,7 @@ fn mz_identical_link() {
     // both sources linked, in name order, with the configured startup code, flags and libraries
     assert_eq!(
         f.log("link.log"),
-        ["D:\\TLINK /c/x/i D:\\LIB\\C0S A Z,REBUILD,,D:\\LIB\\EMU D:\\LIB\\MATHS D:\\LIB\\CS"]
+        [r"D:\TLINK /c/i/m D:\LIB\C0S A Z,REBUILD,,D:\LIB\EMU D:\LIB\MATHS D:\LIB\CS"]
     );
     assert_eq!(response.data["result"], "identical");
     assert_eq!(response.data["first_difference"], Value::Null);
@@ -350,4 +350,184 @@ fn program_record_round_trip_keeps_unknown_keys() {
     let r = record(&f);
     assert_eq!(r.result, RebuildResult::Identical);
     assert_eq!(r.extra["future_key"].as_str(), Some("kept"));
+}
+
+/// A TLINK map of the fixture's program: `_TEXT` (code) up to 0x7F, `_DATA` from 0x80, and the publics `lines`
+/// (by value).
+fn prepare_map(f: &Fixture, lines: &[&str]) {
+    let mut text = String::from(
+        "\r\n Start  Stop   Length Name               Class\r\n\r\n \
+         00000H 0007FH 00080H _TEXT              CODE\r\n \
+         00080H 000FFH 00080H _DATA              DATA\r\n\r\n  \
+         Address         Publics by Value\r\n\r\n",
+    );
+    for line in lines {
+        text.push_str(&format!(" {line}\r\n"));
+    }
+    text.push_str("\r\nProgram entry point at 0000:0000\r\n");
+    std::fs::write(f.objects.path().join("REBUILD.MAP"), text).unwrap();
+}
+
+fn symbols_text(f: &Fixture) -> String {
+    std::fs::read_to_string(f.root().join("knowledge/symbols.toml")).unwrap()
+}
+
+fn hints(response: &Response) -> Vec<String> {
+    response.data["hints"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn identical_link_records_missing_publics_from_the_map() {
+    let python = python_or_skip!();
+    let f = linking_fixture(&python);
+    // zed is unknown to the knowledge base; add carries a key this version does not know
+    let symbols = f.root().join("knowledge/symbols.toml");
+    let text = symbols_text(&f)
+        .replace(
+            "[[symbol]]\naddress = \"seg:0000:0030\"\nkind = \"function\"\nname = \"zed\"\nsource = \"human\"\nconfidence = \"confirmed\"\n",
+            "",
+        )
+        .replacen("confidence = \"confirmed\"\n", "confidence = \"confirmed\"\nfuture_key = \"kept\"\n", 1);
+    std::fs::write(&symbols, text).unwrap();
+    prepare_exe(&f, &original(&f));
+    prepare_map(
+        &f,
+        &[
+            "0000:0000  Abs  __turboCrt",
+            "0000:0010       _add",
+            "0000:0020       _sub",
+            "0000:0030       _zed",
+            "0000:0040       DGROUP@",
+            "0008:0004       _counter",
+            "0008:0010       __streams",
+        ],
+    );
+    let response = run(&f);
+    assert_eq!(response.data["result"], "identical");
+    assert_eq!(response.data["symbols_added"], 4, "{:?}", hints(&response));
+    assert!(hints(&response).is_empty(), "{:?}", hints(&response));
+    // the map was asked for: `/x` is replaced by `/m`
+    assert_eq!(
+        f.log("link.log"),
+        [r"D:\TLINK /c/i/m D:\LIB\C0S A Z,REBUILD,,D:\LIB\EMU D:\LIB\MATHS D:\LIB\CS"]
+    );
+    assert!(f.root().join("cache/rebuild/REBUILD.MAP").is_file());
+    let ws = Workspace::open(f.root()).unwrap();
+    let find = |name: &str| ws.symbols.iter().find(|s| s.name == name).cloned();
+    let expected = [
+        ("zed", "seg:0000:0030", SymbolKind::Function),
+        ("DGROUP@", "seg:0000:0040", SymbolKind::Label),
+        ("counter", "seg:0008:0004", SymbolKind::Global),
+        ("_streams", "seg:0008:0010", SymbolKind::Global),
+    ];
+    for (name, address, kind) in expected {
+        let s = find(name).unwrap_or_else(|| panic!("{name} missing"));
+        assert_eq!(s.address.to_string(), address, "{name}");
+        assert_eq!(s.kind, kind, "{name}");
+        assert_eq!(s.source, ClaimSource::Link, "{name}");
+        assert_eq!(s.confidence, Confidence::Confirmed, "{name}");
+        assert!(
+            s.evidence.as_deref().unwrap().contains("REBUILD.MAP line"),
+            "{name}"
+        );
+    }
+    // the known ones are untouched, the absolute symbol is not an address
+    assert_eq!(ws.symbols.len(), 6);
+    assert_eq!(find("add").unwrap().source, ClaimSource::Human);
+    assert_eq!(
+        find("add").unwrap().extra["future_key"].as_str(),
+        Some("kept")
+    );
+    assert!(find("_turboCrt").is_none());
+    let text = symbols_text(&f);
+    assert!(text.starts_with("schema = 1\n"), "{text}");
+    assert!(text.contains("source = \"link\""), "{text}");
+    // a second identical link finds nothing new and leaves the file as it is
+    let response = run(&f);
+    assert_eq!(response.data["symbols_added"], 0);
+    assert_eq!(symbols_text(&f), text);
+}
+
+#[test]
+fn link_map_conflicts_are_hints_and_change_nothing() {
+    let python = python_or_skip!();
+    let f = linking_fixture(&python);
+    let before = symbols_text(&f);
+    prepare_exe(&f, &original(&f));
+    prepare_map(
+        &f,
+        &[
+            // the knowledge base has add at 0010
+            "0000:0040       _add",
+            // and sub at 0020
+            "0000:0020       _minus",
+            // two names at one address
+            "0008:0000       __osmajor",
+            "0008:0000       __version",
+        ],
+    );
+    let response = run(&f);
+    assert_eq!(response.data["result"], "identical");
+    assert_eq!(response.data["symbols_added"], 0);
+    let hints = hints(&response);
+    assert_eq!(hints.len(), 3, "{hints:?}");
+    assert!(
+        hints.iter().any(|h| h.contains(
+            "add: the link map places it at seg:0000:0040, the knowledge base at seg:0000:0010"
+        )),
+        "{hints:?}"
+    );
+    assert!(
+        hints.iter().any(|h| h.contains(
+            "seg:0000:0020: the link map names it minus, the knowledge base holds sub there"
+        )),
+        "{hints:?}"
+    );
+    assert!(
+        hints
+            .iter()
+            .any(|h| h.contains("__osmajor, __version share seg:0008:0000")),
+        "{hints:?}"
+    );
+    assert_eq!(symbols_text(&f), before);
+}
+
+#[test]
+fn differing_link_records_no_symbols() {
+    let python = python_or_skip!();
+    let f = linking_fixture(&python);
+    let before = symbols_text(&f);
+    let mut exe = original(&f);
+    let last = exe.len() - 1;
+    exe[last] ^= 0xFF;
+    prepare_exe(&f, &exe);
+    prepare_map(&f, &["0008:0004       _counter"]);
+    let response = run(&f);
+    assert_eq!(response.data["result"], "differs");
+    assert_eq!(response.data["symbols_added"], 0);
+    assert_eq!(symbols_text(&f), before);
+}
+
+#[test]
+fn malformed_link_map_is_a_hint() {
+    let python = python_or_skip!();
+    let f = linking_fixture(&python);
+    let before = symbols_text(&f);
+    prepare_exe(&f, &original(&f));
+    prepare_map(&f, &["0008:0004       _counter", "0008:00ZZ       _broken"]);
+    let response = run(&f);
+    assert_eq!(response.data["result"], "identical");
+    assert_eq!(response.data["symbols_added"], 0);
+    let hints = hints(&response);
+    assert_eq!(hints.len(), 1, "{hints:?}");
+    assert!(
+        hints[0].starts_with("REBUILD.MAP: line 10: not a SSSS:OOOO address"),
+        "{hints:?}"
+    );
+    assert_eq!(symbols_text(&f), before);
 }

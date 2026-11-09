@@ -25,12 +25,15 @@ pub struct Linked {
     pub message: String,
     /// The link command line as run.
     pub line: String,
+    /// The linker's map file when the profile names one and the linker wrote it.
+    pub map: Option<Vec<u8>>,
 }
 
 /// Writes `objects` (stem, object bytes) into `build_dir` as `<stem>.<object extension>`, links them with the
 /// profile's linker and `config` (flags, startup, libraries) into `<output>` (rendered with the linker's output
-/// pattern, e.g. `REBUILD.EXE`) in one runner job, and reads the linked file. Returns the result and the runners'
-/// warnings; a runner that cannot run at all is an error.
+/// pattern, e.g. `REBUILD.EXE`) in one runner job, and reads the linked file. When the profile's linker has a
+/// `[linker.map]`, the flags ask for a map with the publics and the map is read as well (a missing map is no
+/// error). Returns the result and the runners' warnings; a runner that cannot run at all is an error.
 #[allow(clippy::too_many_arguments)]
 pub fn link(
     ws: &Workspace,
@@ -53,8 +56,13 @@ pub fn link(
         std::fs::write(&path, bytes).map_err(|source| ToolchainError::Io { path, source })?;
         stems.push(stem.clone());
     }
+    let flags = config.flags.as_deref().unwrap_or("");
+    let flags = linker
+        .map
+        .as_ref()
+        .map_or_else(|| flags.to_string(), |m| m.flags(flags));
     let line = profile.link_line(
-        config.flags.as_deref().unwrap_or(""),
+        &flags,
         config
             .startup
             .as_deref()
@@ -65,13 +73,17 @@ pub fn link(
         &config.libraries,
     )?;
     let file = linker.output.replace("{name}", output);
+    let map = linker
+        .map
+        .as_ref()
+        .map(|m| m.file.replace("{name}", output));
     run_linker(
-        ws, profile, line, file, build_dir, runners, cancel, progress,
+        ws, profile, line, file, map, build_dir, runners, cancel, progress,
     )
 }
 
 /// Runs the link command `line` of `profile` in one runner job (build dir `C:`, tool dir `D:`) after the profile's
-/// prelude and reads the linked `file` from `build_dir`. Returns the result and the runners' warnings; a runner that
+/// prelude and reads the linked `file` (and the `map` file, when given and written) from `build_dir`. Returns the result and the runners' warnings; a runner that
 /// cannot run at all is an error.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_linker(
@@ -79,6 +91,7 @@ pub(crate) fn run_linker(
     profile: &Profile,
     line: String,
     file: String,
+    map: Option<String>,
     build_dir: &Path,
     runners: &[Box<dyn Runner>],
     cancel: Option<CancelToken>,
@@ -116,11 +129,13 @@ pub(crate) fn run_linker(
                 program: Some(program),
                 message: outcome.stdout.trim().to_string(),
                 line,
+                map: map.and_then(|m| std::fs::read(build_dir.join(m)).ok()),
             },
             Err(e) => Linked {
                 program: None,
                 message: format!("cannot read {}: {e}", path.display()),
                 line,
+                map: None,
             },
         }
     } else {
@@ -128,6 +143,7 @@ pub(crate) fn run_linker(
             program: None,
             message: failure(&outcome, "linker", &file),
             line,
+            map: None,
         }
     };
     Ok((linked, warnings))

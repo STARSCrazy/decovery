@@ -359,7 +359,7 @@ impl Server {
     }
 
     #[tool(
-        description = "Link the whole program with the original linker and compare it with the original file (MZ: all rebuild sources are compiled and linked; LE: identical rebuilds are inserted into the original image). Records the result; `data.result` is identical, differs or a link failure. Slow; reports progress."
+        description = "Link the whole program with the original linker and compare it with the original file (MZ: all rebuild sources are compiled and linked; LE: identical rebuilds are inserted into the original image). Records the result; `data.result` is identical, differs or a link failure. After an identical MZ link the public symbols the knowledge base lacks are recorded from the linker map (`data.symbols_added`). Slow; reports progress."
     )]
     async fn link(&self, meta: RequestMetaObject, peer: Peer<RoleServer>) -> CallToolResult {
         self.with_progress(meta, peer, |root, progress| {

@@ -16,7 +16,7 @@
           "name": { "type": "string" },
           "signature": { "type": "string" },
           "comment": { "type": "string" },
-          "source": { "enum": ["human", "signature", "runtime", "similarity", "analysis", "agent", "import"] },
+          "source": { "enum": ["human", "signature", "runtime", "similarity", "analysis", "agent", "import", "link"] },
           "confidence": { "enum": ["confirmed", "assumed", "refuted"] },
           "evidence": { "type": "string" },
           "type": { "type": "string" },
@@ -29,7 +29,7 @@
               "required": ["name"],
               "properties": {
                 "name": { "type": "string" },
-                "source": { "enum": ["human", "signature", "runtime", "similarity", "analysis", "agent", "import"] },
+                "source": { "enum": ["human", "signature", "runtime", "similarity", "analysis", "agent", "import", "link"] },
                 "confidence": { "enum": ["confirmed", "assumed", "refuted"] },
                 "evidence": { "type": "string" },
                 "date": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
@@ -57,7 +57,7 @@
               "properties": {
                 "address": { "type": "string" },
                 "text": { "type": "string" },
-                "source": { "enum": ["human", "signature", "runtime", "similarity", "analysis", "agent", "import"] }
+                "source": { "enum": ["human", "signature", "runtime", "similarity", "analysis", "agent", "import", "link"] }
               }
             }
           }

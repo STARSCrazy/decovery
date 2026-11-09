@@ -121,6 +121,48 @@ impl Workspace {
         write_atomic(&path, text.as_bytes()).map_err(|e| io_error(&path, e))
     }
 
+    /// Adds symbols to `knowledge/symbols.toml` as it is on disk now (read under `lock`, so claims written since
+    /// this workspace was opened are seen): `decide` gets the current symbols and returns the ones to add. Nothing
+    /// is written when it returns none. The file is written like [`Workspace::save_symbols`] (atomic, sorted,
+    /// `schema = 1`, unknown keys kept) and `self.symbols` becomes its content. Returns the added symbols.
+    pub fn add_symbols(
+        &mut self,
+        decide: impl FnOnce(&[Symbol]) -> Vec<Symbol>,
+        lock: &WorkspaceLock,
+    ) -> Result<Vec<Symbol>, WorkspaceError> {
+        let path = self.root.join(SYMBOLS_FILE);
+        let current = match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                let file: SymbolsFile =
+                    toml::from_str(&text).map_err(|source| WorkspaceError::Parse {
+                        path: path.clone(),
+                        source: Box::new(source),
+                    })?;
+                if file.schema != SCHEMA {
+                    return Err(WorkspaceError::Schema {
+                        path,
+                        found: file.schema,
+                    });
+                }
+                file.symbols
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(io_error(&path, e)),
+        };
+        let added = decide(&current);
+        if added.is_empty() {
+            self.symbols = current;
+            return Ok(added);
+        }
+        let before = std::mem::replace(&mut self.symbols, current);
+        self.symbols.extend(added.iter().cloned());
+        let saved = self.save_symbols(lock);
+        if saved.is_err() {
+            self.symbols = before;
+        }
+        saved.map(|()| added)
+    }
+
     /// Content of `knowledge/types.h`; empty when the file does not exist.
     pub fn types_h(&self) -> Result<String, WorkspaceError> {
         let path = self.root.join(TYPES_FILE);
@@ -259,6 +301,68 @@ confidence = \"assumed\"
         assert!(matches!(err, WorkspaceError::UnknownValue { .. }), "{err}");
         assert!(err.to_string().contains("flat:00010010"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    }
+
+    #[test]
+    fn unknown_symbol_keys_are_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = workspace(dir.path(), Vec::new());
+        let path = dir.path().join(SYMBOLS_FILE);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "schema = 1
+
+[[symbol]]
+address = \"flat:00010010\"
+kind = \"function\"
+name = \"f\"
+             source = \"human\"
+confidence = \"assumed\"
+future_key = \"kept\"
+",
+        )
+        .unwrap();
+        let ws = Workspace::open(&ws.root).unwrap();
+        assert_eq!(ws.symbols[0].extra["future_key"].as_str(), Some("kept"));
+        let lock = ws.lock(Duration::from_secs(1)).unwrap();
+        ws.save_symbols(&lock).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("future_key = \"kept\""), "{text}");
+    }
+
+    #[test]
+    fn add_symbols_reads_the_file_under_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let sym = |a, n| Symbol::new(Address::Flat(a), SymbolKind::Global, n);
+        let mut ws = workspace(dir.path(), vec![sym(0x20, "on_disk")]);
+        let lock = ws.lock(Duration::from_secs(1)).unwrap();
+        ws.save_symbols(&lock).unwrap();
+        // a stale in-memory view: the file is what counts
+        ws.symbols.clear();
+        let path = dir.path().join(SYMBOLS_FILE);
+        let before = std::fs::read(&path).unwrap();
+        let none = ws
+            .add_symbols(
+                |current| {
+                    assert_eq!(current.len(), 1);
+                    Vec::new()
+                },
+                &lock,
+            )
+            .unwrap();
+        assert!(none.is_empty());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let added = ws.add_symbols(|_| vec![sym(0x10, "new")], &lock).unwrap();
+        assert_eq!(added.len(), 1);
+        let names: Vec<_> = Workspace::open(dir.path())
+            .unwrap()
+            .symbols
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(names, ["new", "on_disk"]);
+        assert_eq!(ws.symbols.len(), 2);
     }
 
     #[test]

@@ -20,9 +20,9 @@ use decovery_loaders::{LeImage, load_le};
 use decovery_objects::{functions, read_omf};
 use decovery_plugin::Progress;
 use decovery_toolchain::{
-    Insert, LE_DEFAULT_STACK, Linked, Profile, SourceJob, SourceSet, build_insert, compile_planned,
-    find_sources, le_linker, le_module, link as run_link, link_le, module_name, open_runners,
-    plan_compile, rebuild_profile, stage_text, usable_inserts,
+    Insert, LE_DEFAULT_STACK, Linked, MapFormat, Profile, SourceJob, SourceSet, build_insert,
+    compile_planned, find_sources, le_linker, le_module, link as run_link, link_le, module_name,
+    open_runners, plan_compile, rebuild_profile, stage_text, usable_inserts,
 };
 use rayon::prelude::*;
 use serde_json::{Value, json};
@@ -31,14 +31,19 @@ use super::build::{
     OBJECT_FORMAT, OBJECTS_DIR, failure_text, file_flags, file_name, is_c, ms, new_run_dir,
     read_text, runner_names, stage_headers, toolchain,
 };
+use super::link_symbols::{Candidate, additions, candidates};
 use crate::session::{default_name, parse_default_name};
 use crate::{FacadeError, KnowledgeView, Response};
 
 const LOCK_WAIT: Duration = Duration::from_secs(30);
 /// The linked program of the last `link`, relative to the workspace root.
 pub const LINKED_FILE: &str = "cache/rebuild/REBUILD.EXE";
+/// The linker's map of the last `link` (when the profile's linker writes one), relative to the workspace root.
+pub const LINKED_MAP: &str = "cache/rebuild/REBUILD.MAP";
 /// Name of the linked program (without extension) as the linker writes it.
 const OUTPUT: &str = "REBUILD";
+/// File name of the map in hints.
+const OUTPUT_MAP: &str = "REBUILD.MAP";
 
 /// Most diagnosis lines of an LE comparison (fixup lines and order-only pages listed).
 const LE_DIAGNOSIS_LINES: usize = 20;
@@ -58,7 +63,7 @@ pub fn link(root: &Path, progress: &dyn Fn(Progress)) -> Result<Response, Facade
 
 fn link_mz(
     root: &Path,
-    ws: Workspace,
+    mut ws: Workspace,
     progress: &dyn Fn(Progress),
 ) -> Result<Response, FacadeError> {
     let started = Instant::now();
@@ -177,7 +182,28 @@ fn link_mz(
         record.diagnosis = diagnose_mz_link(&original, exe, &|at| layout.place(at));
     }
     let compare_ms = ms(compare_started.elapsed());
-    store(root, &ws, &mut record, exe)?;
+    let map = linked.as_ref().and_then(|l| l.map.as_deref());
+    // only an identical program proves the map's addresses
+    let candidates = match (record.result, map, map_format(&profile)) {
+        (RebuildResult::Identical, Some(map), Some(format)) => Some(candidates(
+            map,
+            format,
+            OUTPUT_MAP,
+            &profile.decoration,
+            analysis.as_ref(),
+            &mut hints,
+        )),
+        _ => None,
+    };
+    let added = store(
+        &mut ws,
+        &mut record,
+        exe,
+        map,
+        candidates.as_deref(),
+        &mut hints,
+        &mut warnings,
+    )?;
 
     let timing = json!({
         "build_ms": build_ms,
@@ -188,10 +214,20 @@ fn link_mz(
         &record,
         exe.is_some(),
         linked.as_ref().map(|l| l.line.as_str()),
+        added,
         hints,
         warnings,
         timing,
     ))
+}
+
+/// The map format of the profile's linker, when decovery reads its map.
+fn map_format(profile: &Profile) -> Option<MapFormat> {
+    profile
+        .linker
+        .as_ref()
+        .and_then(|l| l.map.as_ref())
+        .map(|m| m.format)
 }
 
 /// The program record of a link: compiler, sizes, date, and against the original the result, the number of
@@ -229,24 +265,50 @@ fn program_record(
     record
 }
 
-/// Records `record` under the lock (unknown keys of the previous record stay) and keeps the linked program.
+/// Records `record` under the lock (unknown keys of the previous record stay), keeps the linked program and its
+/// map, and adds the proven symbols of `candidates` the knowledge base lacks ([`additions`]). Returns how many
+/// symbols were added; a symbol file that cannot be written is a warning, the link result stays recorded.
 fn store(
-    root: &Path,
-    ws: &Workspace,
+    ws: &mut Workspace,
     record: &mut ProgramRecord,
     exe: Option<&[u8]>,
-) -> Result<(), FacadeError> {
+    map: Option<&[u8]>,
+    candidates: Option<&[Candidate]>,
+    hints: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) -> Result<usize, FacadeError> {
+    let root = ws.root.clone();
     let lock = ws.lock(LOCK_WAIT)?;
-    if let Some(before) = read_program_record(root)? {
+    if let Some(before) = read_program_record(&root)? {
         record.extra = before.extra;
     }
-    save_program_record(root, record, &lock)?;
+    save_program_record(&root, record, &lock)?;
     if let Some(exe) = exe {
         let path = root.join(LINKED_FILE);
         write_atomic(&path, exe).map_err(|source| FacadeError::Output { path, source })?;
     }
+    let map_path = root.join(LINKED_MAP);
+    match map.filter(|_| exe.is_some()) {
+        Some(map) => write_atomic(&map_path, map).map_err(|source| FacadeError::Output {
+            path: map_path,
+            source,
+        })?,
+        None => {
+            // no map of an earlier link next to this program
+            let _ = std::fs::remove_file(&map_path);
+        }
+    }
+    let mut added = 0;
+    if let Some(candidates) = candidates.filter(|c| !c.is_empty()) {
+        match ws.add_symbols(|current| additions(current, candidates, hints), &lock) {
+            Ok(list) => added = list.len(),
+            Err(e) => warnings.push(format!(
+                "symbol addresses from the link map not recorded: {e}"
+            )),
+        }
+    }
     drop(lock);
-    Ok(())
+    Ok(added)
 }
 
 /// LE: the original image with the identical rebuilds inserted ([`le_inserts`]), handed as one module to the linker
@@ -254,7 +316,7 @@ fn store(
 /// original ([`compare_le`]). `[rebuild.link]` is optional: `insert` (default true), `stack` (default 4096).
 fn link_le_program(
     root: &Path,
-    ws: Workspace,
+    mut ws: Workspace,
     progress: &dyn Fn(Progress),
 ) -> Result<Response, FacadeError> {
     let started = Instant::now();
@@ -354,7 +416,15 @@ fn link_le_program(
         record.diagnosis = compare_le(&original, exe, &place, LE_DIAGNOSIS_LINES);
     }
     let compare_ms = ms(compare_started.elapsed());
-    store(root, &ws, &mut record, exe)?;
+    let added = store(
+        &mut ws,
+        &mut record,
+        exe,
+        None,
+        None,
+        &mut hints,
+        &mut warnings,
+    )?;
 
     let timing = json!({
         "module_ms": module_ms,
@@ -366,6 +436,7 @@ fn link_le_program(
         &record,
         exe.is_some(),
         Some(linked.line.as_str()),
+        added,
         hints,
         warnings,
         timing,
@@ -907,6 +978,7 @@ fn respond(
     r: &ProgramRecord,
     written: bool,
     line: Option<&str>,
+    symbols_added: usize,
     hints: Vec<String>,
     warnings: Vec<String>,
     timing: Value,
@@ -949,6 +1021,7 @@ fn respond(
             "diagnosis": r.diagnosis,
             "shares": r.shares.as_ref().map(shares_json),
             "used": r.used.as_ref().map(|u| json!({ "functions": u.functions, "bytes": u.bytes })),
+            "symbols_added": symbols_added,
             "hints": hints,
             "warnings": warnings,
             "timing": timing,

@@ -7,6 +7,7 @@ mod detail;
 mod diagnose;
 mod find;
 mod link;
+mod link_symbols;
 mod show;
 mod status;
 mod variants;

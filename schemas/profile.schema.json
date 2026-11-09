@@ -45,6 +45,22 @@
         "startup": {
           "type": "string",
           "description": "Startup object in library_dir (name without extension) when [rebuild.link] startup is not set."
+        },
+        "map": {
+          "type": "object",
+          "description": "The linker's map with its publics; read after an identical link to record proven symbol addresses.",
+          "required": ["format", "file", "flag"],
+          "additionalProperties": false,
+          "properties": {
+            "format": { "enum": ["tlink"] },
+            "file": { "type": "string", "description": "Map file name pattern, e.g. {name}.MAP." },
+            "flag": { "type": "string", "description": "Option that lists the publics; added to the link flags when missing." },
+            "suppress": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Options that suppress the map; removed from the link flags."
+            }
+          }
         }
       }
     },

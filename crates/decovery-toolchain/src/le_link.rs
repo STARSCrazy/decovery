@@ -702,7 +702,7 @@ pub fn link_le(
     let line = profile.link_line("", "", &[], LE_RESPONSE_STEM, &[])?;
     let file = linker.output.replace("{name}", name);
     run_linker(
-        ws, profile, line, file, build_dir, runners, cancel, progress,
+        ws, profile, line, file, None, build_dir, runners, cancel, progress,
     )
 }
 

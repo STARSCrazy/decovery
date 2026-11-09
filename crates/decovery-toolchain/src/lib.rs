@@ -7,6 +7,7 @@ mod cp437;
 mod error;
 mod le_link;
 mod link;
+mod map;
 mod profile;
 mod runner;
 mod schedule;
@@ -26,6 +27,7 @@ pub use le_link::{
     response_file, segment_plan, usable_inserts,
 };
 pub use link::{DEFAULT_STARTUP, Linked, link, startup_object};
+pub use map::{LinkMap, MapPublic, MapSegment, parse_tlink_map};
 pub use runner::{
     JobOutcome, JobStatus, Mount, NativeRunner, PluginRunner, RunJob, RunRequest, Runner,
     RunnerError, open_runners, run_with_fallback, run_with_fallback_reporting,
@@ -36,5 +38,6 @@ pub use staging::{SourceSet, find_sources, stage, stage_text, to_dos_bytes};
 
 pub use error::ToolchainError;
 pub use profile::{
-    AssemblerSpec, LinkerSpec, ObjectFormat, Profile, profile, profiles, rebuild_profile, tool_dir,
+    AssemblerSpec, LinkerSpec, MapFormat, MapSpec, ObjectFormat, Profile, profile, profiles,
+    rebuild_profile, tool_dir,
 };

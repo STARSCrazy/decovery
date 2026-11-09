@@ -169,8 +169,9 @@ enum Command {
     /// Link the whole program with the original linker (`cache/rebuild/REBUILD.EXE`) and compare it
     /// with the original file (MZ: compile all rebuild sources and link them; LE: insert the identical
     /// rebuilds into the original image and link it as one module); the result goes to
-    /// `knowledge/rebuild-program.toml`. Exit code 0 when identical, 1 when it differs, 2 when the
-    /// link failed or on errors. Progress goes to stderr.
+    /// `knowledge/rebuild-program.toml`. After an identical MZ link, the public symbols the knowledge
+    /// base lacks are recorded from the linker map (`source = link`). Exit code 0 when identical, 1 when
+    /// it differs, 2 when the link failed or on errors. Progress goes to stderr.
     Link,
     /// Page the content of a handle returned by another command.
     Detail {
@@ -936,6 +937,9 @@ fn link(workspace: &Path, json: bool) -> Result<ExitCode, FacadeError> {
             "inserted: {} functions, {} bytes",
             used["functions"], used["bytes"]
         );
+    }
+    if let Some(n) = d["symbols_added"].as_u64().filter(|&n| n > 0) {
+        println!("symbols added from the link map: {n}");
     }
     for hint in d["hints"].as_array().into_iter().flatten() {
         if let Some(text) = hint.as_str() {

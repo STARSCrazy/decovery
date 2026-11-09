@@ -108,7 +108,7 @@ Anti-goals (would make it a failure even if it works)
 | Program | The loaded image: format, architecture + mode per region, sections/segments/objects, address spaces, relocations/fixups, entry points, imports/exports, resources, debug info if present. |
 | Address | Typed: `flat:XXXXXXXX` (32-bit linear/VA), `flat64:…` (64-bit VA, reserved), `seg:SSSS:OOOO` (real mode, relative to load segment), `sel:SSSS:OOOO` (protected-mode segment, e.g. NE), `file:0x…` (file offset). One canonical text form each. |
 | Function | Address range + name + prototype + module assignment + status. |
-| Claim | Any piece of knowledge (name, type, comment, prototype, boundary) with `confidence` = `confirmed` \| `assumed` \| `refuted`, `source` (`human`, `signature`, `runtime`, `similarity`, `analysis`, `agent`) and `evidence` text. Precedence `human` > `confirmed` > `assumed`; refuted claims are kept with history. |
+| Claim | Any piece of knowledge (name, type, comment, prototype, boundary) with `confidence` = `confirmed` \| `assumed` \| `refuted`, `source` (`human`, `signature`, `runtime`, `similarity`, `analysis`, `agent`, `import`, `link`) and `evidence` text. Precedence `human` > `confirmed` > `assumed`; refuted claims are kept with history. |
 | Profile | Declarative description of a compiler (or assembler/linker) version: invocation, flag space, naming, object format, calling conventions, prologue patterns. |
 | Family extension | Optional code for a compiler family (e.g. Watcom) implementing extension traits. |
 | Attempt | One build of one source variant for one or more functions: inputs (content hashes), profile, flags, outputs, diff, verdict. Immutable, recorded in the logbook. |
@@ -451,6 +451,27 @@ use the whole machine and later several machines, without changing any result.
   built when a single machine is the bottleneck, with its own ADR.
 - **Measured.** Every phase's parity document records throughput on the first target (wall time of a full build,
   compiles per second, CPU utilisation). A regression is a finding like a wrong verdict.
+
+### 5.14 Proven symbol addresses from an identical link (2026-11-09)
+
+When `link` gives a program byte-identical to the original, every public of the linker's map lies at the same
+address in the original. decovery then records the publics the knowledge base lacks as claims with
+`source = link`, `confidence = confirmed` and the map line as evidence. The address is proven by decovery, not
+claimed by an agent.
+
+- Only on `identical`. A differing or failed link records nothing, and neither does an LE link (the WLINK map is
+  not read yet).
+- Nothing known is changed. A name the knowledge base has at another address, an address that already holds
+  another symbol (named, unnamed or refuted), a name the map lists twice and an address the map gives two names
+  are hints. Absolute publics (`Abs`) are not addresses and are left out.
+- Address: the map's `SSSS:OOOO` relative to the load segment is the `seg:` form. Name: the C name (the profile's
+  decoration removed). Kind: a data-class segment gives `global`; a code-class segment gives `function` where the
+  analysis starts a function there, else `label`; no segment gives `other`.
+- The profile's `[linker.map]` says how to get the map (`flag`, `suppress`: TLINK `/m` replaces `/x`), its file
+  name and its format. A map that does not read is a hint naming the line. The map of the last link is kept as
+  `cache/rebuild/REBUILD.MAP`. The response reports `symbols_added`.
+- The symbols are added under the workspace lock to `symbols.toml` as it is on disk then. The file is written
+  atomically and sorted. Keys of a symbol this version does not know are now kept (`extra`) by every writer.
 
 ## 6. Repository layout
 
