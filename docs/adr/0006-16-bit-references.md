@@ -62,18 +62,23 @@ functions it compares (`compare_module`: first pass collects, second pass checks
    fields as a wildcard; it needs at least 4 bytes that are not wildcards, not all of them equal. When the frame
    base is known (configured, startup, consensus; 32-bit: base 0) and the pattern occurs exactly once in the
    original inside the frame (16-bit: occurrences starting in the 64 KiB from the frame base; 32-bit: the whole
-   program), and that occurrence starts at `frame + candidate` of one of the section's votes, the section anchor
-   is that candidate (source `content`). The section is then judged as an agreed one: fields proposing the
+   program), that occurrence starts at `frame + candidate` of one of the section's votes, and at least one vote
+   for that candidate has an item (item 5) with bytes to compare that equal the original there, the section
+   anchor is that candidate (source `content`). The section is then judged as an agreed one: fields proposing the
    candidate are checked by item 5, the other votes are dissent (`WrongAbsoluteRef`, or `DataLayout` under item 8),
    and the anchor appears in the result without a warning. Otherwise the section keeps no anchor (warning,
    `UncheckedRef`). A tie with such content goes to the candidate where the content lies, not to the lowest one.
-   One scan per unagreed section over its frame, filtered on the first byte that is not a wildcard; never per
-   field.
-   Why it is sound: the evidence is the whole section, not the referenced item. An item with the same bytes
-   elsewhere can still exist, but the complete section, in the rebuild's order, cannot occur at a second place
-   without failing uniqueness, and the position must also be one a field names, so a field pointing at another
-   copy or at unrelated bytes is not confirmed. Short or uniform sections (a few bytes, zero fill) are excluded
-   because such patterns recur by chance. It differs from the search item 10 rejects: that search would pick a
+   One scan per unagreed section over its frame, comparing the pattern's rarest bytes (by their count in the
+   scanned bytes) first; never per field.
+   Why it is sound: the evidence is the section's fixed bytes (all bytes outside its fixup fields, in the
+   rebuild's order) occurring exactly once in the search range, at a base a field names, plus the voting field's
+   own item comparing equal there. Uniqueness is what equal item bytes alone lack: an item with the same bytes
+   elsewhere passes item 5 the same way, but then the fixed bytes of the whole section would have to recur too.
+   The fixed bytes need not lie in the referenced item; the extra condition that a voting item has compared bytes
+   keeps a field whose own item is all fixups (a pointer table) from being confirmed only by a neighbouring
+   constant. For a section that is one item the rule reduces to: the item's bytes equal the original and occur
+   nowhere else in the search range. A field pointing at another copy or at unrelated bytes is not confirmed.
+   Short or uniform sections (a few bytes, zero fill) are excluded because such patterns recur by chance. It differs from the search item 10 rejects: that search would pick a
    frame base wherever the rebuild's bytes happen to match; here the frame base is already fixed and the content
    only has to agree with a position a vote names. On the first parity target the five `unchecked-ref` functions
    of the previous amendment became `identical`; no function Decomp records as differing became identical.

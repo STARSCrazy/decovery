@@ -201,7 +201,8 @@ fn item_check(
 /// section's initialised bytes, its fixup fields as wildcards, must occur exactly once in the original inside the
 /// frame at linear `frame` (16-bit: the 64 KiB from `frame`; flat: the whole program), and there at the position
 /// one of `votes` (rel, candidate) names. At least 4 bytes must not be wildcards, and not all of them equal (a
-/// fill pattern names no position). One scan over the frame, filtered on the first byte that is not a wildcard.
+/// fill pattern names no position). One scan over the frame; each position compares the pattern's rarest bytes
+/// (by their count in the scanned bytes) first. The caller also requires a voting item to compare equal there.
 fn content_anchor(
     section: &Section,
     votes: &BTreeSet<(i64, i64)>,
@@ -218,26 +219,13 @@ fn content_anchor(
             wild[start..end].fill(true);
         }
     }
-    let fixed: Vec<u8> = pattern
-        .iter()
-        .zip(&wild)
-        .filter(|&(_, &w)| !w)
-        .map(|(&b, _)| b)
-        .collect();
-    if fixed.len() < 4 || fixed.iter().all(|&b| b == fixed[0]) {
+    let fixed: Vec<usize> = (0..pattern.len()).filter(|&i| !wild[i]).collect();
+    if fixed.len() < 4 || fixed.iter().all(|&i| pattern[i] == pattern[fixed[0]]) {
         return None;
     }
-    let lead = wild.iter().position(|&w| !w)?;
-    let matches = |bytes: &[u8]| {
-        bytes
-            .iter()
-            .zip(pattern)
-            .zip(&wild)
-            .all(|((a, b), &w)| w || a == b)
-    };
-    // occurrence starts lie in [frame, end)
+    // occurrence starts lie in [frame, end); each region contributes the window its starts can use
     let end = if flat { 1i64 << 32 } else { frame + 0x1_0000 };
-    let mut found = None;
+    let mut windows: Vec<(i64, &[u8])> = Vec::new();
     for region in &program.regions {
         let Some(start) = region.start.linear().and_then(|s| i64::try_from(s).ok()) else {
             continue;
@@ -248,18 +236,30 @@ fn content_anchor(
         };
         let lo = (frame - start).max(0);
         let hi = (end - start).min(last as i64 + 1);
-        if lo >= hi {
-            continue;
+        if lo < hi {
+            let (lo, hi) = (lo as usize, hi as usize);
+            windows.push((start + lo as i64, &data[lo..hi - 1 + pattern.len()]));
         }
-        let (lo, hi) = (lo as usize, hi as usize);
-        for i in lo..hi {
-            if data[i + lead] != pattern[lead] || !matches(&data[i..i + pattern.len()]) {
+    }
+    // compare the rarest fixed bytes first: a long run of a common byte (zero fill) then rejects a position at once
+    let mut counts = [0usize; 256];
+    for &(_, bytes) in &windows {
+        for &b in bytes {
+            counts[usize::from(b)] += 1;
+        }
+    }
+    let mut order = fixed;
+    order.sort_by_key(|&i| (counts[usize::from(pattern[i])], i));
+    let mut found = None;
+    for (at, bytes) in windows {
+        for i in 0..=bytes.len() - pattern.len() {
+            if !order.iter().all(|&k| bytes[i + k] == pattern[k]) {
                 continue;
             }
             if found.is_some() {
                 return None;
             }
-            found = Some(start + i as i64 - frame);
+            found = Some(at + i as i64 - frame);
         }
     }
     let candidate = found?;
@@ -419,13 +419,30 @@ impl Anchors {
             // without agreed votes the section's own bytes can name the position (content anchor); the section
             // then is judged like an agreed one, the other votes being its dissent
             let content = match (t.agreed(), checked, frame_base) {
+                // the fields voting for the position must themselves be confirmed: at least one of their items
+                // has bytes to compare there, and they equal the original
                 (false, true, Some(frame)) => content_anchor(
                     &module.sections[key.section as usize],
                     &votes,
                     frame,
                     key.flat,
                     program,
-                ),
+                )
+                .filter(|&base| {
+                    votes.iter().any(|&(rel, candidate)| {
+                        candidate == base
+                            && item_check(
+                                module,
+                                key.section,
+                                rel,
+                                &bounds,
+                                frame + base,
+                                key.flat,
+                                program,
+                                false,
+                            ) == Item::Equal
+                    })
+                }),
                 _ => None,
             };
             let t = match content {

@@ -101,7 +101,11 @@ fn data_at(offset: u32) -> RefTarget {
 /// An MZ program: the image starts at `seg:0000:0000`, the original code at offset 0 (functions every 8 bytes),
 /// `extra` bytes written at their linear addresses.
 fn program16(code: &[&[u8]], extra: &[(usize, &[u8])], relocations: Vec<Relocation>) -> Program {
-    let mut image = vec![0u8; 0x4000];
+    let size = extra
+        .iter()
+        .map(|&(at, bytes)| at + bytes.len())
+        .fold(0x4000, usize::max);
+    let mut image = vec![0u8; size];
     for (i, c) in code.iter().enumerate() {
         let start = 8 * i;
         for b in &mut image[start..start + 8] {
@@ -866,6 +870,15 @@ fn flat_string_case(strings: &[u8]) -> ModuleComparison {
 
 /// `mov eax, offset CONST` with `CONST` holding `section`; the original holds `strings` at 0x20010.
 fn flat_section_case(section: &[u8], strings: &[u8]) -> ModuleComparison {
+    flat_section_case_in(section, strings, &[])
+}
+
+/// [`flat_section_case`] with `code_extra` bytes written into the original's code object at their offsets.
+fn flat_section_case_in(
+    section: &[u8],
+    strings: &[u8],
+    code_extra: &[(usize, &[u8])],
+) -> ModuleComparison {
     let m = ObjectModule::new(
         "t.c",
         vec![
@@ -895,8 +908,13 @@ fn flat_section_case(section: &[u8], strings: &[u8]) -> ModuleComparison {
         ],
         vec![ObjSymbol::new("f_", 0, 0, true)],
     );
+    let mut code = vec![0xCC; 0x400];
+    code[..6].copy_from_slice(&[0xB8, 0x10, 0x00, 0x02, 0x00, 0xC3]);
+    for &(at, bytes) in code_extra {
+        code[at..at + bytes.len()].copy_from_slice(bytes);
+    }
     let p = flat_program(
-        &[0xB8, 0x10, 0x00, 0x02, 0x00, 0xC3],
+        &code,
         &[&[0u8; 0x10][..], strings].concat(),
         vec![absolute(AT + 1, 0x20010)],
     );
@@ -1912,4 +1930,112 @@ fn fixup_bytes_in_section_are_wildcards() {
         anchor(&c, "DGROUP", Some("_DATA")).source,
         AnchorSource::Content
     );
+}
+
+// --- content anchor, review round 1 ---
+
+#[test]
+fn content_outside_the_referenced_items_does_not_anchor() {
+    // `_DATA` is a table of two pointers (all fixup bytes, referenced) and a constant of its own (a symbol at 4). The
+    // section is unique at the vote's position, but only through the constant: the referenced item has no byte to
+    // compare, so nothing confirms the field itself.
+    let pointer = |offset: u32| {
+        ObjReloc::new(
+            offset,
+            2,
+            RelocKind::Absolute,
+            sym("_x"),
+            0,
+            Frame::Group("DGROUP".to_string()),
+        )
+    };
+    let c = content16_case(
+        &[0, 0, 0, 0, 1, 2, 3, 4],
+        vec![pointer(0), pointer(2)],
+        &[4],
+        &[(0, 0x40)],
+        &[(0x2040, &[0xAB, 0xCD, 0xEF, 0x01, 1, 2, 3, 4])],
+    );
+    assert_eq!(
+        c.functions[0].blockers,
+        vec![Blocker::UncheckedRef { at: 1 }]
+    );
+    no_section_anchor(&c);
+}
+
+#[test]
+fn content_anchor_dissent_with_equal_item_is_data_layout() {
+    // `_DATA` holds two words, both 1, once in the original at 0x40. f0 reads +0 (0x40, right); f1 reads +2 where
+    // the original reads +0: its item equals the original at its own position, so it is a layout difference
+    let c = content16_case(
+        &[1, 0, 1, 0],
+        vec![],
+        &[],
+        &[(0, 0x40), (2, 0x40)],
+        &[(0x2040, &[1, 0, 1, 0])],
+    );
+    assert_eq!(
+        c.functions[0].verdict,
+        Verdict::Identical,
+        "{:?}",
+        c.functions[0].blockers
+    );
+    assert!(
+        matches!(
+            c.functions[1].blockers.as_slice(),
+            [Blocker::DataLayout { .. }]
+        ),
+        "{:?}",
+        c.functions[1].blockers
+    );
+    let a = anchor(&c, "DGROUP", Some("_DATA"));
+    assert_eq!(
+        (a.base, a.votes, a.dissent, a.source),
+        (0x40, 1, 1, AnchorSource::Content)
+    );
+}
+
+#[test]
+fn flat_copy_in_the_code_object_blocks_the_content_anchor() {
+    let c = flat_section_case_in(HELLO, HELLO, &[(0x100, HELLO)]);
+    assert_eq!(
+        c.functions[0].blockers,
+        vec![Blocker::UncheckedRef { at: 1 }]
+    );
+    assert!(c.anchors.is_empty(), "{:?}", c.anchors);
+}
+
+#[test]
+fn copies_outside_the_16_bit_frame_window_do_not_count() {
+    // copies starting before DGROUP's base and at base + 64 KiB lie outside the frame
+    let c = content16_case(
+        HELLO,
+        vec![],
+        &[],
+        &[(0, 0x40)],
+        &[(0x1FFC, HELLO), (0x2040, HELLO), (0x12000, HELLO)],
+    );
+    assert_eq!(
+        c.functions[0].verdict,
+        Verdict::Identical,
+        "{:?}",
+        c.functions[0].blockers
+    );
+    assert_eq!(
+        anchor(&c, "DGROUP", Some("_DATA")).source,
+        AnchorSource::Content
+    );
+}
+
+#[test]
+fn partial_copy_at_a_region_end_is_not_an_occurrence() {
+    // the code object ends with the first 3 bytes of the section: the scan stops at the region's end
+    let c = flat_section_case_in(HELLO, HELLO, &[(0x3FD, &HELLO[..3])]);
+    assert_eq!(
+        c.functions[0].verdict,
+        Verdict::Identical,
+        "{:?}",
+        c.functions[0].blockers
+    );
+    assert_eq!(anchor(&c, "FLAT", Some("CONST")).base, 0x20010);
 }
