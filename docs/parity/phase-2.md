@@ -12,20 +12,29 @@ compilers).
   and TLINK under the real-mode host). No DOSBox run was needed.
 - **Build check:** `decovery build --json` over all sources. Every function Decomp records as identical must get
   `verdict = identical`; a mismatch fails the test unless it is listed, with evidence that decovery is right, in the
-  private deviation file. Functions of sources the build skips (assembler files, no assembler run yet) are counted
-  and not compared.
+  private deviation file. The two assembler sources (byte listings) are built by the built-in assembler and
+  compared like compiled sources; functions of sources the build skips would be counted and not compared (none
+  are).
 - **Link check:** `decovery link --json`. Second target: `REBUILD.EXE` must equal the original byte for byte. First
   target: the outcome is recorded (see below).
 
 ## Build
 
-| Target | Decomp identical | decovery identical too | not built (assembler) | mismatches |
+| Target | Decomp identical | decovery identical too | not built | mismatches |
 |---|---|---|---|---|
-| first (LE, Watcom 9.5) | 497 | 341 | 150 | 6 (listed deviations) |
+| first (LE, Watcom 9.5) | 497 | 491 | 0 | 6 (listed deviations) |
 | second (MZ, Turbo C 2.0) | 14 | 14 | 0 | 0 |
 
-First target, whole build: `34 files: 379 functions, 341 identical, 38 differ; 2 skipped`. The 32 other differing
-functions are functions Decomp records as differing too; no function Decomp records as differing became identical.
+First target, whole build: `34 files: 529 functions, 491 identical, 38 differ`. The 32 other differing functions
+are functions Decomp records as differing too; no function Decomp records as differing became identical.
+
+Rerun on 2026-11-09 with the built-in assembler (plan task 21): the 150 functions of the two assembler sources,
+previously skipped, are built and compared; all 150 are identical, as Decomp records them. Their objects carry
+every byte of the listing, a fixup per named field (`dd name+n`, `call name`, `jmp near ptr name`) and one
+segment per function. The listings name unnamed data by its address (`DAT_` and eight hex digits); on a flat target
+the comparison now resolves such names to that address, as the link already did, so each of these fields is checked
+against the original's relocation instead of staying `unchecked-ref`. Before that change the first run left 77 of
+the 150 `differs`, each only through `unchecked-ref` blockers on such fields (no byte or instruction differed).
 Rerun on 2026-11-09 after the ADR 0006 item 4 amendment (a consensus frame or section anchor needs two votes and a
 majority): the second target is unchanged (its DGROUP base comes from its startup code); on the first target five
 functions moved from `identical` to `differs` with one `unchecked-ref` each (see the deviation list). Before the
@@ -62,12 +71,13 @@ The detailed list with function names, addresses and evidence is kept privately
   map, the link records 71 public symbols the knowledge lacked; three map entries conflict with or
   duplicate existing knowledge and are reported as hints, not recorded.
 - **First target (WLINK 9.5, `[rebuild.link] profile = "watcom-9.5"`):** `differs`. The identical
-  functions (341) are inserted into the original image and linked as one module. Stub, LE header, page table,
+  functions (491: 341 from C, 150 from the assembler sources) are inserted into the original image and linked as
+  one module. Stub, LE header, page table,
   fixup page table and every code and data page are identical. Two differences remain, both from the
   linker version: the preload flag (0x40) is missing on all four objects, and the fixup records of 57 pages are in
   another order (same content). The original was linked with WLINK 10.6, which is not available here; an identical
-  link needs it. Decomp's own link inserted 494 functions, about 150 of them from assembler sources, which decovery
-  cannot assemble yet.
+  link needs it. Decomp's own link inserted 494 functions, about 150 of them from assembler sources; decovery now
+  inserts those too (before the built-in assembler: 341 functions).
 
 ## Performance (risk checkpoint R4)
 
@@ -82,6 +92,10 @@ every 250 ms; busy cores = CPU seconds / wall seconds.
 | first target, link (WLINK 9.5) | 1.3 s | 0.9–1.0 s | 0.7 / 1.1 | module 92 ms, link 568, compare 30, total 728 |
 | second target, link (TCC + TLINK) | 1.3 s | 0.7 s | 0.5 / 1.0 | build 778 ms, compare 8, total 807 |
 | second target, build after link (cached) | 0.7 s | — | — | compile 2 ms, compare 11, record 53, total 71 |
+| first target, cold build after migrate, with the built-in assembler (test run) | 8.3 s | — | — | compile 5 127 ms (32 jobs, 2 sources assembled built-in), compare 466, record 2 488, total 8 216 |
+
+The built-in assembler takes about 55 ms for both assembler sources of the first target (release
+build); it runs while the sources are staged, before the compile jobs.
 
 The cold first-target build uses most of the machine while compiling (peak 13–15 busy cores); the first build after
 migration spends another second rewriting every function file. The compile tail (the largest sources finish last)

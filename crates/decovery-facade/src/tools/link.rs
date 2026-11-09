@@ -20,15 +20,16 @@ use decovery_loaders::{LeImage, load_le};
 use decovery_objects::{functions, read_omf};
 use decovery_plugin::Progress;
 use decovery_toolchain::{
-    Insert, LE_DEFAULT_STACK, Linked, MapFormat, Profile, SourceJob, SourceSet, build_insert,
-    compile_planned, find_sources, le_linker, le_module, link as run_link, link_le, module_name,
-    open_runners, plan_compile, rebuild_profile, stage_text, usable_inserts,
+    BUILTIN_ASSEMBLER, Insert, LE_DEFAULT_STACK, Linked, MapFormat, Profile, SourceJob, SourceSet,
+    assembler_profile, build_insert, compile_planned, find_sources, le_linker, le_module,
+    link as run_link, link_le, module_name, open_runners, plan_compile, rebuild_profile,
+    stage_text, usable_inserts,
 };
 use rayon::prelude::*;
 use serde_json::{Value, json};
 
 use super::build::{
-    OBJECT_FORMAT, OBJECTS_DIR, failure_text, file_flags, file_name, is_c, ms, new_run_dir,
+    OBJECT_FORMAT, OBJECTS_DIR, failure_text, file_flags, file_name, is_asm, is_c, ms, new_run_dir,
     read_text, runner_names, stage_headers, toolchain,
 };
 use super::link_symbols::{Candidate, additions, candidates};
@@ -503,8 +504,8 @@ fn le_inserts(
     let per_file: Vec<(Vec<Insert>, Vec<String>)> = by_file
         .par_iter()
         .map(|(file, records)| {
-            if !is_c(file) {
-                // no assembler run yet: `build` keeps no object for it
+            if !is_c(file) && !is_asm(file) {
+                // `build` keeps no object for other assembler sources
                 let reason = if file.is_empty() {
                     "the record names no source file".to_string()
                 } else {
@@ -576,12 +577,23 @@ fn current_object(
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .ok_or_else(|| "no kept object".to_string())?;
-    let flags = file_flags(sources.file_flags, file).map_or(sources.default_flags, String::as_str);
+    // an assembler source is built without flags, by the built-in assembler or the profile's assembler
+    let (flags, builder_ok) = if is_asm(file) {
+        let assembler = assembler_profile(sources.compiler).ok().flatten();
+        let ok =
+            meta.profile == BUILTIN_ASSEMBLER || assembler.is_some_and(|a| a.id == meta.profile);
+        ("", ok)
+    } else {
+        (
+            file_flags(sources.file_flags, file).map_or(sources.default_flags, String::as_str),
+            meta.profile == sources.compiler.id,
+        )
+    };
     let staged_hash = blake3::hash(&staged).to_hex().to_string();
     let current = meta.schema == 1
         && meta.format == OBJECT_FORMAT
         && meta.file == file
-        && meta.profile == sources.compiler.id
+        && builder_ok
         && meta.flags == flags
         && meta.inputs.get(&dos_name) == Some(&staged_hash)
         && headers

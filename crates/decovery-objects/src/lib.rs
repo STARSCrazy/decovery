@@ -15,4 +15,6 @@ pub use model::{
     SectionKind,
 };
 pub use omf::read_omf;
-pub use omf_write::{WriteFixup, WriteFixupKind, WriteSegment, write_omf_module};
+pub use omf_write::{
+    WriteFixup, WriteFixupKind, WriteModule, WriteSegment, write_omf, write_omf_module,
+};

@@ -451,9 +451,61 @@ fn modend_start_and_group_target() {
 mod writer {
     use decovery_core::RelocKind;
     use decovery_objects::{
-        Frame, RefTarget, SectionKind, WriteFixup, WriteFixupKind, WriteSegment, read_omf,
-        write_omf_module,
+        Frame, RefTarget, SectionKind, WriteFixup, WriteFixupKind, WriteModule, WriteSegment,
+        read_omf, write_omf, write_omf_module,
     };
+
+    #[test]
+    fn omf_writer_writes_externals_and_16_bit_segments() {
+        let segments = [
+            WriteSegment::new("_TEXT", "CODE", 8, false).with_align(1),
+            WriteSegment::new("_TEXT32", "CODE", 8, true),
+        ];
+        let externals = ["_a".to_string(), "b_".to_string()];
+        let mut code = vec![0u8; 8];
+        code[6..8].copy_from_slice(&(-2i16).to_le_bytes());
+        let fixups = [
+            WriteFixup::external(1, 1, WriteFixupKind::Rel16, 2, None),
+            WriteFixup::external(1, 4, WriteFixupKind::Off16, 1, Some(6)),
+            WriteFixup::external(1, 6, WriteFixupKind::Off16, 1, None),
+            WriteFixup::external(2, 0, WriteFixupKind::Off32, 2, Some(0x1C4)),
+        ];
+        let data = [(1, code.clone()), (2, vec![0u8; 8])];
+        let module = WriteModule::new("m")
+            .with_segments(&segments)
+            .with_externals(&externals)
+            .with_data(&data)
+            .with_fixups(&fixups);
+        let file = read_omf(&write_omf(&module).unwrap(), "M.OBJ").unwrap();
+        let m = &file.modules[0];
+        assert_eq!(
+            m.sections.iter().map(|s| s.bits).collect::<Vec<_>>(),
+            [16, 32]
+        );
+        assert_eq!(m.sections[0].data, code);
+        let shape = |r: &decovery_objects::ObjReloc| {
+            (r.offset, r.width, r.kind, r.target.clone(), r.addend)
+        };
+        let symbol = |n: &str| RefTarget::Symbol(n.to_string());
+        assert_eq!(
+            m.sections[0].relocs.iter().map(shape).collect::<Vec<_>>(),
+            [
+                (1, 2, RelocKind::Relative, symbol("b_"), 0),
+                (4, 2, RelocKind::Absolute, symbol("_a"), 6),
+                (6, 2, RelocKind::Absolute, symbol("_a"), 0),
+            ]
+        );
+        assert_eq!(
+            shape(&m.sections[1].relocs[0]),
+            (0, 4, RelocKind::Absolute, symbol("b_"), 0x1C4)
+        );
+        // an external the module does not have
+        let bad = [WriteFixup::external(1, 0, WriteFixupKind::Off16, 3, None)];
+        let err = write_omf(&module.with_fixups(&bad))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("external 3"), "{err}");
+    }
 
     #[test]
     fn overlapping_fixups_are_rejected() {

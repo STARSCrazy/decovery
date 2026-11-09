@@ -249,12 +249,13 @@ fn collapse(line: &str) -> String {
 }
 
 impl Profile {
-    /// The compile command with whitespace collapsed.
+    /// The compile command with whitespace collapsed; `{output}` is the object name of `input`.
     pub fn compile_line(&self, flags: &str, input: &str) -> String {
         collapse(
             &self
                 .command
                 .replace("{flags}", flags)
+                .replace("{output}", &self.object_name(input))
                 .replace("{input}", input),
         )
     }
@@ -296,6 +297,36 @@ impl Profile {
                 .replace("{libraries}", &libraries),
         ))
     }
+}
+
+/// The profile that runs the assembler of `profile`: the profile owning the assembler (`profile` itself or the one
+/// its `[assembler] profile` names, followed), with the assembler command as its compile command (`{output}`,
+/// `{input}`; no flags). `None` when the profile has no assembler.
+pub fn assembler_profile(profile: &Profile) -> Result<Option<Profile>, ToolchainError> {
+    let mut owner = profile.clone();
+    // a chain of references ends at a profile with a command; a loop is an error, not a hang
+    for _ in 0..EMBEDDED.len() + 1 {
+        let Some(spec) = owner.assembler.clone() else {
+            return Ok(None);
+        };
+        match (spec.command, spec.profile) {
+            (Some(command), _) => {
+                owner.command = command;
+                return Ok(Some(owner));
+            }
+            (None, Some(other)) => owner = self::profile(&other)?,
+            (None, None) => {
+                return Err(ToolchainError::Invalid(format!(
+                    "profile {}: [assembler] names neither a command nor a profile",
+                    owner.id
+                )));
+            }
+        }
+    }
+    Err(ToolchainError::Invalid(format!(
+        "profile {}: the [assembler] profiles refer to each other in a loop",
+        profile.id
+    )))
 }
 
 /// The directory that holds the compiler of `profile`: the workspace's `[rebuild] tool_dir` (relative to `root`),
@@ -413,6 +444,22 @@ mod tests {
         );
         let tc = profile("turbo-c-2.0").unwrap();
         assert_eq!(tc.decoration.undecorate("_main"), "main");
+    }
+
+    #[test]
+    fn assembler_profile_follows_the_reference() {
+        let w95 = profile("watcom-9.5").unwrap();
+        let asm = assembler_profile(&w95).unwrap().unwrap();
+        assert_eq!(asm.id, "watcom-10.6");
+        assert_eq!(
+            asm.compile_line("", "ASMPART.ASM"),
+            "WASM -zq -fo=ASMPART.OBJ ASMPART.ASM"
+        );
+        assert_eq!(asm.object_name("ASMPART.ASM"), "ASMPART.OBJ");
+        let w10 = profile("watcom-10.6").unwrap();
+        assert_eq!(assembler_profile(&w10).unwrap().unwrap().id, "watcom-10.6");
+        let tc = profile("turbo-c-2.0").unwrap();
+        assert_eq!(assembler_profile(&tc).unwrap(), None);
     }
 
     #[test]

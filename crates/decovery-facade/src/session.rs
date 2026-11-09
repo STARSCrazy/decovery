@@ -4,7 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use decovery_core::{
-    Address, Analysis, Confidence, Provider, RebuildRecord, Symbol, Workspace, read_rebuild,
+    Address, Analysis, Confidence, Provider, RebuildRecord, Symbol, TargetFormat, Workspace,
+    read_rebuild,
 };
 use decovery_diff::{NameAt, SymbolView};
 
@@ -93,11 +94,26 @@ impl Session {
 
 /// Active (not refuted) names of a workspace's knowledge for comparisons ([`SymbolView`]). An address without a
 /// name has its default name (`fun_0001A2B0`, `fun_1234_0010`); static segment addresses have none. A default name
-/// resolves to its address; with an analysis that has functions, only when a function starts there.
+/// resolves to its address; with an analysis that has functions, only when a function starts there. On a flat
+/// target (LE, flat32) the default names of disassemblers for flat addresses resolve too, as the link resolves them:
+/// `DAT_00041230` (data, any address) and `FUN_0001A2B0` (a function, under the same rule as `fun_`).
 pub struct KnowledgeView<'a> {
     by_address: BTreeMap<Address, &'a str>,
     by_name: BTreeMap<&'a str, Address>,
     function_starts: Option<BTreeSet<Address>>,
+    flat: bool,
+}
+
+/// `DAT_` or `FUN_` and eight hex digits: the flat address and whether the name is a function's.
+fn parse_flat_default_name(name: &str) -> Option<(Address, bool)> {
+    let (hex, function) = match name.strip_prefix("DAT_") {
+        Some(hex) => (hex, false),
+        None => (name.strip_prefix("FUN_")?, true),
+    };
+    (hex.len() == 8 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+        .then(|| u32::from_str_radix(hex, 16).ok())
+        .flatten()
+        .map(|at| (Address::Flat(at), function))
 }
 
 impl<'a> KnowledgeView<'a> {
@@ -115,10 +131,15 @@ impl<'a> KnowledgeView<'a> {
         let function_starts = analysis
             .filter(|a| !a.functions.is_empty())
             .map(|a| a.functions.iter().map(|f| f.start).collect());
+        let flat = matches!(
+            workspace.config.target.format,
+            TargetFormat::Le | TargetFormat::Flat32
+        );
         KnowledgeView {
             by_address,
             by_name,
             function_starts,
+            flat,
         }
     }
 }
@@ -138,11 +159,16 @@ impl SymbolView for KnowledgeView<'_> {
         if let Some(&at) = self.by_name.get(name) {
             return Some(at);
         }
-        let at = parse_default_name(name)?;
-        let starts_function = self
-            .function_starts
-            .as_ref()
-            .is_none_or(|starts| starts.contains(&at));
+        let (at, function) = match parse_default_name(name) {
+            Some(at) => (at, true),
+            None if self.flat => parse_flat_default_name(name)?,
+            None => return None,
+        };
+        let starts_function = !function
+            || self
+                .function_starts
+                .as_ref()
+                .is_none_or(|starts| starts.contains(&at));
         starts_function.then_some(at)
     }
 }

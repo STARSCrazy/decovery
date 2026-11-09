@@ -80,6 +80,18 @@ pub struct CompiledFile {
     pub cached: bool,
 }
 
+impl CompiledFile {
+    /// The object of a source built without a compile job (by [`crate::assemble_listing`]).
+    pub fn built(file: impl Into<String>, object: Vec<u8>) -> Self {
+        CompiledFile {
+            file: file.into(),
+            object: Some(object),
+            message: String::new(),
+            cached: false,
+        }
+    }
+}
+
 /// Size and modification time of each fingerprint file: a fingerprint is hashed again only when one changed.
 type FileStamps = Vec<(u64, Option<SystemTime>)>;
 

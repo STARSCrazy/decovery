@@ -12,8 +12,9 @@
 //!   not built as `not-built`. Entries that no longer mismatch are printed as stale warnings.
 //!
 //! The workspace is migrated into a temporary directory (the Decomp workspace is never touched) and built in full.
-//! Every function Decomp records as identical must get `verdict = identical`, except functions of sources the build
-//! skips (assembler files: there is no assembler run yet); those are counted, not compared. On the second target
+//! Every function Decomp records as identical must get `verdict = identical`. The byte-listing assembler sources are
+//! built by the built-in assembler and compared like compiled ones; functions of sources the build still skips (an
+//! assembler file outside its subset without an assembler) are counted, not compared. On the second target
 //! `decovery link` runs first: an identical link records the addresses of the library publics (from the linker
 //! map) that some functions reference and the migrated knowledge lacks.
 

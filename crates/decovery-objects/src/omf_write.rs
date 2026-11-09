@@ -1,5 +1,5 @@
-//! Writing a 32-bit OMF object module: segments, groups, publics, data and fixups (port of Decomp's
-//! `nachbau/omf_schreiben.py`).
+//! Writing a 32-bit OMF object module: segments, groups, external names, publics, data and fixups (port of
+//! Decomp's `nachbau/omf_schreiben.py`).
 //!
 //! Used to hand a whole LE program to WLINK as one module: the raw bytes of every object plus one fixup per field.
 //! All data comes first, then the fixups in the given order (WLINK processes them in that order); every run of
@@ -70,6 +70,8 @@ pub enum WriteFixupKind {
     Off32,
     /// 32-bit self-relative offset (location 9, self-relative).
     Rel32,
+    /// 16-bit self-relative offset (location 1, self-relative).
+    Rel16,
 }
 
 impl WriteFixupKind {
@@ -80,6 +82,7 @@ impl WriteFixupKind {
             WriteFixupKind::Sel16 => (2, true, 2),
             WriteFixupKind::Off32 => (9, true, 4),
             WriteFixupKind::Rel32 => (9, false, 4),
+            WriteFixupKind::Rel16 => (1, false, 2),
         }
     }
 
@@ -91,7 +94,8 @@ impl WriteFixupKind {
 /// A fixup of the written module: the field at `offset` of `segment` (1-based) refers to `target_segment` (1-based)
 /// with frame F5 (the target's). Without `target_offset` the value in the field is the distance from the target
 /// segment's start; with it, the target is segment plus `target_offset` and the field is written empty (it then
-/// holds an addition the linker adds).
+/// holds an addition the linker adds). With `target_external` (1-based index into [`WriteModule::externals`]) the
+/// target is that external name instead of a segment and `target_offset` is its displacement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct WriteFixup {
@@ -100,6 +104,7 @@ pub struct WriteFixup {
     pub kind: WriteFixupKind,
     pub target_segment: u32,
     pub target_offset: Option<u32>,
+    pub target_external: Option<u32>,
 }
 
 impl WriteFixup {
@@ -116,6 +121,27 @@ impl WriteFixup {
             kind,
             target_segment,
             target_offset,
+            target_external: None,
+        }
+    }
+
+    /// A fixup whose target is the external name `external` (1-based, in the order of
+    /// [`WriteModule::externals`]): with `displacement` the field is written empty and the linker adds the
+    /// displacement (target method T2), without it the field keeps its content (T6).
+    pub fn external(
+        segment: u32,
+        offset: u32,
+        kind: WriteFixupKind,
+        external: u32,
+        displacement: Option<u32>,
+    ) -> Self {
+        WriteFixup {
+            segment,
+            offset,
+            kind,
+            target_segment: 0,
+            target_offset: displacement,
+            target_external: Some(external),
         }
     }
 
@@ -173,13 +199,72 @@ fn index(out: &mut Vec<u8>, i: u32) -> Result<(), ObjectError> {
     Ok(())
 }
 
-/// One OMF module: `THEADR`, `LNAMES`, `SEGDEF`s, `GRPDEF`s (members are 1-based segment indices), `PUBDEF`s
-/// (name, 1-based segment, offset), all `data` (1-based segment, bytes) in chunks, then the fixups in the given order
-/// in runs (one segment, ascending offsets, at most [`MAX_RUN`] fixups over at most [`CHUNK`] bytes), and `MODEND`,
-/// with the start address (1-based segment, offset; frame F5, target T0) for linkers without `option start`.
-///
-/// Errors: a fixup outside its segment's data, or something OMF cannot express (an index over 0x7FFF, a name over
-/// 255 bytes, a record over 64 KiB).
+/// Everything one written OMF module holds (see [`write_omf`]).
+#[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
+pub struct WriteModule<'a> {
+    /// Module name (`THEADR`).
+    pub name: &'a str,
+    pub segments: &'a [WriteSegment],
+    /// Groups: name and member segments (1-based).
+    pub groups: &'a [(String, Vec<u32>)],
+    /// External names (`EXTDEF`), in order: fixups refer to them by 1-based index.
+    pub externals: &'a [String],
+    /// Publics: name, 1-based segment, offset.
+    pub publics: &'a [(String, u32, u32)],
+    /// Data: 1-based segment and its bytes from offset 0.
+    pub data: &'a [(u32, Vec<u8>)],
+    pub fixups: &'a [WriteFixup],
+    /// Start address: 1-based segment, offset.
+    pub start: Option<(u32, u32)>,
+}
+
+impl<'a> WriteModule<'a> {
+    /// A module named `name` with nothing in it yet.
+    pub fn new(name: &'a str) -> Self {
+        WriteModule {
+            name,
+            ..WriteModule::default()
+        }
+    }
+
+    pub fn with_segments(mut self, segments: &'a [WriteSegment]) -> Self {
+        self.segments = segments;
+        self
+    }
+
+    pub fn with_groups(mut self, groups: &'a [(String, Vec<u32>)]) -> Self {
+        self.groups = groups;
+        self
+    }
+
+    pub fn with_externals(mut self, externals: &'a [String]) -> Self {
+        self.externals = externals;
+        self
+    }
+
+    pub fn with_publics(mut self, publics: &'a [(String, u32, u32)]) -> Self {
+        self.publics = publics;
+        self
+    }
+
+    pub fn with_data(mut self, data: &'a [(u32, Vec<u8>)]) -> Self {
+        self.data = data;
+        self
+    }
+
+    pub fn with_fixups(mut self, fixups: &'a [WriteFixup]) -> Self {
+        self.fixups = fixups;
+        self
+    }
+
+    pub fn with_start(mut self, start: Option<(u32, u32)>) -> Self {
+        self.start = start;
+        self
+    }
+}
+
+/// One OMF module without external names: [`write_omf`] of these parts.
 pub fn write_omf_module(
     module: &str,
     segments: &[WriteSegment],
@@ -189,6 +274,36 @@ pub fn write_omf_module(
     fixups: &[WriteFixup],
     start: Option<(u32, u32)>,
 ) -> Result<Vec<u8>, ObjectError> {
+    write_omf(
+        &WriteModule::new(module)
+            .with_segments(segments)
+            .with_groups(groups)
+            .with_publics(publics)
+            .with_data(data)
+            .with_fixups(fixups)
+            .with_start(start),
+    )
+}
+
+/// One OMF module: `THEADR`, `LNAMES`, `SEGDEF`s, `GRPDEF`s (members are 1-based segment indices), one `EXTDEF`
+/// with the external names, `PUBDEF`s (name, 1-based segment, offset), all `data` (1-based segment, bytes) in
+/// chunks, then the fixups in the given order in runs (one segment, ascending offsets, at most [`MAX_RUN`] fixups
+/// over at most [`CHUNK`] bytes), and `MODEND`, with the start address (1-based segment, offset; frame F5, target T0)
+/// for linkers without `option start`.
+///
+/// Errors: a fixup outside its segment's data or naming an external the module does not have, or something OMF
+/// cannot express (an index over 0x7FFF, a name over 255 bytes, a record over 64 KiB).
+pub fn write_omf(module: &WriteModule<'_>) -> Result<Vec<u8>, ObjectError> {
+    let WriteModule {
+        name: module,
+        segments,
+        groups,
+        externals,
+        publics,
+        data,
+        fixups,
+        start,
+    } = *module;
     let by_segment: BTreeMap<u32, &[u8]> = data.iter().map(|(s, d)| (*s, d.as_slice())).collect();
     let data_of = |segment: u32| by_segment.get(&segment).copied().unwrap_or(&[]);
     for f in fixups {
@@ -196,6 +311,18 @@ pub fn write_omf_module(
             return Err(unwritable(format!(
                 "fixup outside the data: segment {} +{:#x}",
                 f.segment, f.offset
+            )));
+        }
+    }
+    for f in fixups {
+        if let Some(external) = f.target_external
+            && (external == 0 || external as usize > externals.len())
+        {
+            return Err(unwritable(format!(
+                "fixup at segment {} +{:#x} names external {external}, the module has {}",
+                f.segment,
+                f.offset,
+                externals.len()
             )));
         }
     }
@@ -246,12 +373,20 @@ pub fn write_omf_module(
     record(&mut out, 0x96, &body)?;
     for s in segments {
         body.clear();
-        body.push((s.align << 5) | (s.combine << 2) | u8::from(s.use32));
-        body.extend_from_slice(&s.length.to_le_bytes());
+        // a 16-bit segment of up to 64 KiB in the 16-bit record (readers take a 32-bit SEGDEF for a 32-bit
+        // segment); 64 KiB exactly is the big bit with length 0
+        let short = !s.use32 && s.length <= 0x1_0000;
+        let big = if short && s.length == 0x1_0000 { 2 } else { 0 };
+        body.push((s.align << 5) | (s.combine << 2) | big | u8::from(s.use32));
+        if short {
+            body.extend_from_slice(&(s.length as u16).to_le_bytes());
+        } else {
+            body.extend_from_slice(&s.length.to_le_bytes());
+        }
         index(&mut body, number(&s.name))?;
         index(&mut body, number(&s.class))?;
         index(&mut body, 1)?;
-        record(&mut out, 0x99, &body)?;
+        record(&mut out, if short { 0x98 } else { 0x99 }, &body)?;
     }
     for (g, members) in groups {
         body.clear();
@@ -261,6 +396,14 @@ pub fn write_omf_module(
             index(&mut body, m)?;
         }
         record(&mut out, 0x9A, &body)?;
+    }
+    if !externals.is_empty() {
+        body.clear();
+        for e in externals {
+            name(&mut body, e)?;
+            index(&mut body, 0)?;
+        }
+        record(&mut out, 0x8C, &body)?;
     }
     for (p, segment, offset) in publics {
         body.clear();
@@ -348,14 +491,25 @@ fn run(out: &mut Vec<u8>, run: &[WriteFixup], data: &[u8]) -> Result<(), ObjectE
             | (location << 10)
             | (f.offset - first.offset) as u16;
         body.extend_from_slice(&locat.to_be_bytes());
-        match f.target_offset {
+        match (f.target_external, f.target_offset) {
+            // F5, T6: external without displacement
+            (Some(external), None) => {
+                body.push(0x56);
+                index(&mut body, external)?;
+            }
+            // F5, T2: external with displacement
+            (Some(external), Some(offset)) => {
+                body.push(0x52);
+                index(&mut body, external)?;
+                body.extend_from_slice(&offset.to_le_bytes());
+            }
             // F5 (frame of the target), T4: segment without displacement
-            None => {
+            (None, None) => {
                 body.push(0x54);
                 index(&mut body, f.target_segment)?;
             }
             // F5, T0: segment with displacement
-            Some(offset) => {
+            (None, Some(offset)) => {
                 body.push(0x50);
                 index(&mut body, f.target_segment)?;
                 body.extend_from_slice(&offset.to_le_bytes());

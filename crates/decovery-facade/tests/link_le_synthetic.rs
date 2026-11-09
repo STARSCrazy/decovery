@@ -12,7 +12,7 @@ use std::path::Path;
 use decovery_core::{RebuildResult, read_program_record};
 use decovery_facade::{Response, link};
 use decovery_objects::{WriteFixup, WriteFixupKind, WriteSegment, read_omf, write_omf_module};
-use decovery_toolchain::{response_file, to_dos_bytes};
+use decovery_toolchain::{assemble_listing, response_file, to_dos_bytes};
 use le_builder::{Fix, Le, Obj, pattern};
 use serde_json::json;
 
@@ -247,4 +247,61 @@ fn le_link_names_differences_and_stale_objects() {
         "{:?}",
         r.diagnosis
     );
+}
+
+/// `foo` as a byte listing: the field of `mov eax, offset baz` and the call by name.
+const A_ASM: &str = "\t.386p\n\textrn baz_:near\n_TEXT0001\tsegment byte public use32 'CODE'\n\tpublic foo_\n\
+                     foo_:\n\tdb 0B8h\t; mov eax, offset baz\n\tdd baz_\n\tcall baz_\n\tdb 0C3h\n_TEXT0001\tends\n\tend\n";
+
+#[test]
+fn le_link_inserts_function_of_assembler_source() {
+    let python = python_or_skip!();
+    let f = le_fixture(&python);
+    let root = f.root();
+    std::fs::remove_file(root.join("src/a.c")).unwrap();
+    std::fs::write(root.join("src/a.asm"), A_ASM).unwrap();
+    std::fs::write(
+        root.join("knowledge/rebuild.toml"),
+        REBUILD
+            .replace("a.c", "a.asm")
+            .replace("watcom-9.5", "builtin-asm"),
+    )
+    .unwrap();
+    // what `build` keeps for an assembler source the built-in assembler built
+    let object = assemble_listing("A.ASM", A_ASM).unwrap();
+    let staged = to_dos_bytes("a.asm", A_ASM).unwrap();
+    let meta = json!({
+        "schema": 1,
+        "format": OBJECT_FORMAT,
+        "file": "a.asm",
+        "profile": "builtin-asm",
+        "flags": "",
+        "inputs": { "A.ASM": blake3::hash(&staged).to_hex().to_string() },
+        "object": blake3::hash(&object).to_hex().to_string(),
+        "identical": { "foo": { "address": "flat:00010040" } },
+    });
+    std::fs::write(root.join(OBJECTS_DIR).join("a.obj"), &object).unwrap();
+    std::fs::write(
+        root.join(OBJECTS_DIR).join("a.json"),
+        serde_json::to_string_pretty(&meta).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(f.served.path().join("REBUILD.EXE"), original(false)).unwrap();
+    let response = run(&f);
+    assert_eq!(response.data["result"], "identical", "{:#}", response.data);
+    assert!(
+        strings(&response.data["hints"]).is_empty(),
+        "{:#}",
+        response.data
+    );
+    assert_eq!(
+        response.data["used"],
+        json!({ "functions": 1, "bytes": 11 })
+    );
+    let module = read_omf(
+        &std::fs::read(f.served.path().join("linked/NB.OBJ")).unwrap(),
+        "NB.OBJ",
+    )
+    .unwrap();
+    assert_eq!(&module.modules[0].sections[0].data[0x40..0x4B], &FOO);
 }

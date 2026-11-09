@@ -1,5 +1,6 @@
 //! Compiler profiles, tool directories and the rebuild settings of a workspace.
 
+mod assemble;
 mod build;
 mod cache;
 mod cheat;
@@ -14,6 +15,7 @@ mod schedule;
 mod shrink;
 mod staging;
 
+pub use assemble::{AssembleError, BUILTIN_ASSEMBLER, assemble_listing};
 pub use build::{
     CompilePlan, CompiledFile, DEFAULT_TIMEOUT_S, SourceJob, compile, compile_planned,
     is_job_not_run, plan_compile, tool_fingerprint,
@@ -38,6 +40,6 @@ pub use staging::{SourceSet, find_sources, stage, stage_text, to_dos_bytes};
 
 pub use error::ToolchainError;
 pub use profile::{
-    AssemblerSpec, LinkerSpec, MapFormat, MapSpec, ObjectFormat, Profile, profile, profiles,
-    rebuild_profile, tool_dir,
+    AssemblerSpec, LinkerSpec, MapFormat, MapSpec, ObjectFormat, Profile, assembler_profile,
+    profile, profiles, rebuild_profile, tool_dir,
 };

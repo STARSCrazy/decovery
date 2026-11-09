@@ -10,7 +10,7 @@
 //! The workspaces are migrated into temporary directories (the Decomp workspaces are never touched).
 //!
 //! First target: links with WLINK 9.5 (`[rebuild.link] profile = "watcom-9.5"`) after a full `decovery build`
-//! (which keeps the objects the inserts come from), and checks that every inserted rebuild reproduces the original's
+//! (which keeps the objects the inserts come from, those of the assembler sources included), and checks that every inserted rebuild reproduces the original's
 //! pages: no page and no fixup content may differ. WLINK 9.5 differs from the original's linker in the order of the
 //! fixup records (and possibly object flags), so `differs` is accepted. When WLINK does not run at all, its message
 //! goes to the parity document instead of failing.

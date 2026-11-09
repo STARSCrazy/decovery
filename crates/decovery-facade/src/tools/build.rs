@@ -14,9 +14,10 @@ use decovery_diff::{Blocker, Comparison, ModuleOptions, Placement, SymbolView, V
 use decovery_objects::{FunctionView, ObjectFile, functions, read_omf};
 use decovery_plugin::Progress;
 use decovery_toolchain::{
-    CheatFinding, CompiledFile, Profile, SourceJob, SourceSet, compile_planned, definitions,
-    find_cheats, find_sources, open_runners, plan_compile, rebuild_profile, stage_text,
-    startup_object,
+    AssembleError, BUILTIN_ASSEMBLER, CheatFinding, CompiledFile, Profile, SourceJob, SourceSet,
+    assemble_listing, assembler_profile, compile_planned, definitions, find_cheats, find_sources,
+    open_runners, plan_compile, rebuild_profile, stage_text, startup_object, tool_dir,
+    tool_fingerprint,
 };
 use serde_json::{Value, json};
 
@@ -131,14 +132,40 @@ struct Source {
     /// Staged DOS name (`AI.C`).
     dos_name: String,
     flags: String,
+    /// What builds the source, as recorded in `compiler`: the profile, [`BUILTIN_ASSEMBLER`] or the profile that
+    /// runs the assembler.
+    compiler: String,
     /// Source text with LF line ends, for the inline-assembly check.
     text: String,
     compiled: Option<CompiledFile>,
     /// Why the source has no object.
     error: Option<String>,
-    /// The profile has no way to build this source (an assembler file without an assembler run): not built, its
-    /// records and its kept object stay as they are.
+    /// The profile has no way to build this source (an assembler file neither the built-in assembler nor an
+    /// assembler run can build): not built, its records and its kept object stay as they are.
     skipped: bool,
+    /// Why it was skipped, when there is more to say than that no assembler is available.
+    skip_hint: Option<String>,
+}
+
+/// The workspace and profile that run the profile's assembler, when the toolchain is there: its directory (the
+/// workspace's `[rebuild] tool_dir` only when the assembler is the compiler's own profile, else the user config's
+/// `[toolchains]` entry) holds the profile's fingerprint files.
+fn profile_assembler(ws: &Workspace, profile: &Profile) -> Option<(Workspace, Profile)> {
+    let assembler = assembler_profile(profile).ok().flatten()?;
+    let mut ws = ws.clone();
+    if assembler.id != profile.id
+        && let Some(rebuild) = ws.config.rebuild.as_mut()
+    {
+        rebuild.tool_dir = None;
+    }
+    let user = read_user_config().ok()?;
+    let dir = tool_dir(&assembler, ws.config.rebuild.as_ref(), &user, &ws.root).ok()?;
+    tool_fingerprint(&assembler, &dir).ok()?;
+    Some((ws, assembler))
+}
+
+pub(super) fn is_asm(name: &str) -> bool {
+    name.to_ascii_lowercase().ends_with(".asm")
 }
 
 /// A compared function of the build.
@@ -199,7 +226,9 @@ pub(super) fn file_name(path: &Path) -> String {
 /// Compiles the C sources of `src/` (all, or `request.files`) through the runners (object cache first, all misses
 /// in one request), compares every public function of the objects with the original in one module comparison,
 /// downgrades functions with inline assembly, and records the results under the workspace lock: rebuild records,
-/// kept objects and the affected output files. Assembler sources are not built yet; they fail with a message.
+/// kept objects and the affected output files. MASM sources (`.asm`) go to the built-in assembler first
+/// ([`assemble_listing`]); one with a line outside its subset is assembled by the profile's assembler when that
+/// toolchain is there, else skipped with the line. Other assembler sources (`.s`) are skipped.
 pub fn build(
     root: &Path,
     request: &BuildRequest,
@@ -221,16 +250,14 @@ pub fn build(
     };
     let set = find_sources(&root.join(SOURCE_DIR), &files).map_err(toolchain)?;
     let existing_files: Vec<String> = set.sources.iter().map(|p| file_name(p)).collect();
-    let built_files: Vec<String> = existing_files
-        .iter()
-        .filter(|name| is_c(name))
-        .cloned()
-        .collect();
 
-    // stage
+    // stage; the built-in assembler builds what it can right here
     let run_dir = new_run_dir(root)?;
     stage_headers(&set, &run_dir.0)?;
     let mut sources: Vec<Source> = Vec::new();
+    let mut assembler: Option<Option<(Workspace, Profile)>> = None;
+    let mut assembler_jobs: Vec<usize> = Vec::new();
+    let mut assembled_inputs: BTreeMap<String, String> = BTreeMap::new();
     for path in &set.sources {
         let name = file_name(path);
         let flags = file_flags(&rebuild.file_flags, &name)
@@ -240,12 +267,46 @@ pub fn build(
             dos_name: name.to_ascii_uppercase(),
             name,
             flags,
+            compiler: profile.id.clone(),
             text: String::new(),
             compiled: None,
             error: None,
             skipped: false,
+            skip_hint: None,
         };
-        if !is_c(&source.name) {
+        if is_asm(&source.name) {
+            match stage_hashed(path, &source.name, &run_dir.0) {
+                Err(e) => source.error = Some(e.to_string()),
+                Ok((text, hash)) => {
+                    source.flags = String::new();
+                    match assemble_listing(&source.dos_name, &text) {
+                        Ok(object) => {
+                            source.compiler = BUILTIN_ASSEMBLER.to_string();
+                            source.compiled = Some(CompiledFile::built(&source.dos_name, object));
+                            assembled_inputs.insert(source.dos_name.clone(), hash);
+                        }
+                        Err(AssembleError::Unsupported { line, text }) => {
+                            match assembler.get_or_insert_with(|| profile_assembler(&ws, &profile))
+                            {
+                                Some((_, assembler)) => {
+                                    source.compiler = assembler.id.clone();
+                                    assembler_jobs.push(sources.len());
+                                }
+                                None => {
+                                    source.skipped = true;
+                                    source.skip_hint = Some(format!(
+                                        "{}: line {line} is outside the built-in assembler subset ({text}) \
+                                         and no assembler is available",
+                                        source.name
+                                    ));
+                                }
+                            }
+                        }
+                        Err(e) => source.error = Some(e.to_string()),
+                    }
+                }
+            }
+        } else if !is_c(&source.name) {
             source.skipped = true;
         } else {
             match read_text(path).and_then(|text| {
@@ -260,22 +321,47 @@ pub fn build(
         sources.push(source);
     }
 
+    let built_files: Vec<String> = sources
+        .iter()
+        .filter(|s| !s.skipped)
+        .map(|s| s.name.clone())
+        .collect();
+
     // compile: cache hits, then all misses in one runner request
     let compile_started = Instant::now();
-    let staged: Vec<usize> = (0..sources.len())
-        .filter(|&i| sources[i].error.is_none() && !sources[i].skipped)
+    let mut staged: Vec<usize> = (0..sources.len())
+        .filter(|&i| is_c(&sources[i].name) && sources[i].error.is_none() && !sources[i].skipped)
         .collect();
     let jobs_input: Vec<SourceJob> = staged
         .iter()
         .map(|&i| SourceJob::new(sources[i].dos_name.clone(), sources[i].flags.clone()))
         .collect();
     let Compiled {
-        files: compiled,
-        input_hashes,
+        files: mut compiled,
+        mut input_hashes,
         mut warnings,
     } = compile_jobs(&ws, &profile, &jobs_input, &run_dir.0, progress)?;
+    if let Some(Some((asm_ws, asm_profile))) =
+        assembler.as_ref().filter(|_| !assembler_jobs.is_empty())
+    {
+        // the sources the built-in assembler cannot take, through the profile's assembler
+        let asm_input: Vec<SourceJob> = assembler_jobs
+            .iter()
+            .map(|&i| SourceJob::new(sources[i].dos_name.clone(), String::new()))
+            .collect();
+        let more = compile_jobs(asm_ws, asm_profile, &asm_input, &run_dir.0, progress)?;
+        compiled.extend(more.files);
+        input_hashes.extend(more.input_hashes);
+        warnings.extend(more.warnings);
+        staged.extend(assembler_jobs.iter().copied());
+    }
+    input_hashes.extend(assembled_inputs);
     let jobs = compiled.iter().filter(|c| !c.cached).count();
     let cached = compiled.len() - jobs;
+    let assembled = sources
+        .iter()
+        .filter(|s| s.compiler == BUILTIN_ASSEMBLER && s.compiled.is_some())
+        .count();
     for (&i, file) in staged.iter().zip(compiled) {
         if file.object.is_none() {
             sources[i].error = Some(failure_text(&file));
@@ -369,7 +455,7 @@ pub fn build(
     let mut new_records: Vec<RebuildRecord> = Vec::new();
     for (built, comparison) in placed.iter().zip(&comparisons) {
         let source = &sources[built.source];
-        let mut r = record(built, comparison, source, &profile.id, &date);
+        let mut r = record(built, comparison, source, &date);
         // a code pragma or a finding outside any function blocks every function of the file
         let findings: Vec<&CheatFinding> = cheats[built.source]
             .iter()
@@ -417,7 +503,7 @@ pub fn build(
         for b in before {
             let mut r = RebuildRecord::new(b.address, b.name.clone(), RebuildResult::Error);
             r.file = Some(source.name.clone());
-            r.compiler = Some(profile.id.clone());
+            r.compiler = Some(source.compiler.clone());
             r.flags = Some(source.flags.clone());
             r.verdict = Some(VerdictId::Unchecked);
             r.message = Some(message.clone());
@@ -426,7 +512,12 @@ pub fn build(
         }
     }
     for source in sources.iter().filter(|s| s.skipped) {
-        hints.push(format!("no assembler available for {}", source.name));
+        hints.push(
+            source
+                .skip_hint
+                .clone()
+                .unwrap_or_else(|| format!("no assembler available for {}", source.name)),
+        );
     }
     let mut affected: BTreeSet<Address> = old
         .iter()
@@ -439,7 +530,7 @@ pub fn build(
     affected.extend(new_records.iter().map(|r| r.address));
     let merged = merge_rebuild(old, new_records.clone(), &built_files, all, &existing_files);
     save_rebuild(root, &merged, &lock)?;
-    keep_objects(root, &sources, &new_records, &input_hashes, &profile.id)?;
+    keep_objects(root, &sources, &new_records, &input_hashes)?;
     if let Some(analysis) = analysis {
         // what the build loaded is still what is on disk (checked under the lock): no second parse
         let session = if SessionStamps::of(root) == stamps {
@@ -469,6 +560,7 @@ pub fn build(
         "total_ms": ms(started.elapsed()),
         "jobs": jobs,
         "cached": cached,
+        "assembled": assembled,
     });
     respond(
         root,
@@ -479,6 +571,23 @@ pub fn build(
         warnings,
         timing,
     )
+}
+
+/// Reads the source at `path`, stages it as `name` in `dir` and returns its text and blake3 (hex) of the staged
+/// bytes.
+pub(super) fn stage_hashed(
+    path: &Path,
+    name: &str,
+    dir: &Path,
+) -> Result<(String, String), FacadeError> {
+    let text = read_text(path)?;
+    let dos_name = stage_text(name, &text, dir).map_err(toolchain)?;
+    let staged = dir.join(&dos_name);
+    let bytes = std::fs::read(&staged).map_err(|source| FacadeError::Output {
+        path: staged.clone(),
+        source,
+    })?;
+    Ok((text, blake3::hash(&bytes).to_hex().to_string()))
 }
 
 /// A fresh build directory of its own (unique per call, so builds do not collide without the workspace lock).
@@ -755,13 +864,7 @@ pub(super) fn blocker_record(b: &Blocker) -> BlockerRecord {
 }
 
 /// The record of one compared function: Decomp's `result`, decovery's verdict and blockers, the metrics.
-fn record(
-    built: &Built,
-    c: &Comparison,
-    source: &Source,
-    compiler: &str,
-    date: &str,
-) -> RebuildRecord {
+fn record(built: &Built, c: &Comparison, source: &Source, date: &str) -> RebuildRecord {
     let m = &c.metrics;
     let verdict = verdict_id(&c.verdict);
     let result = if verdict == VerdictId::Unchecked {
@@ -773,7 +876,7 @@ fn record(
     };
     let mut r = RebuildRecord::new(built.address, built.name.clone(), result);
     r.file = Some(source.name.clone());
-    r.compiler = Some(compiler.to_string());
+    r.compiler = Some(source.compiler.clone());
     r.flags = Some(source.flags.clone());
     r.verdict = Some(verdict);
     r.blockers = c.blockers.iter().map(blocker_record).collect();
@@ -803,7 +906,6 @@ fn keep_objects(
     sources: &[Source],
     records: &[RebuildRecord],
     inputs: &BTreeMap<String, String>,
-    profile: &str,
 ) -> Result<(), FacadeError> {
     let dir = root.join(OBJECTS_DIR);
     let output = |path: PathBuf| move |source| FacadeError::Output { path, source };
@@ -835,7 +937,7 @@ fn keep_objects(
             "schema": 1,
             "format": OBJECT_FORMAT,
             "file": source.name,
-            "profile": profile,
+            "profile": source.compiler,
             "flags": source.flags,
             "inputs": inputs,
             "object": blake3::hash(object).to_hex().to_string(),

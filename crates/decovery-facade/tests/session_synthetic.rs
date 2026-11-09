@@ -354,3 +354,30 @@ fn knowledge_view_without_analysis() {
     );
     assert_eq!(v.name_at(Address::Sel { segment: 1, off: 0 }), None);
 }
+
+#[test]
+fn knowledge_view_resolves_flat_data_and_function_default_names() {
+    let dir = tempfile::tempdir().unwrap();
+    write_workspace(dir.path(), SYMBOLS);
+    let ws = Workspace::open(dir.path()).unwrap();
+    let v = KnowledgeView::new(&ws, None);
+    // the names an assembler listing writes for unnamed data and functions of a flat target
+    assert_eq!(v.address_of("DAT_00041230"), Some(flat(0x41230)));
+    assert_eq!(v.address_of("DAT_0004abcd"), Some(flat(0x4ABCD)));
+    assert_eq!(v.address_of("FUN_00010200"), Some(flat(0x10200)));
+    for not_default in [
+        "DAT_41230",
+        "DAT_00041230X",
+        "DAT_1234_0010",
+        "dat_00041230",
+    ] {
+        assert_eq!(v.address_of(not_default), None, "{not_default}");
+    }
+    // with an analysis, a function name only where a function starts; data names anywhere
+    let mut analysis = Analysis::new(Provider::new("t", "1"), "aa", "kh", "2026-11-09");
+    analysis.functions = vec![AnalyzedFunction::new(flat(0x10200), flat(0x10210), 17)];
+    let v = KnowledgeView::new(&ws, Some(&analysis));
+    assert_eq!(v.address_of("FUN_00010200"), Some(flat(0x10200)));
+    assert_eq!(v.address_of("FUN_00010204"), None);
+    assert_eq!(v.address_of("DAT_00010204"), Some(flat(0x10204)));
+}

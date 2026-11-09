@@ -431,13 +431,13 @@ fn output_header_shows_new_result() {
 }
 
 #[test]
-fn assembler_source_is_skipped_and_keeps_record_and_object() {
+fn gnu_assembler_source_is_skipped_and_keeps_record_and_object() {
     let python = python_or_skip!();
     let f = fixture(&python, "");
-    f.write_source("asmpart.asm", "_TEXT segment\n_TEXT ends\nend\n");
+    f.write_source("asmpart.s", "\t.text\n_zed:\n\tret\n");
     seed(
         &f,
-        "schema = 1\n\n[[function]]\naddress = \"seg:0000:0030\"\nname = \"zed\"\nfile = \"asmpart.asm\"\nresult = \"identical\"\n",
+        "schema = 1\n\n[[function]]\naddress = \"seg:0000:0030\"\nname = \"zed\"\nfile = \"asmpart.s\"\nresult = \"identical\"\n",
     );
     let obj_dir = f.root().join("cache/rebuild/obj");
     std::fs::create_dir_all(&obj_dir).unwrap();
@@ -445,12 +445,12 @@ fn assembler_source_is_skipped_and_keeps_record_and_object() {
     std::fs::remove_file(f.root().join("src/z.c")).unwrap();
     let response = run(&f, &[]);
     let files = response.data["files"].as_array().unwrap();
-    let asm = files.iter().find(|v| v["file"] == "asmpart.asm").unwrap();
+    let asm = files.iter().find(|v| v["file"] == "asmpart.s").unwrap();
     assert_eq!(asm["status"], "skipped");
     assert!(asm.get("message").is_none(), "{asm}");
     let hints = strings(&response.data["hints"]);
     assert!(
-        hints.contains(&"no assembler available for asmpart.asm".to_string()),
+        hints.contains(&"no assembler available for asmpart.s".to_string()),
         "{hints:?}"
     );
     assert_eq!(response.data["counts"]["skipped_files"], 1);
@@ -463,12 +463,126 @@ fn assembler_source_is_skipped_and_keeps_record_and_object() {
     assert!(f.log("calls.log").iter().all(|c| !c.contains("ASMPART")));
     let zed = record(&f, "zed");
     assert_eq!((zed.result, zed.verdict), (RebuildResult::Identical, None));
-    assert_eq!(zed.file.as_deref(), Some("asmpart.asm"));
+    assert_eq!(zed.file.as_deref(), Some("asmpart.s"));
     assert_eq!(
         std::fs::read(obj_dir.join("asmpart.obj")).unwrap(),
         b"migrated object"
     );
     assert_eq!(record(&f, "add").verdict, Some(VerdictId::Identical));
+}
+
+/// A byte listing of `zed` (`_zed`, five bytes) in a 16-bit segment; `extra` goes before `_TEXT ends`.
+fn zed_listing(extra: &str) -> String {
+    format!(
+        "; zed as bytes\n_TEXT\tsegment byte public 'CODE'\n\tpublic _zed\n_zed:\n\
+         \tdb 055h,08Bh,0ECh\t; push bp; mov bp,sp\n\tdb 05Dh,0C3h\n{extra}_TEXT\tends\n\tend\n"
+    )
+}
+
+#[test]
+fn asm_source_builds_and_compares_identical() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    std::fs::remove_file(f.root().join("src/z.c")).unwrap();
+    f.write_source("asmpart.asm", &zed_listing(""));
+    let response = run(&f, &[]);
+    assert_eq!(
+        response.summary, "2 files: 3 functions, 3 identical",
+        "{}",
+        response.data
+    );
+    let zed = record(&f, "zed");
+    assert_eq!(zed.verdict, Some(VerdictId::Identical));
+    assert_eq!(zed.result, RebuildResult::Identical);
+    assert_eq!(zed.file.as_deref(), Some("asmpart.asm"));
+    assert_eq!(zed.compiler.as_deref(), Some("builtin-asm"));
+    assert_eq!(zed.flags.as_deref(), Some(""));
+    assert_eq!((zed.bytes, zed.differing), (5, 0));
+    let files = response.data["files"].as_array().unwrap();
+    let asm = files.iter().find(|v| v["file"] == "asmpart.asm").unwrap();
+    assert_eq!(asm["status"], "compiled");
+    assert_eq!(response.data["timing"]["assembled"], 1);
+    assert_eq!(response.data["timing"]["jobs"], 1);
+    // the runner compiled a.c only
+    assert_eq!(f.log("calls.log"), ["A.C"]);
+    let obj_dir = f.root().join("cache/rebuild/obj");
+    assert!(obj_dir.join("asmpart.obj").is_file());
+    let meta: Value =
+        serde_json::from_str(&std::fs::read_to_string(obj_dir.join("asmpart.json")).unwrap())
+            .unwrap();
+    assert_eq!(meta["profile"], "builtin-asm");
+    assert_eq!(meta["flags"], "");
+    assert!(meta["inputs"]["ASMPART.ASM"].is_string());
+    assert_eq!(meta["identical"]["zed"]["address"], "seg:0000:0030");
+}
+
+#[test]
+fn unsupported_asm_falls_back_to_profile_assembler() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    // a Watcom 10.6 workspace: the profile has an assembler, and its tool directory is there
+    let config = std::fs::read_to_string(f.root().join("decovery.toml")).unwrap();
+    std::fs::write(
+        f.root().join("decovery.toml"),
+        config.replace("turbo-c-2.0", "watcom-10.6"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(f.root().join("tools/BINW")).unwrap();
+    std::fs::write(f.root().join("tools/BINW/WCC386.EXE"), b"fake compiler").unwrap();
+    f.write_source("asmpart.asm", &zed_listing("\tmov ax, bx\n"));
+    f.write_obj("ASMPART", &[("zed_", ZED)]);
+    let response = run(&f, &["asmpart.asm"]);
+    assert_eq!(
+        response.summary, "asmpart.asm: 1 functions, 1 identical",
+        "{}",
+        response.data
+    );
+    assert_eq!(f.log("calls.log"), ["ASMPART.ASM"]);
+    let staged = std::fs::read_to_string(f.objects.path().join("sources/ASMPART.ASM")).unwrap();
+    assert!(staged.contains("mov ax, bx"), "{staged}");
+    let zed = record(&f, "zed");
+    assert_eq!(zed.verdict, Some(VerdictId::Identical));
+    assert_eq!(zed.compiler.as_deref(), Some("watcom-10.6"));
+    assert_eq!(response.data["timing"]["assembled"], 0);
+    assert_eq!(response.data["timing"]["jobs"], 1);
+}
+
+#[test]
+fn unsupported_asm_without_assembler_is_skipped_with_line_hint() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    f.write_source(
+        "asmpart.asm",
+        &zed_listing("\tmov ax, bx\t; not a listing\n"),
+    );
+    seed(
+        &f,
+        "schema = 1\n\n[[function]]\naddress = \"seg:0000:0030\"\nname = \"zed\"\nfile = \"asmpart.asm\"\nresult = \"identical\"\n",
+    );
+    let obj_dir = f.root().join("cache/rebuild/obj");
+    std::fs::create_dir_all(&obj_dir).unwrap();
+    std::fs::write(obj_dir.join("asmpart.obj"), b"migrated object").unwrap();
+    std::fs::remove_file(f.root().join("src/z.c")).unwrap();
+    let response = run(&f, &[]);
+    let files = response.data["files"].as_array().unwrap();
+    let asm = files.iter().find(|v| v["file"] == "asmpart.asm").unwrap();
+    assert_eq!(asm["status"], "skipped");
+    let hints = strings(&response.data["hints"]);
+    assert!(
+        hints.contains(
+            &"asmpart.asm: line 7 is outside the built-in assembler subset (mov ax, bx) and no assembler is available"
+                .to_string()
+        ),
+        "{hints:?}"
+    );
+    assert_eq!(response.data["counts"]["skipped_files"], 1);
+    assert!(f.log("calls.log").iter().all(|c| !c.contains("ASMPART")));
+    let zed = record(&f, "zed");
+    assert_eq!((zed.result, zed.verdict), (RebuildResult::Identical, None));
+    assert_eq!(
+        std::fs::read(obj_dir.join("asmpart.obj")).unwrap(),
+        b"migrated object"
+    );
 }
 
 #[test]
