@@ -284,7 +284,7 @@ dependencies = [
 
 [[package]]
 name = "decovery-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "decovery-core",
@@ -302,7 +302,7 @@ dependencies = [
 
 [[package]]
 name = "decovery-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "serde",
@@ -314,7 +314,7 @@ dependencies = [
 
 [[package]]
 name = "decovery-diff"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "decovery-core",
  "decovery-loaders",
@@ -326,7 +326,7 @@ dependencies = [
 
 [[package]]
 name = "decovery-facade"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "decovery-core",
@@ -345,7 +345,7 @@ dependencies = [
 
 [[package]]
 name = "decovery-loaders"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "decovery-core",
  "serde_json",
@@ -356,7 +356,7 @@ dependencies = [
 
 [[package]]
 name = "decovery-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "decovery-core",
  "decovery-facade",
@@ -368,7 +368,7 @@ dependencies = [
 
 [[package]]
 name = "decovery-objects"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "decovery-core",
  "serde_json",
@@ -377,7 +377,7 @@ dependencies = [
 
 [[package]]
 name = "decovery-plugin"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -386,7 +386,7 @@ dependencies = [
 
 [[package]]
 name = "decovery-toolchain"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "decovery-core",
@@ -403,7 +403,7 @@ dependencies = [
 
 [[package]]
 name = "decovery-x86"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "iced-x86",
 ]

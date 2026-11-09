@@ -11,7 +11,7 @@ fn prints_version() {
         .expect("run decovery");
     assert!(out.status.success());
     let stdout = String::from_utf8(out.stdout).expect("utf-8");
-    assert!(stdout.starts_with("decovery 0.1.0"), "got {stdout:?}");
+    assert!(stdout.starts_with("decovery 0.2.0"), "got {stdout:?}");
 }
 
 #[test]

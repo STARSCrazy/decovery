@@ -5,21 +5,11 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-09
+
+Phases 1 and 2: knowledge, analysis and the facade tools; toolchain, `build`, `link` and the second target.
+
 ### Added
-- Workspace scaffold, CI and governance files.
-- Design document, phase-0 plan and ADRs 0001–0004.
-- Typed address model and program model.
-- LE loader.
-- OMF object reader with section model and function view.
-- Function comparison with a decovery verdict and Decomp-compatible metrics.
-- Workspace configuration and `migrate` from Decomp (`decomp.toml`, symbols).
-- `migrate` carries the whole Decomp workspace into the English layout and reports generated output and
-  caches as skipped.
-- Versioned JSON-RPC plugin protocol with plugin host and Python SDK.
-- Ghidra plugin skeleton.
-- `decovery compare`: one rebuilt function against the original in a workspace, with verdict, blockers and
-  metrics as text or JSON.
-- Phase-0 parity check against Decomp (`docs/parity/phase-0.md`).
 - Knowledge write-back: `symbols.toml` and `types.h` are written atomically and byte-stable; typed rebuild and
   reference records; a workspace lock serializes writers ("workspace is locked by pid N" after 10 s).
 - Analysis store in `knowledge/analysis` (ADR 0005): functions, call edges, strings, data accesses and
@@ -54,3 +44,28 @@ and the project uses [Semantic Versioning](https://semver.org/).
   identical MZ link records the public symbols the knowledge base lacks from the linker map.
 - MCP tools `build`, `link` and `diagnose`.
 - Phase-2 parity check of `build` and `link` against Decomp (`docs/parity/phase-2.md`).
+- Built-in assembler for byte-listing assembler sources (`db`, `dd name`, `call name`, `jmp near ptr name`); the
+  profile's assembler runs only for lines outside that subset.
+- A data section with a single vote is anchored when its whole content occurs exactly once in the original at the
+  voted position (ADR 0006 item 4); default names `DAT_`/`FUN_` plus eight hex digits resolve to their address on
+  flat targets (ADR 0006 item 11).
+
+## [0.1.0] - 2026-11-05
+
+Phase 0: scaffold, loaders, comparison, plugin protocol.
+
+### Added
+- Workspace scaffold, CI and governance files.
+- Design document, phase-0 plan and ADRs 0001–0004.
+- Typed address model and program model.
+- LE loader.
+- OMF object reader with section model and function view.
+- Function comparison with a decovery verdict and Decomp-compatible metrics.
+- Workspace configuration and `migrate` from Decomp (`decomp.toml`, symbols).
+- `migrate` carries the whole Decomp workspace into the English layout and reports generated output and
+  caches as skipped.
+- Versioned JSON-RPC plugin protocol with plugin host and Python SDK.
+- Ghidra plugin skeleton.
+- `decovery compare`: one rebuilt function against the original in a workspace, with verdict, blockers and
+  metrics as text or JSON.
+- Phase-0 parity check against Decomp (`docs/parity/phase-0.md`).
