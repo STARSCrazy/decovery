@@ -26,6 +26,10 @@ compilers).
 
 First target, whole build: `34 files: 379 functions, 346 identical, 33 differ; 2 skipped`. The 32 other differing
 functions are functions Decomp records as differing too; no function Decomp records as differing became identical.
+Rerun on 2026-11-09 after the ADR 0006 item 4 amendment (a consensus frame base needs two votes and a majority):
+the same counts on both targets. The first target is LE (flat frames, no frame consensus), and none of its
+identical functions rests on a lone section vote without compared bytes; the second target's DGROUP base comes
+from its startup code.
 
 On the second target the test runs `decovery link` before `build`, as an agent would: the identical link records
 the addresses of library publics (`__streams`, `__ctype`) from the TLINK map (`source = link`). Without them three
@@ -37,18 +41,19 @@ One function of the first target. Its bytes equal the original's; one string lit
 blocker. In the rebuild the literal is an item of the module's constant data, right after the module's other
 strings. In the original that place holds another module's data, and the literal lies elsewhere in the data
 object, among strings of another module. Linking the rebuilt module would therefore not reproduce the original
-image: decovery's `differs` is right, Decomp did not check absolute data references. The fix is on the source side (the literal belongs
-to the module that owns its data).
+image: decovery's `differs` is right. Decomp checked named relative references (calls and jumps by name), but it
+did not check absolute data references, so it recorded the function as identical. The fix is on the source side
+(the literal belongs to the module that owns its data).
 
 The detailed list with function names, addresses and evidence is kept privately
 (`$DECOVERY_GOLDEN_DIR/parity-phase-2.md`, `$DECOVERY_GOLDEN_DIR/phase-2-deviations.txt`).
 
 ## Link
 
-- **Second target (TCC 2.0 + TLINK):** `identical`; `REBUILD.EXE` equals the original byte for
-  byte. From the map, the link records 71 public symbols the knowledge lacked; three map entries conflict with or
+- **Second target (TCC 2.0 + TLINK):** `identical`; `REBUILD.EXE` is byte-identical to the original. From the
+  map, the link records 71 public symbols the knowledge lacked; three map entries conflict with or
   duplicate existing knowledge and are reported as hints, not recorded.
-- **First target (WLINK 9.5, `[rebuild.link] profile = "watcom-9.5"`):** `differs`. 346 identical functions
+- **First target (WLINK 9.5, `[rebuild.link] profile = "watcom-9.5"`):** `differs`. The 346 identical functions
   are inserted into the original image and linked as one module. Stub, LE header, page table, fixup
   page table and every code and data page are identical. Two differences remain, both from the
   linker version: the preload flag (0x40) is missing on all four objects, and the fixup records of 57 pages are in
