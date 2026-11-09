@@ -1,7 +1,10 @@
-//! Writing a 32-bit OMF object module: segments, groups, external names, publics, data and fixups (port of
-//! Decomp's `nachbau/omf_schreiben.py`).
+//! Writing an OMF object module with the 32-bit record forms: segments, groups, external names, publics, data and
+//! fixups (port of Decomp's `nachbau/omf_schreiben.py`). The one exception is the segment definition of a `use16`
+//! segment of up to 64 KiB, which is written as the 16-bit `SEGDEF` (0x98): readers take every 32-bit `SEGDEF` for a
+//! 32-bit segment. Linkers treat both forms alike.
 //!
-//! Used to hand a whole LE program to WLINK as one module: the raw bytes of every object plus one fixup per field.
+//! Used to hand a whole LE program to WLINK as one module (the raw bytes of every object plus one fixup per field),
+//! and by the built-in assembler for its objects.
 //! All data comes first, then the fixups in the given order (WLINK processes them in that order); every run of
 //! fixups repeats the data it covers in an `LEDATA` right before its `FIXUPP`, since a `FIXUPP` refers to the data
 //! record before it.

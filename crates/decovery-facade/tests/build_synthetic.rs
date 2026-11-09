@@ -495,7 +495,7 @@ fn asm_source_builds_and_compares_identical() {
     assert_eq!(zed.verdict, Some(VerdictId::Identical));
     assert_eq!(zed.result, RebuildResult::Identical);
     assert_eq!(zed.file.as_deref(), Some("asmpart.asm"));
-    assert_eq!(zed.compiler.as_deref(), Some("builtin-asm"));
+    assert_eq!(zed.compiler.as_deref(), Some("builtin-asm/1"));
     assert_eq!(zed.flags.as_deref(), Some(""));
     assert_eq!((zed.bytes, zed.differing), (5, 0));
     let files = response.data["files"].as_array().unwrap();
@@ -510,7 +510,7 @@ fn asm_source_builds_and_compares_identical() {
     let meta: Value =
         serde_json::from_str(&std::fs::read_to_string(obj_dir.join("asmpart.json")).unwrap())
             .unwrap();
-    assert_eq!(meta["profile"], "builtin-asm");
+    assert_eq!(meta["profile"], "builtin-asm/1");
     assert_eq!(meta["flags"], "");
     assert!(meta["inputs"]["ASMPART.ASM"].is_string());
     assert_eq!(meta["identical"]["zed"]["address"], "seg:0000:0030");

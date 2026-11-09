@@ -33,7 +33,7 @@ use super::build::{
     read_text, runner_names, stage_headers, toolchain,
 };
 use super::link_symbols::{Candidate, additions, candidates};
-use crate::session::{default_name, parse_default_name};
+use crate::session::{default_name, parse_default_name, parse_flat_default_name};
 use crate::{FacadeError, KnowledgeView, Response};
 
 const LOCK_WAIT: Duration = Duration::from_secs(30);
@@ -596,9 +596,11 @@ fn current_object(
         && builder_ok
         && meta.flags == flags
         && meta.inputs.get(&dos_name) == Some(&staged_hash)
-        && headers
-            .iter()
-            .all(|(h, hash)| meta.inputs.get(h) == Some(hash));
+        // a byte listing includes no header; a build of assembler sources alone records none
+        && (is_asm(file)
+            || headers
+                .iter()
+                .all(|(h, hash)| meta.inputs.get(h) == Some(hash)));
     if !current {
         return Err("the kept object is stale (source, headers, flags or compiler changed)".into());
     }
@@ -675,8 +677,9 @@ fn file_inserts(
 }
 
 /// Port of `_verweis_adresse`: where a public name of an object lies in the original. The C name first, then the
-/// raw name (the prefix belongs to the name: Watcom `-4s`, `_dos_setvect`), then a default name (`fun_`, `FUN_`,
-/// `DAT_` with eight hex digits).
+/// raw name (the prefix belongs to the name: Watcom `-4s`, `_dos_setvect`), then a default name (`fun_`, and on a
+/// flat target `FUN_` and `DAT_` with eight hex digits) at any address, as Decomp's link took them: the link inserts
+/// only functions the build found identical, and compares the linked pages afterwards.
 fn reference_address(
     knowledge: &KnowledgeView<'_>,
     decoration: &Decoration,
@@ -688,11 +691,9 @@ fn reference_address(
         .or_else(|| (c != name).then(|| knowledge.address_of(name)).flatten())
         .or_else(|| parse_default_name(c))
         .or_else(|| {
-            let hex = ["DAT_", "FUN_", "fun_"]
-                .iter()
-                .find_map(|p| c.strip_prefix(p))?;
-            (hex.len() == 8 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
-                .then(|| u32::from_str_radix(hex, 16).ok().map(Address::Flat))
+            knowledge
+                .is_flat()
+                .then(|| parse_flat_default_name(c).map(|(at, _)| at))
                 .flatten()
         })
 }

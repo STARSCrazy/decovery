@@ -107,6 +107,25 @@ functions it compares (`compare_module`: first pass collects, second pass checks
     targets with known addresses); deriving the base from the knowledge base (it records no frames; the segment
     part of a recorded address is notation). `[rebuild.frames]` remains the way to pin a frame by hand.
 
+11. **Default names of flat addresses** (amendment 2026-11-09, plan task 21). Assembler listings name unnamed
+    data and functions by their address the way disassemblers do: `DAT_` or `FUN_` and eight hex digits. On a flat
+    target (LE, flat32) the comparison's knowledge view resolves such a name to that flat address, like the
+    existing `fun_` default names: `DAT_` at any address, `FUN_` only at a function start when the analysis has
+    functions. A knowledge name wins: a symbol called `DAT_…` in the knowledge base resolves to its recorded
+    address. On 16-bit targets the names do not resolve (their addresses are not flat), so such fields stay
+    `unchecked-ref`.
+
+    Why it is sound: the name only says which target the rebuild means; it is never evidence by itself. The field
+    is still compared like any named reference: the original's relocation at the same place, with the same kind
+    and width, must lead to the resolved address plus field content and displacement. A name that encodes a wrong
+    address, or an address space with another base, gives a wrong reference, not `identical`. The link resolves
+    the same names (and default names without the function-start rule, as Decomp's link did); it inserts only
+    functions the build found identical.
+
+    Rejected: leaving such fields `unchecked-ref` (fail-closed without reason: the address is in the name and the
+    original carries a relocation to check it against); adding every `DAT_` name to the knowledge base on
+    migration (knowledge would hold names that say nothing beyond the address).
+
 ## Consequences
 
 - A single function compared alone (`compare`) anchors only on its own fields; one reference to one variable

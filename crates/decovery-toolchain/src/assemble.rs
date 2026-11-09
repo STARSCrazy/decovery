@@ -3,13 +3,20 @@
 //! assembler. Such a source needs no real assembler; [`assemble_listing`] turns it into an OMF object.
 //!
 //! The accepted subset (keywords case-insensitive, `;` comments, blank lines): `.386`, `.386p`, `.387`,
-//! `.model flat`; `extrn name:near|far|byte|word|dword|fword|qword|abs` (comma lists); `public name` (lists);
+//! `.model flat`; `extrn name:near|far|proc|byte|word|dword|fword|qword|abs` (comma lists); `public name` (lists);
 //! `<seg> segment [byte|word|dword|para|page] [public|private|stack|common] [use16|use32] ['class']` … `<seg> ends`;
-//! labels `name:`; `db`/`dw`/`dd` with numbers (`0ABh`, `0x1a`, decimal, negative) and quoted strings in `db`;
+//! labels `name:`; `db`/`dw`/`dd` with numbers (`0ABh`, `0x1a`, decimal, negative) and quoted strings in `db`
+//! (code page 437, as the source is staged for a DOS assembler);
 //! `dw`/`dd` with `name`, `name+n`, `name-n` (an offset fixup of the field width; `dw` only in `use16`, `dd` only in
 //! `use32` segments); `call name` (E8 and a 16- or 32-bit field by the segment's use); `jmp near ptr name` (E9);
 //! `end [label]`. A name is a label of the file (target: its segment and offset) or an `extrn` (target: the
-//! external, displacement `n`). Anything else is [`AssembleError::Unsupported`]: nothing is guessed.
+//! external, displacement `n`); `call` and `jmp` take only labels and `near`, `proc` or `abs` externals (MASM makes
+//! a call to a `far` external a far call, one to a data external an indirect call). Anything else is
+//! [`AssembleError::Unsupported`]: nothing is guessed.
+//!
+//! A value that is neither a number nor a string is read as a name: `ABh` (a hex number without its leading digit)
+//! is the name `ABh` to MASM too, and unless it is declared it ends as [`AssembleError::Invalid`] (an unknown name),
+//! a file error without fallback to the profile's assembler.
 //!
 //! What the object holds is what MASM-style assemblers write for these lines: a segment per `segment` (default
 //! alignment paragraph, combination private, `use32` after a `.386` directive), the `extrn` names in declaration
@@ -22,8 +29,9 @@ use std::collections::HashMap;
 
 use decovery_objects::{WriteFixup, WriteFixupKind, WriteModule, WriteSegment, write_omf};
 
-/// The `compiler` a rebuild record names for a function the built-in assembler built.
-pub const BUILTIN_ASSEMBLER: &str = "builtin-asm";
+/// The `compiler` a rebuild record names for a function the built-in assembler built, with the version of its
+/// encoding: a change to what the assembler writes raises the version, so objects kept by an older one are stale.
+pub const BUILTIN_ASSEMBLER: &str = "builtin-asm/1";
 
 /// Why a source cannot be assembled by [`assemble_listing`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -58,7 +66,12 @@ struct Reference {
     kind: WriteFixupKind,
     name: String,
     addend: i64,
+    /// The statement of a call or jump (its target must be a label or a near external).
+    branch: Option<String>,
 }
+
+/// `extrn` types a near call or jump may target.
+const NEAR_TYPES: [&str; 3] = ["near", "proc", "abs"];
 
 #[derive(Default)]
 struct Assembler {
@@ -69,6 +82,8 @@ struct Assembler {
     use32_default: bool,
     flat: bool,
     externals: Vec<String>,
+    /// The declared type of each external (lower case).
+    extern_types: HashMap<String, String>,
     labels: HashMap<String, (usize, u32)>,
     /// `public` names with their line.
     publics: Vec<(String, usize)>,
@@ -175,7 +190,7 @@ fn name_expression(text: &str) -> Option<(String, i64)> {
     is_name(name).then(|| (name.to_string(), addend))
 }
 
-/// The bytes of a quoted string (`'it''s'`, `"a"`), Latin-1.
+/// The bytes of a quoted string (`'it''s'`, `"a"`), code page 437.
 fn string(text: &str) -> Option<Result<Vec<u8>, String>> {
     let quote = text.chars().next().filter(|c| *c == '\'' || *c == '"')?;
     let inner = text.strip_prefix(quote)?.strip_suffix(quote)?;
@@ -188,8 +203,8 @@ fn string(text: &str) -> Option<Result<Vec<u8>, String>> {
     Some(
         text.chars()
             .map(|c| {
-                u8::try_from(u32::from(c))
-                    .map_err(|_| format!("character {c:?} is not a single byte"))
+                crate::cp437::encode(c)
+                    .ok_or_else(|| format!("character {c:?} is not in code page 437"))
             })
             .collect(),
     )
@@ -254,7 +269,7 @@ impl Assembler {
                 if !is_name(rest) {
                     return Err(Self::unsupported(line, text));
                 }
-                self.branch(line, 0xE8, rest)?;
+                self.branch(line, text, 0xE8, rest)?;
                 return Ok(true);
             }
             "jmp" => {
@@ -265,7 +280,7 @@ impl Assembler {
                             && ptr.eq_ignore_ascii_case("ptr")
                             && is_name(name) =>
                     {
-                        self.branch(line, 0xE9, name)?;
+                        self.branch(line, text, 0xE9, name)?;
                         return Ok(true);
                     }
                     _ => return Err(Self::unsupported(line, text)),
@@ -312,8 +327,8 @@ impl Assembler {
     }
 
     fn extrn(&mut self, line: usize, text: &str, rest: &str) -> Result<(), AssembleError> {
-        const TYPES: [&str; 8] = [
-            "near", "far", "byte", "word", "dword", "fword", "qword", "abs",
+        const TYPES: [&str; 9] = [
+            "near", "far", "proc", "byte", "word", "dword", "fword", "qword", "abs",
         ];
         for item in split_items(rest) {
             let Some((name, kind)) = item.split_once(':') else {
@@ -329,8 +344,18 @@ impl Assembler {
                     format!("{name} is a label of this file and cannot be external"),
                 ));
             }
-            if !self.externals.iter().any(|e| e == name) {
-                self.externals.push(name.to_string());
+            match self.extern_types.get(name) {
+                Some(before) if *before != kind => {
+                    return Err(Self::invalid(
+                        line,
+                        format!("{name} declared external as {before} and as {kind}"),
+                    ));
+                }
+                Some(_) => {}
+                None => {
+                    self.externals.push(name.to_string());
+                    self.extern_types.insert(name.to_string(), kind);
+                }
             }
         }
         Ok(())
@@ -492,13 +517,20 @@ impl Assembler {
                 kind,
                 name,
                 addend,
+                branch: None,
             });
         }
         self.segments[segment].bytes.extend_from_slice(&bytes);
         Ok(())
     }
 
-    fn branch(&mut self, line: usize, opcode: u8, name: &str) -> Result<(), AssembleError> {
+    fn branch(
+        &mut self,
+        line: usize,
+        text: &str,
+        opcode: u8,
+        name: &str,
+    ) -> Result<(), AssembleError> {
         let what = if opcode == 0xE8 { "call" } else { "jmp" };
         let segment = self.current(line, what)?;
         let use32 = self.segments[segment].use32;
@@ -518,6 +550,7 @@ impl Assembler {
             kind,
             name: name.to_string(),
             addend: 0,
+            branch: Some(text.to_string()),
         });
         Ok(())
     }
@@ -575,6 +608,15 @@ impl Assembler {
                     }
                 });
             } else if let Some(i) = self.externals.iter().position(|e| *e == r.name) {
+                if let Some(statement) = &r.branch
+                    && !self
+                        .extern_types
+                        .get(&r.name)
+                        .is_some_and(|t| NEAR_TYPES.contains(&t.as_str()))
+                {
+                    // a far call or an indirect one through a data external: other bytes than E8/E9
+                    return Err(Self::unsupported(r.line, statement));
+                }
                 let external = i as u32 + 1;
                 fixups.push(if relative {
                     WriteFixup::external(segment, r.offset, r.kind, external, None)

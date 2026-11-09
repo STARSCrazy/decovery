@@ -213,13 +213,13 @@ fn dd_name_plus_offset_keeps_addend() {
 #[test]
 fn use16_dw_and_call_rel16() {
     let m = assemble(
-        "\textrn _var:word, _far:far\n\
+        "\textrn _var:word, _near:near\n\
          _TEXT segment word public 'CODE'\n\
          \tpublic _f\n\
          _f:\n\
          \tdb 0A1h\n\
          \tdw _var+2\n\
-         \tcall _far\n\
+         \tcall _near\n\
          \tcall _f\n\
          \tdw 0FFFFh, -2\n\
          _TEXT ends\n\
@@ -238,7 +238,7 @@ fn use16_dw_and_call_rel16() {
         relocs,
         [
             (1, 2, RelocKind::Absolute, symbol("_var"), 2),
-            (4, 2, RelocKind::Relative, symbol("_far"), 0),
+            (4, 2, RelocKind::Relative, symbol("_near"), 0),
         ]
     );
     assert_eq!(m.start, Some((0, 0)));
@@ -262,6 +262,39 @@ fn use16_dw_and_call_rel16() {
     .unwrap_err();
     assert!(
         matches!(err, AssembleError::Unsupported { line: 4, .. }),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn call_and_jmp_only_to_labels_and_near_externals() {
+    // proc and abs externals are near targets too
+    let m = assemble(
+        "\t.386p\n\textrn p_:proc, a_:abs\n_TEXT segment use32\n\tcall p_\n\tjmp near ptr a_\n_TEXT ends\n",
+    );
+    assert_eq!(m.sections[0].relocs.len(), 2);
+    // a far external is a far call to MASM, a data external an indirect one: not E8/E9, so not built here
+    for (kind, statement) in [
+        ("far", "call x"),
+        ("dword", "call x"),
+        ("byte", "jmp near ptr x"),
+        ("fword", "call x"),
+    ] {
+        let text =
+            format!("\t.386p\n\textrn x:{kind}\n_TEXT segment use32\n\t{statement}\n_TEXT ends\n");
+        assert_eq!(
+            assemble_listing("T.ASM", &text).unwrap_err(),
+            AssembleError::Unsupported {
+                line: 4,
+                text: statement.into()
+            },
+            "{kind}"
+        );
+    }
+    // the same name declared with two types
+    let err = assemble_listing("T.ASM", "\textrn x:near\n\textrn x:dword\n").unwrap_err();
+    assert!(
+        matches!(err, AssembleError::Invalid { line: 2, .. }),
         "{err:?}"
     );
 }
@@ -350,9 +383,17 @@ fn string_in_db() {
     let m = assemble(
         "_DATA segment byte public 'DATA'\n\
          \tdb 'it''s', 0, \"a;b\", 0Dh,0Ah\t; comment\n\
+         \tdb 'ä─'\n\
          _DATA ends\n\
          \tend\n",
     );
-    assert_eq!(m.sections[0].data, b"it's\0a;b\r\n");
+    // code page 437, as the staged source: a-umlaut 0x84, box drawing 0xC4
+    assert_eq!(m.sections[0].data, b"it's\0a;b\r\n\x84\xC4");
+    // a character code page 437 does not have
+    let err = assemble_listing("T.ASM", "_DATA segment\n\tdb '€'\n_DATA ends\n").unwrap_err();
+    assert!(
+        matches!(err, AssembleError::Invalid { line: 2, .. }),
+        "{err:?}"
+    );
     assert_eq!(m.sections[0].kind, SectionKind::Data);
 }

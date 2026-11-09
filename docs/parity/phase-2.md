@@ -32,9 +32,15 @@ Rerun on 2026-11-09 with the built-in assembler (plan task 21): the 150 function
 previously skipped, are built and compared; all 150 are identical, as Decomp records them. Their objects carry
 every byte of the listing, a fixup per named field (`dd name+n`, `call name`, `jmp near ptr name`) and one
 segment per function. The listings name unnamed data by its address (`DAT_` and eight hex digits); on a flat target
-the comparison now resolves such names to that address, as the link already did, so each of these fields is checked
-against the original's relocation instead of staying `unchecked-ref`. Before that change the first run left 77 of
+the comparison now resolves such names to that address, as the link already did (ADR 0006 item 11), so each of
+these fields is checked against the original's relocation instead of staying `unchecked-ref`. Before that change the first run left 77 of
 the 150 `differs`, each only through `unchecked-ref` blockers on such fields (no byte or instruction differed).
+
+The built-in assembler's objects were not compared with objects of the real assembler (WASM 10.6 is not available
+here). They agree with the original through `read_omf` and the comparison: same bytes, same publics, and every
+fixup names the same target with the same addend. Where an assembler may choose between equivalent fixup forms (a
+label's offset in the fixup or in the field; an external call with or without a zero displacement), the built-in one
+picks one form; whether WASM picks the same is unverified until WASM runs once.
 Rerun on 2026-11-09 after the ADR 0006 item 4 amendment (a consensus frame or section anchor needs two votes and a
 majority): the second target is unchanged (its DGROUP base comes from its startup code); on the first target five
 functions moved from `identical` to `differs` with one `unchecked-ref` each (see the deviation list). Before the

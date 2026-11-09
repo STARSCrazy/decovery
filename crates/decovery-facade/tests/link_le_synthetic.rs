@@ -10,9 +10,9 @@ mod le_builder;
 use std::path::Path;
 
 use decovery_core::{RebuildResult, read_program_record};
-use decovery_facade::{Response, link};
+use decovery_facade::{BuildRequest, Response, build, link};
 use decovery_objects::{WriteFixup, WriteFixupKind, WriteSegment, read_omf, write_omf_module};
-use decovery_toolchain::{assemble_listing, response_file, to_dos_bytes};
+use decovery_toolchain::{BUILTIN_ASSEMBLER, response_file, to_dos_bytes};
 use le_builder::{Fix, Le, Obj, pattern};
 use serde_json::json;
 
@@ -259,33 +259,25 @@ fn le_link_inserts_function_of_assembler_source() {
     let f = le_fixture(&python);
     let root = f.root();
     std::fs::remove_file(root.join("src/a.c")).unwrap();
+    std::fs::remove_file(root.join("knowledge/rebuild.toml")).unwrap();
     std::fs::write(root.join("src/a.asm"), A_ASM).unwrap();
-    std::fs::write(
-        root.join("knowledge/rebuild.toml"),
-        REBUILD
-            .replace("a.c", "a.asm")
-            .replace("watcom-9.5", "builtin-asm"),
+    // a header in src/: a byte listing includes none, so it does not make the kept object stale
+    std::fs::write(root.join("src/x.h"), "int x;\n").unwrap();
+    // an asm-only build: no compile job, the built-in assembler keeps the object
+    let mut request = BuildRequest::default();
+    request.files = vec!["a.asm".to_string()];
+    let built = build(root, &request, &|_| {}).unwrap();
+    assert_eq!(
+        built.summary, "a.asm: 1 functions, 1 identical",
+        "{:#}",
+        built.data
+    );
+    let meta: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join(OBJECTS_DIR).join("a.json")).unwrap(),
     )
     .unwrap();
-    // what `build` keeps for an assembler source the built-in assembler built
-    let object = assemble_listing("A.ASM", A_ASM).unwrap();
-    let staged = to_dos_bytes("a.asm", A_ASM).unwrap();
-    let meta = json!({
-        "schema": 1,
-        "format": OBJECT_FORMAT,
-        "file": "a.asm",
-        "profile": "builtin-asm",
-        "flags": "",
-        "inputs": { "A.ASM": blake3::hash(&staged).to_hex().to_string() },
-        "object": blake3::hash(&object).to_hex().to_string(),
-        "identical": { "foo": { "address": "flat:00010040" } },
-    });
-    std::fs::write(root.join(OBJECTS_DIR).join("a.obj"), &object).unwrap();
-    std::fs::write(
-        root.join(OBJECTS_DIR).join("a.json"),
-        serde_json::to_string_pretty(&meta).unwrap(),
-    )
-    .unwrap();
+    assert_eq!(meta["profile"], BUILTIN_ASSEMBLER);
+    assert!(meta["inputs"].get("X.H").is_none(), "{meta:#}");
     std::fs::write(f.served.path().join("REBUILD.EXE"), original(false)).unwrap();
     let response = run(&f);
     assert_eq!(response.data["result"], "identical", "{:#}", response.data);

@@ -105,7 +105,7 @@ pub struct KnowledgeView<'a> {
 }
 
 /// `DAT_` or `FUN_` and eight hex digits: the flat address and whether the name is a function's.
-fn parse_flat_default_name(name: &str) -> Option<(Address, bool)> {
+pub(crate) fn parse_flat_default_name(name: &str) -> Option<(Address, bool)> {
     let (hex, function) = match name.strip_prefix("DAT_") {
         Some(hex) => (hex, false),
         None => (name.strip_prefix("FUN_")?, true),
@@ -117,6 +117,11 @@ fn parse_flat_default_name(name: &str) -> Option<(Address, bool)> {
 }
 
 impl<'a> KnowledgeView<'a> {
+    /// Whether the target is flat (LE, flat32): only then do `DAT_` and `FUN_` default names resolve.
+    pub fn is_flat(&self) -> bool {
+        self.flat
+    }
+
     pub fn new(workspace: &'a Workspace, analysis: Option<&Analysis>) -> Self {
         let mut by_address = BTreeMap::new();
         for s in &workspace.symbols {
