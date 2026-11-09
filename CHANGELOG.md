@@ -37,3 +37,20 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - `decovery mcp`: MCP server over stdio with the tools `status`, `find`, `show`, `annotate`, `analyze` and
   `detail`.
 - Phase-1 parity check of `show` against Decomp (`docs/parity/phase-1.md`).
+- MZ and COM loader; OMF frames and groups; module comparison with 16-bit reference anchors (ADR 0006), with
+  DGROUP frame bases taken from the program's startup code and unanchored data references kept unchecked.
+- Compiler profiles (`watcom-9.5`, `watcom-10.6`, `turbo-c-2.0`), tool directories (`decovery setup toolchain`,
+  `[rebuild] tool_dir`), source staging and an inline-assembly check.
+- Runner contract with plugin and native runners; the `unicorn-dos` emulator plugin (Phar Lap host for 32-bit
+  Watcom tools, real-mode host for 16-bit tools) and the `dosbox-lab` runner plugin; `decovery setup unicorn-dos`
+  and `decovery setup dosbox-lab`. Plugins declare their limits and keep reusable worker pools.
+- `decovery build`: compile the rebuild sources, compare every function with the original and record verdicts and
+  blockers (`data-layout` for items the module's layout moved); an object cache skips unchanged sources. Variants
+  (`--variant`, `--function-source`) are ranked in one call, function-level attempts compile in shrunk files and
+  are confirmed on the full file.
+- `decovery diagnose` with generic diagnosis rules.
+- `decovery link`: MZ programs are compiled and linked with the original linker and compared with the original;
+  LE programs get their identical rebuilt functions inserted into the original image and linked as one module. An
+  identical MZ link records the public symbols the knowledge base lacks from the linker map.
+- MCP tools `build`, `link` and `diagnose`.
+- Phase-2 parity check of `build` and `link` against Decomp (`docs/parity/phase-2.md`).
