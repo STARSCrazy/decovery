@@ -906,18 +906,23 @@ fn flat_string_case(strings: &[u8]) -> ModuleComparison {
 }
 
 #[test]
-fn flat_unnamed_section_ref_uses_section_anchor() {
+fn flat_unnamed_section_ref_needs_an_agreed_section_anchor() {
+    // one vote anchors no section (item 4, 2026-11-09): equal bytes could be another item with the same value
     let c = flat_string_case(b"hi\0");
     assert_eq!(
-        c.functions[0].verdict,
-        Verdict::Identical,
-        "{:?}",
-        c.functions[0].blockers
+        c.functions[0].blockers,
+        vec![Blocker::UncheckedRef { at: 1 }]
     );
-    assert_eq!(c.anchors.len(), 1);
-    assert_eq!(c.anchors[0].section.as_deref(), Some("CONST"));
-    assert_eq!(c.anchors[0].base, 0x20010);
+    assert!(c.anchors.is_empty(), "{:?}", c.anchors);
+    assert!(
+        c.warnings
+            .iter()
+            .any(|w| w.contains("section CONST has no anchor")),
+        "{:?}",
+        c.warnings
+    );
 
+    // the bytes at the position the field names differ: wrong whatever the section's position
     let c = flat_string_case(b"ho\0");
     assert_eq!(
         c.functions[0].blockers,
@@ -1547,4 +1552,102 @@ fn lone_flat_reference_into_bss_is_unchecked() {
         c.functions[0].blockers,
         vec![Blocker::UncheckedRef { at: 1 }]
     );
+}
+
+// --- section ties (ADR 0006 item 3/4, amendment 2026-11-09, round 2) ---
+
+#[test]
+fn tied_section_votes_with_equal_items_are_not_identical() {
+    // `_DATA` holds two words, both 1. f0 reads a (+0, right: the original reads 0x40), f1 reads b (+2) where the
+    // original also reads a: 1:1, and the lower base (0x3E) would make f1 identical by equal bytes
+    let mut m = module16(
+        &[&load(0), &load(2)],
+        vec![off16(1, data_at(0)), off16(9, data_at(0))],
+    );
+    m.sections[1].data = vec![1, 0, 1, 0];
+    let p = program16(
+        &[&load(0x40), &load(0x40)],
+        &[(0x2040, &[1, 0, 1, 0])],
+        vec![],
+    );
+    let mut options = ModuleOptions::default();
+    options.frames.insert("DGROUP".to_string(), seg(0x200, 0));
+    let c = run16(&m, &p, &Symbols::default(), &options);
+    for f in &c.functions {
+        assert_eq!(
+            f.blockers,
+            vec![Blocker::UncheckedRef { at: 1 }],
+            "{:?}",
+            c.anchors
+        );
+    }
+    assert!(
+        c.anchors.iter().all(|a| a.section.is_none()),
+        "{:?}",
+        c.anchors
+    );
+}
+
+#[test]
+fn tied_flat_section_votes_with_equal_items_are_not_identical() {
+    let code = vec![
+        0xA1, 0, 0, 0, 0, 0xC3, 0x90, 0x90, //
+        0xA1, 4, 0, 0, 0, 0xC3, 0x90, 0x90,
+    ];
+    let to_data = || RefTarget::Section {
+        index: 1,
+        offset: 0,
+    };
+    let m = ObjectModule::new(
+        "t.c",
+        vec![
+            Section::new(
+                "_TEXT",
+                "CODE",
+                SectionKind::Code,
+                32,
+                code,
+                vec![
+                    flat_reloc(1, RelocKind::Absolute, to_data()),
+                    flat_reloc(9, RelocKind::Absolute, to_data()),
+                ],
+            ),
+            Section::new(
+                "_DATA",
+                "DATA",
+                SectionKind::Data,
+                32,
+                vec![1, 0, 0, 0, 1, 0, 0, 0],
+                vec![],
+            ),
+        ],
+        vec![
+            ObjSymbol::new("f_", 0, 0, true),
+            ObjSymbol::new("g_", 0, 8, true),
+        ],
+    );
+    let original = [
+        0xA1, 0, 0, 2, 0, 0xC3, 0x90, 0x90, //
+        0xA1, 0, 0, 2, 0, 0xC3, 0x90, 0x90,
+    ];
+    let p = flat_program(
+        &original,
+        &[1, 0, 0, 0, 1, 0, 0, 0],
+        vec![absolute(AT + 1, 0x20000), absolute(AT + 9, 0x20000)],
+    );
+    let placements: Vec<Placement> = functions(&m)
+        .iter()
+        .map(|f| Placement::new(f.clone(), Address::Flat(AT + f.start), None))
+        .collect();
+    let c = compare_module(
+        &placements,
+        &p,
+        &Symbols::default(),
+        &Decoration::watcom(),
+        &ModuleOptions::default(),
+    );
+    for f in &c.functions {
+        assert_eq!(f.blockers, vec![Blocker::UncheckedRef { at: 1 }]);
+    }
+    assert!(c.anchors.is_empty(), "{:?}", c.anchors);
 }

@@ -205,9 +205,12 @@ struct SectionAnchor {
     /// A data section whose items cannot be compared because its frame has no anchor: its fields stay unchecked
     /// (ADR 0006 item 5, amendment 2026-11-09).
     uncompared: bool,
-    /// Referenced offsets (`rel`) agreeing with an anchor that its votes do not carry ([`Tally::agreed`]) and
-    /// whose item has no byte compared with the original: nothing but the field itself confirms them.
-    unproven: BTreeSet<i64>,
+    /// The votes carry the anchor ([`Tally::agreed`]). Otherwise the section has no anchor: its fields are
+    /// unchecked, except those in `wrong`.
+    agreed: bool,
+    /// Without an anchor: votes (rel, candidate) whose item differs from the original at the position the field
+    /// itself names, so the field is wrong whatever the section's position.
+    wrong: BTreeSet<(i64, i64)>,
     /// Dissenting (rel, candidate) pairs whose item equals the original at the candidate's position: the item
     /// exists unchanged, only at another offset of the section (data layout).
     moved: BTreeSet<(i64, i64)>,
@@ -341,6 +344,54 @@ impl Anchors {
                 .get(&(key.module, key.section))
                 .cloned()
                 .unwrap_or_default();
+            if !t.agreed() {
+                // no anchor (item 4, amendment 2026-11-09): a lone vote or a tie names no position; equal bytes at
+                // the field's own position can be another item with the same value
+                let wrong = match (checked, frame_base) {
+                    (true, Some(frame)) => votes
+                        .iter()
+                        .filter(|&&(rel, candidate)| {
+                            item_check(
+                                module,
+                                key.section,
+                                rel,
+                                &bounds,
+                                frame + candidate,
+                                key.flat,
+                                program,
+                                false,
+                            ) == Item::Differs
+                        })
+                        .copied()
+                        .collect(),
+                    _ => BTreeSet::new(),
+                };
+                let section = &module.sections[key.section as usize].name;
+                let vote = |n: u32| if n == 1 { "vote" } else { "votes" };
+                anchors.warnings.push(format!(
+                    "{}: section {section} has no anchor in frame {}, the best position {:#x} has {} {} against {} \
+                     {}; its fields stay unchecked",
+                    module.name,
+                    key.frame,
+                    t.base,
+                    t.votes,
+                    vote(t.votes),
+                    t.dissent,
+                    vote(t.dissent)
+                ));
+                anchors.sections.insert(
+                    key,
+                    SectionAnchor {
+                        tally: t,
+                        differing: BTreeSet::new(),
+                        moved: BTreeSet::new(),
+                        uncompared: false,
+                        agreed: false,
+                        wrong,
+                    },
+                );
+                continue;
+            }
             let moved: BTreeSet<(i64, i64)> = match (checked, frame_base) {
                 (true, Some(frame)) => votes
                     .iter()
@@ -361,18 +412,12 @@ impl Anchors {
                     .collect(),
                 _ => BTreeSet::new(),
             };
-            let mut unproven = BTreeSet::new();
             let differing = match (checked, frame_base) {
-                (false, _) => {
-                    if !t.agreed() {
-                        unproven = rels;
-                    }
-                    BTreeSet::new()
-                }
-                (true, Some(frame)) => {
-                    let mut differing = BTreeSet::new();
-                    for rel in rels {
-                        match item_check(
+                (false, _) => BTreeSet::new(),
+                (true, Some(frame)) => rels
+                    .into_iter()
+                    .filter(|&rel| {
+                        item_check(
                             module,
                             key.section,
                             rel,
@@ -381,18 +426,9 @@ impl Anchors {
                             key.flat,
                             program,
                             false,
-                        ) {
-                            Item::Differs => {
-                                differing.insert(rel);
-                            }
-                            Item::NotCompared if !t.agreed() => {
-                                unproven.insert(rel);
-                            }
-                            Item::Equal | Item::NotCompared => {}
-                        }
-                    }
-                    differing
-                }
+                        ) == Item::Differs
+                    })
+                    .collect(),
                 (true, None) => {
                     let section = &module.sections[key.section as usize].name;
                     anchors.warnings.push(format!(
@@ -410,7 +446,8 @@ impl Anchors {
                     differing,
                     moved,
                     uncompared,
-                    unproven,
+                    agreed: true,
+                    wrong: BTreeSet::new(),
                 },
             );
         }
@@ -446,6 +483,20 @@ impl Anchors {
                 rel,
                 candidate,
             } = condition
+                && let Some(s) = self.sections.get(key)
+                && !s.agreed
+            {
+                if s.wrong.contains(&(*rel, *candidate)) {
+                    return Some(wrong);
+                }
+                unverified = true;
+                continue;
+            }
+            if let Condition::Section {
+                key,
+                rel,
+                candidate,
+            } = condition
                 && self.sections.get(key).is_some_and(|s| {
                     s.tally.base != *candidate && s.moved.contains(&(*rel, *candidate))
                 })
@@ -472,9 +523,8 @@ impl Anchors {
                     candidate,
                 } => match self.sections.get(key) {
                     Some(s) if s.tally.base == *candidate && !s.differing.contains(rel) => {
-                        // the offset agrees, but an item that cannot be compared is not checked, and neither is
-                        // one that only its own vote confirms
-                        unverified |= s.uncompared || s.unproven.contains(rel);
+                        // the offset agrees, but an item that cannot be compared is not checked
+                        unverified |= s.uncompared;
                         true
                     }
                     _ => false,
@@ -515,7 +565,7 @@ impl Anchors {
             .iter()
             .map(|(name, t)| anchor(name, None, t))
             .collect();
-        for (key, s) in &self.sections {
+        for (key, s) in self.sections.iter().filter(|(_, s)| s.agreed) {
             let name = modules
                 .get(key.module)
                 .and_then(|m| m.sections.get(key.section as usize))

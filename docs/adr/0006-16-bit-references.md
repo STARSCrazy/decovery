@@ -46,15 +46,17 @@ functions it compares (`compare_module`: first pass collects, second pass checks
    variable came out `identical` (and its right neighbour `differs`). Configured (`[rebuild.frames]`) and startup
    (item 10) bases are fixed and unaffected. A far pointer into a frame without an anchor is judged by its linear
    address (the original's relocated segment plus its offset word must be the target's), as in item 1.
-   *Section anchors (item 3) under the same amendment:* a section anchor keeps the majority with the tie to the
-   lowest value, because the item byte check (item 5) is evidence the field cannot supply itself: the rebuild's
-   item must equal the original's bytes at the address the original's field names. Where no byte of the item is
-   compared (a BSS or code section, an offset past the initialised bytes, an item made only of the section's own
-   fixup fields), that evidence is missing; such a field is `UncheckedRef` unless its section anchor has at least
-   two votes and more votes than dissent. Probes before the amendment: a lone 16-bit or 32-bit reference into
-   `_BSS` was `identical` wherever the original pointed (even into code), and of two `_BSS` references tied 1:1
-   the lower one was `identical`. 32-bit frames are flat (base 0) and never take a consensus; 32-bit section
-   anchors follow the section rule.
+   *Section anchors (item 3) under the same amendment:* the same rule applies: a section anchor needs at least
+   two votes and more votes than dissent, with no tie-break. Otherwise the section has no anchor, a warning names
+   it, and its fields are `UncheckedRef`, even when the item bytes at the position a field names equal the
+   original; a field whose item differs from the original at its own position is `WrongAbsoluteRef` (wrong
+   wherever the section lies). Equal item bytes are no evidence of the position: another item with the same value
+   passes the same way. Probes before the amendment: a lone 16-bit or 32-bit reference into `_BSS` was `identical`
+   wherever the original pointed (even into code); of two references tied 1:1 the lower one was `identical`, in
+   `_BSS` and in a data section whose two items hold the same value (16-bit with a configured frame and 32-bit LE),
+   while the right one became `DataLayout`. 32-bit frames are flat (base 0) and never take a consensus; 32-bit
+   section anchors follow the section rule. On the first parity target five functions whose module holds a single
+   reference into its constant data became `unchecked-ref` (`docs/parity/phase-2.md`).
 5. **Item bytes.** When the frame anchor is known, the bytes of each referenced item of an anchored data section
    must equal the original at `frame + section anchor + item offset`. An item reaches from its referenced offset to
    the next boundary: the next distinct referenced offset into the same section (over all compared functions of
@@ -108,7 +110,8 @@ functions it compares (`compare_module`: first pass collects, second pass checks
 ## Consequences
 
 - A single function compared alone (`compare`) anchors only on its own fields; one reference to one variable
-  stays unchecked (item 4, amendment 2026-11-09) unless a configured or startup base decides its frame. The check
+  stays unchecked (item 4, amendment 2026-11-09) unless a configured or startup base decides its frame; a lone
+  reference into a section stays unchecked as well. The check
   grows stronger with the number of functions compared together, which is why `build` compares whole OBJs
   (`compare_module`) and why a frame can be pinned in `[rebuild.frames]`.
 - A rebuild that consistently refers to the wrong variable in most of its fields moves the consensus; the

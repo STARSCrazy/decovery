@@ -21,15 +21,15 @@ compilers).
 
 | Target | Decomp identical | decovery identical too | not built (assembler) | mismatches |
 |---|---|---|---|---|
-| first (LE, Watcom 9.5) | 497 | 346 | 150 | 1 (listed deviation) |
+| first (LE, Watcom 9.5) | 497 | 341 | 150 | 6 (listed deviations) |
 | second (MZ, Turbo C 2.0) | 14 | 14 | 0 | 0 |
 
-First target, whole build: `34 files: 379 functions, 346 identical, 33 differ; 2 skipped`. The 32 other differing
+First target, whole build: `34 files: 379 functions, 341 identical, 38 differ; 2 skipped`. The 32 other differing
 functions are functions Decomp records as differing too; no function Decomp records as differing became identical.
-Rerun on 2026-11-09 after the ADR 0006 item 4 amendment (a consensus frame base needs two votes and a majority):
-the same counts on both targets. The first target is LE (flat frames, no frame consensus), and none of its
-identical functions rests on a lone section vote without compared bytes; the second target's DGROUP base comes
-from its startup code.
+Rerun on 2026-11-09 after the ADR 0006 item 4 amendment (a consensus frame or section anchor needs two votes and a
+majority): the second target is unchanged (its DGROUP base comes from its startup code); on the first target five
+functions moved from `identical` to `differs` with one `unchecked-ref` each (see the deviation list). Before the
+amendment the first target had 346 identical functions.
 
 On the second target the test runs `decovery link` before `build`, as an agent would: the identical link records
 the addresses of library publics (`__streams`, `__ctype`) from the TLINK map (`source = link`). Without them three
@@ -37,13 +37,21 @@ functions reference data decovery cannot place, and ADR 0006 rule 5 keeps those 
 
 ## Deviation list
 
-One function of the first target. Its bytes equal the original's; one string literal reference is a `data-layout`
+Six functions of the first target.
+
+One function: its bytes equal the original's; one string literal reference is a `data-layout`
 blocker. In the rebuild the literal is an item of the module's constant data, right after the module's other
 strings. In the original that place holds another module's data, and the literal lies elsewhere in the data
 object, among strings of another module. Linking the rebuilt module would therefore not reproduce the original
 image: decovery's `differs` is right. Decomp checked named relative references (calls and jumps by name), but it
 did not check absolute data references, so it recorded the function as identical. The fix is on the source side
 (the literal belongs to the module that owns its data).
+
+Five functions: each holds the only reference of its module into the module's constant data (one vote, no
+dissent). The bytes of the referenced item equal the original at the address the field names, but nothing besides
+the field itself confirms where the section lies, and an item with the same bytes elsewhere would pass the same way.
+Under ADR 0006 item 4 (amendment 2026-11-09) the field is `unchecked-ref`, so the function is not `identical`.
+This is fail-closed, not a wrong reference; Decomp did not check absolute data references.
 
 The detailed list with function names, addresses and evidence is kept privately
 (`$DECOVERY_GOLDEN_DIR/parity-phase-2.md`, `$DECOVERY_GOLDEN_DIR/phase-2-deviations.txt`).
@@ -53,9 +61,9 @@ The detailed list with function names, addresses and evidence is kept privately
 - **Second target (TCC 2.0 + TLINK):** `identical`; `REBUILD.EXE` is byte-identical to the original. From the
   map, the link records 71 public symbols the knowledge lacked; three map entries conflict with or
   duplicate existing knowledge and are reported as hints, not recorded.
-- **First target (WLINK 9.5, `[rebuild.link] profile = "watcom-9.5"`):** `differs`. The 346 identical functions
-  are inserted into the original image and linked as one module. Stub, LE header, page table, fixup
-  page table and every code and data page are identical. Two differences remain, both from the
+- **First target (WLINK 9.5, `[rebuild.link] profile = "watcom-9.5"`):** `differs`. The identical
+  functions (341) are inserted into the original image and linked as one module. Stub, LE header, page table,
+  fixup page table and every code and data page are identical. Two differences remain, both from the
   linker version: the preload flag (0x40) is missing on all four objects, and the fixup records of 57 pages are in
   another order (same content). The original was linked with WLINK 10.6, which is not available here; an identical
   link needs it. Decomp's own link inserted 494 functions, about 150 of them from assembler sources, which decovery
