@@ -74,6 +74,15 @@ struct Tally {
     source: AnchorSource,
 }
 
+impl Tally {
+    /// Whether the votes alone carry the anchor (ADR 0006 item 4, amendment 2026-11-09): at least two distinct
+    /// pairs agree and they outnumber the dissent. A lone pair proposes the base that makes it right; a tie
+    /// names no base.
+    fn agreed(&self) -> bool {
+        self.votes >= 2 && self.votes > self.dissent
+    }
+}
+
 /// Majority over distinct (target, candidate) pairs, ties to the lowest candidate; `fixed` overrides the winner.
 fn tally(pairs: &BTreeSet<(i64, i64)>, fixed: Option<i64>) -> Option<Tally> {
     let mut counts: BTreeMap<i64, u32> = BTreeMap::new();
@@ -112,12 +121,22 @@ fn address_at(linear: i64, flat: bool) -> Option<Address> {
     })
 }
 
-/// Whether the item of `section` at `rel` differs from the original, the section lying at linear `section_at`. The
+/// The comparison of one referenced item with the original.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Item {
+    Equal,
+    Differs,
+    /// No byte of the item could be compared: `rel` lies outside the section's initialised bytes, or the item
+    /// consists of the section's own fixup fields.
+    NotCompared,
+}
+
+/// How the item of `section` at `rel` compares with the original, the section lying at linear `section_at`. The
 /// item reaches from `rel` to the next boundary: the next referenced offset (`referenced`), the next symbol of the
 /// section, or the end of its initialised bytes; with `until_nul`, also its first zero byte (a C string ends
 /// there, the bytes after it belong to unreferenced items). Fixup fields of the section are not compared.
 #[allow(clippy::too_many_arguments)]
-fn item_differs(
+fn item_check(
     module: &ObjectModule,
     section: u32,
     rel: i64,
@@ -126,13 +145,13 @@ fn item_differs(
     flat: bool,
     program: &Program,
     until_nul: bool,
-) -> bool {
+) -> Item {
     let Some(s) = module.sections.get(section as usize) else {
-        return true;
+        return Item::Differs;
     };
     let len = s.data.len() as i64;
     if rel < 0 || rel >= len {
-        return false;
+        return Item::NotCompared;
     }
     let end = referenced
         .range(rel + 1..)
@@ -159,13 +178,23 @@ fn item_differs(
     let Some(original) =
         address_at(section_at + rel, flat).and_then(|a| program.read(a, end - start))
     else {
-        return true;
+        return Item::Differs;
     };
-    s.data[start..end]
-        .iter()
-        .zip(original)
-        .enumerate()
-        .any(|(i, (a, b))| a != b && !gaps.contains(&(start + i)))
+    let mut compared = false;
+    for (i, (a, b)) in s.data[start..end].iter().zip(original).enumerate() {
+        if gaps.contains(&(start + i)) {
+            continue;
+        }
+        if a != b {
+            return Item::Differs;
+        }
+        compared = true;
+    }
+    if compared {
+        Item::Equal
+    } else {
+        Item::NotCompared
+    }
 }
 
 #[derive(Debug)]
@@ -176,6 +205,9 @@ struct SectionAnchor {
     /// A data section whose items cannot be compared because its frame has no anchor: its fields stay unchecked
     /// (ADR 0006 item 5, amendment 2026-11-09).
     uncompared: bool,
+    /// Referenced offsets (`rel`) agreeing with an anchor that its votes do not carry ([`Tally::agreed`]) and
+    /// whose item has no byte compared with the original: nothing but the field itself confirms them.
+    unproven: BTreeSet<i64>,
     /// Dissenting (rel, candidate) pairs whose item equals the original at the candidate's position: the item
     /// exists unchanged, only at another offset of the section (data layout).
     moved: BTreeSet<(i64, i64)>,
@@ -270,8 +302,22 @@ impl Anchors {
             }
         }
         for (name, votes) in frame_votes {
-            if let Some(t) = tally(&votes, None) {
+            let Some(t) = tally(&votes, None) else {
+                continue;
+            };
+            if t.agreed() {
                 anchors.frames.insert(name, t);
+            } else {
+                let vote = |n: u32| if n == 1 { "vote" } else { "votes" };
+                anchors.warnings.push(format!(
+                    "frame {name}: no anchor, the best base {:#x} has {} {} against {} {}; its fields stay \
+                     unchecked",
+                    t.base,
+                    t.votes,
+                    vote(t.votes),
+                    t.dissent,
+                    vote(t.dissent)
+                ));
             }
         }
         for (key, votes) in section_votes {
@@ -300,7 +346,7 @@ impl Anchors {
                     .iter()
                     .filter(|&&(_, candidate)| candidate != t.base)
                     .filter(|&&(rel, candidate)| {
-                        !item_differs(
+                        item_check(
                             module,
                             key.section,
                             rel,
@@ -309,18 +355,24 @@ impl Anchors {
                             key.flat,
                             program,
                             true,
-                        )
+                        ) != Item::Differs
                     })
                     .copied()
                     .collect(),
                 _ => BTreeSet::new(),
             };
+            let mut unproven = BTreeSet::new();
             let differing = match (checked, frame_base) {
-                (false, _) => BTreeSet::new(),
-                (true, Some(frame)) => rels
-                    .into_iter()
-                    .filter(|&rel| {
-                        item_differs(
+                (false, _) => {
+                    if !t.agreed() {
+                        unproven = rels;
+                    }
+                    BTreeSet::new()
+                }
+                (true, Some(frame)) => {
+                    let mut differing = BTreeSet::new();
+                    for rel in rels {
+                        match item_check(
                             module,
                             key.section,
                             rel,
@@ -329,9 +381,18 @@ impl Anchors {
                             key.flat,
                             program,
                             false,
-                        )
-                    })
-                    .collect(),
+                        ) {
+                            Item::Differs => {
+                                differing.insert(rel);
+                            }
+                            Item::NotCompared if !t.agreed() => {
+                                unproven.insert(rel);
+                            }
+                            Item::Equal | Item::NotCompared => {}
+                        }
+                    }
+                    differing
+                }
                 (true, None) => {
                     let section = &module.sections[key.section as usize].name;
                     anchors.warnings.push(format!(
@@ -349,6 +410,7 @@ impl Anchors {
                     differing,
                     moved,
                     uncompared,
+                    unproven,
                 },
             );
         }
@@ -364,6 +426,20 @@ impl Anchors {
         };
         let mut unverified = false;
         let mut layout = false;
+        // A far pointer (segment and offset of one field) into a frame without an anchor: the original's relocated
+        // segment plus its offset word give the linear address, which must be the target's.
+        let far = |name: &str| {
+            let segment = conditions.iter().find_map(|c| match c {
+                Condition::Segment { frame, base } if frame == name => Some(*base),
+                _ => None,
+            })?;
+            conditions.iter().find_map(|c| match c {
+                Condition::Frame {
+                    frame, candidate, ..
+                } if frame == name => Some(*candidate == segment),
+                _ => None,
+            })
+        };
         for condition in conditions {
             if let Condition::Section {
                 key,
@@ -380,22 +456,33 @@ impl Anchors {
             let ok = match condition {
                 Condition::Frame {
                     frame, candidate, ..
-                } => self.frames.get(frame).is_some_and(|f| f.base == *candidate),
+                } => match (self.frames.get(frame), far(frame)) {
+                    (Some(f), _) => f.base == *candidate,
+                    (None, Some(linear)) => linear,
+                    // no anchor (item 4): the field is not checked; a negative base is no base at all
+                    (None, None) if *candidate >= 0 => {
+                        unverified = true;
+                        true
+                    }
+                    (None, None) => false,
+                },
                 Condition::Section {
                     key,
                     rel,
                     candidate,
                 } => match self.sections.get(key) {
                     Some(s) if s.tally.base == *candidate && !s.differing.contains(rel) => {
-                        // the offset agrees, but an item that cannot be compared is not checked
-                        unverified |= s.uncompared;
+                        // the offset agrees, but an item that cannot be compared is not checked, and neither is
+                        // one that only its own vote confirms
+                        unverified |= s.uncompared || s.unproven.contains(rel);
                         true
                     }
                     _ => false,
                 },
-                Condition::Segment { frame, base } => match self.frames.get(frame) {
-                    Some(f) => f.base == *base,
-                    None => {
+                Condition::Segment { frame, base } => match (self.frames.get(frame), far(frame)) {
+                    (Some(f), _) => f.base == *base,
+                    (None, Some(linear)) => linear,
+                    (None, None) => {
                         unverified = true;
                         true
                     }

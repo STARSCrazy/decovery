@@ -38,6 +38,23 @@ functions it compares (`compare_module`: first pass collects, second pass checks
    does not outvote a hundred variables referenced once. The value with most votes is the anchor; a tie goes to
    the lowest value. Fields proposing the anchor match; all others are `WrongAbsoluteRef`. Each anchor reports its
    votes, its dissent (votes for other values) and its source (configuration or consensus).
+   *Amendment 2026-11-09 (no self-confirmation):* a frame base from consensus is accepted only with at least two
+   votes and more votes than dissent; there is no tie-break for frames. Otherwise the frame has no anchor, the
+   comparison carries a warning naming the frame, and its fields are `UncheckedRef` (as in item 5); a field
+   proposing a negative base stays `WrongAbsoluteRef`. A lone vote proposes the base that makes its own field
+   right, and a 1:1 tie gave the base to the lower value whichever field was wrong: a reference to the wrong
+   variable came out `identical` (and its right neighbour `differs`). Configured (`[rebuild.frames]`) and startup
+   (item 10) bases are fixed and unaffected. A far pointer into a frame without an anchor is judged by its linear
+   address (the original's relocated segment plus its offset word must be the target's), as in item 1.
+   *Section anchors (item 3) under the same amendment:* a section anchor keeps the majority with the tie to the
+   lowest value, because the item byte check (item 5) is evidence the field cannot supply itself: the rebuild's
+   item must equal the original's bytes at the address the original's field names. Where no byte of the item is
+   compared (a BSS or code section, an offset past the initialised bytes, an item made only of the section's own
+   fixup fields), that evidence is missing; such a field is `UncheckedRef` unless its section anchor has at least
+   two votes and more votes than dissent. Probes before the amendment: a lone 16-bit or 32-bit reference into
+   `_BSS` was `identical` wherever the original pointed (even into code), and of two `_BSS` references tied 1:1
+   the lower one was `identical`. 32-bit frames are flat (base 0) and never take a consensus; 32-bit section
+   anchors follow the section rule.
 5. **Item bytes.** When the frame anchor is known, the bytes of each referenced item of an anchored data section
    must equal the original at `frame + section anchor + item offset`. An item reaches from its referenced offset to
    the next boundary: the next distinct referenced offset into the same section (over all compared functions of
@@ -91,8 +108,9 @@ functions it compares (`compare_module`: first pass collects, second pass checks
 ## Consequences
 
 - A single function compared alone (`compare`) anchors only on its own fields; one reference to one variable
-  always agrees with itself. The check grows stronger with the number of functions compared together, which is
-  why `build` compares whole OBJs (`compare_module`) and why a frame can be pinned in `[rebuild.frames]`.
+  stays unchecked (item 4, amendment 2026-11-09) unless a configured or startup base decides its frame. The check
+  grows stronger with the number of functions compared together, which is why `build` compares whole OBJs
+  (`compare_module`) and why a frame can be pinned in `[rebuild.frames]`.
 - A rebuild that consistently refers to the wrong variable in most of its fields moves the consensus; the
   dissent count and a configured frame are the guards against that.
 - Self-relative 16-bit fields keep the existing rule (the original's target read from its bytes); unnamed

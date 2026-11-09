@@ -208,19 +208,23 @@ fn dissenting_field_is_wrong() {
     assert_eq!((a.base, a.votes, a.dissent), (0x2000, 2, 1));
 }
 
-/// `mov ax,[_g1]; mov ax,offset _DATA+0; mov dx,offset _DATA+3; ret` (the strings `"ab"` and `"cdef"`); the
-/// string fields are 0x40 and 0x43 in the original, `strings` sits at linear 0x2040.
+/// `mov ax,[_g1]; mov ax,offset _DATA+0; mov dx,offset _DATA+3; mov bx,[_g2]; ret` (the strings `"ab"` and
+/// `"cdef"`); the string fields are 0x40 and 0x43 in the original, `strings` sits at linear 0x2040. `_g1` and `_g2`
+/// give DGROUP two votes.
 fn strings_case(strings: &[u8], symbols: &Symbols) -> ModuleComparison {
-    let code: &[u8] = &[0xA1, 0, 0, 0xB8, 0, 0, 0xBA, 3, 0, 0xC3];
+    let code: &[u8] = &[0xA1, 0, 0, 0xB8, 0, 0, 0xBA, 3, 0, 0x8B, 0x1E, 0, 0, 0xC3];
     let m = module16(
         &[code],
         vec![
             off16(1, sym("_g1")),
             off16(4, data_at(0)),
             off16(7, data_at(0)),
+            off16(11, sym("_g2")),
         ],
     );
-    let original: &[u8] = &[0xA1, 0x10, 0, 0xB8, 0x40, 0, 0xBA, 0x43, 0, 0xC3];
+    let original: &[u8] = &[
+        0xA1, 0x10, 0, 0xB8, 0x40, 0, 0xBA, 0x43, 0, 0x8B, 0x1E, 0x14, 0, 0xC3,
+    ];
     let p = program16(&[original], &[(0x2040, strings)], vec![]);
     run16(&m, &p, symbols, &ModuleOptions::default())
 }
@@ -272,7 +276,8 @@ fn no_frame_anchor_warns_and_leaves_items_unchecked() {
         vec![
             Blocker::UncheckedRef { at: 1 },
             Blocker::UncheckedRef { at: 4 },
-            Blocker::UncheckedRef { at: 7 }
+            Blocker::UncheckedRef { at: 7 },
+            Blocker::UncheckedRef { at: 11 }
         ]
     );
     assert!(c.anchors.iter().all(|a| a.section.is_some()));
@@ -322,9 +327,10 @@ fn config_frame_wins_over_consensus() {
     );
 }
 
-/// `mov ax,[_g1]; mov ax,seg DGROUP; ret` with the original's segment word `segment` and its MZ relocation.
+/// `mov ax,[_g1]; mov ax,seg DGROUP; mov bx,[_g2]; ret` with the original's segment word `segment` and its MZ
+/// relocation.
 fn selector_case(segment: u16) -> ModuleComparison {
-    let code: &[u8] = &[0xA1, 0, 0, 0xB8, 0, 0, 0xC3];
+    let code: &[u8] = &[0xA1, 0, 0, 0xB8, 0, 0, 0x8B, 0x1E, 0, 0, 0xC3];
     let selector = ObjReloc::new(
         4,
         2,
@@ -333,9 +339,12 @@ fn selector_case(segment: u16) -> ModuleComparison {
         0,
         Frame::Group("DGROUP".to_string()),
     );
-    let m = module16(&[code], vec![off16(1, sym("_g1")), selector]);
+    let m = module16(
+        &[code],
+        vec![off16(1, sym("_g1")), selector, off16(8, sym("_g2"))],
+    );
     let [lo, hi] = segment.to_le_bytes();
-    let original: &[u8] = &[0xA1, 0x10, 0, 0xB8, lo, hi, 0xC3];
+    let original: &[u8] = &[0xA1, 0x10, 0, 0xB8, lo, hi, 0x8B, 0x1E, 0x14, 0, 0xC3];
     let p = program16(
         &[original],
         &[],
@@ -404,10 +413,10 @@ fn far_pointer_offset_and_segment_match() {
         "{:?}",
         c.functions[0].blockers
     );
-    let a = anchor(&c, "DGROUP", None);
-    assert_eq!((a.base, a.votes), (0x2000, 1));
+    // a lone field anchors no frame (item 4); segment and offset still give the linear address
+    assert!(c.anchors.is_empty(), "{:?}", c.anchors);
 
-    // the segment word disagrees with the frame anchor the offset word proposes
+    // the segment word disagrees with the base the offset word proposes
     let c = far_case(group(), 0x10, 0x1F0, true);
     assert_eq!(
         c.functions[0].blockers,
@@ -445,16 +454,26 @@ fn far_pointer_missing_selector_relocation_is_wrong() {
     }
 }
 
-/// `mov ax,[_g1]` (frame `DGROUP`) and `mov ax,offset _DATA+0; mov dx,offset _DATA+3` with `frame`; the original's
-/// string fields are `string0` and `string0 + 3`, the strings at linear 0x2040.
+/// `mov ax,[_g1]` and `mov bx,[_g2]` (frame `DGROUP`) and `mov ax,offset _DATA+0; mov dx,offset _DATA+3` with
+/// `frame`; the original's string fields are `string0` and `string0 + 3`, the strings at linear 0x2040.
 fn framed_strings_case(frame: Frame, string0: u16, options: &ModuleOptions) -> ModuleComparison {
-    let code: &[u8] = &[0xA1, 0, 0, 0xB8, 0, 0, 0xBA, 3, 0, 0xC3];
+    let code: &[u8] = &[0xA1, 0, 0, 0xB8, 0, 0, 0xBA, 3, 0, 0x8B, 0x1E, 0, 0, 0xC3];
     let data =
         |offset: u32| ObjReloc::new(offset, 2, RelocKind::Absolute, data_at(0), 0, frame.clone());
-    let m = module16(&[code], vec![off16(1, sym("_g1")), data(4), data(7)]);
+    let m = module16(
+        &[code],
+        vec![
+            off16(1, sym("_g1")),
+            data(4),
+            data(7),
+            off16(11, sym("_g2")),
+        ],
+    );
     let [a0, a1] = string0.to_le_bytes();
     let [b0, b1] = (string0 + 3).to_le_bytes();
-    let original: &[u8] = &[0xA1, 0x10, 0, 0xB8, a0, a1, 0xBA, b0, b1, 0xC3];
+    let original: &[u8] = &[
+        0xA1, 0x10, 0, 0xB8, a0, a1, 0xBA, b0, b1, 0x8B, 0x1E, 0x14, 0, 0xC3,
+    ];
     let p = program16(&[original], &[(0x2040, b"ab\0cdeX\0")], vec![]);
     run16(&m, &p, &known_globals(), options)
 }
@@ -1323,4 +1342,209 @@ fn shared_functions_give_the_results_of_one_module_comparison() {
     first_wins.extend(shared_placements.iter().skip(1).cloned());
     let whole = compare_module(&first_wins, &program, &symbols, &decoration, &options);
     assert_eq!(split.functions[0], whole.functions[0]);
+}
+
+// --- consensus needs evidence beyond the field itself (ADR 0006 item 4, amendment 2026-11-09) ---
+
+#[test]
+fn single_wrong_reference_is_not_identical() {
+    // `mov ax,[_g2]` where the original loads g1's 0x10: a lone field would vote for the base that makes it right
+    let m = module16(&[LOAD], vec![off16(1, sym("_g2"))]);
+    let p = program16(&[&load(0x10)], &[], vec![]);
+    let c = run16(&m, &p, &known_globals(), &ModuleOptions::default());
+    assert_ne!(c.functions[0].verdict, Verdict::Identical);
+    assert_eq!(
+        c.functions[0].blockers,
+        vec![Blocker::UncheckedRef { at: 1 }]
+    );
+    assert!(
+        c.anchors.iter().all(|a| a.frame != "DGROUP"),
+        "{:?}",
+        c.anchors
+    );
+    assert!(
+        c.warnings
+            .iter()
+            .any(|w| w.contains("DGROUP") && w.contains("1 vote")),
+        "{:?}",
+        c.warnings
+    );
+}
+
+#[test]
+fn tied_frame_votes_leave_both_fields_unchecked() {
+    // f0 `_g2` is right (0x14), f1 `_g1` is wrong (the original has g3's 0x18): 1:1, no base wins
+    let m = module16(
+        &[LOAD, LOAD],
+        vec![off16(1, sym("_g2")), off16(9, sym("_g1"))],
+    );
+    let p = program16(&[&load(0x14), &load(0x18)], &[], vec![]);
+    let c = run16(&m, &p, &known_globals(), &ModuleOptions::default());
+    for f in &c.functions {
+        assert_ne!(f.verdict, Verdict::Identical, "{:?}", f.blockers);
+        assert_eq!(f.blockers, vec![Blocker::UncheckedRef { at: 1 }]);
+    }
+    assert!(c.anchors.iter().all(|a| a.frame != "DGROUP"));
+}
+
+#[test]
+fn tied_frame_votes_are_decided_by_a_configured_base() {
+    let m = module16(
+        &[LOAD, LOAD],
+        vec![off16(1, sym("_g2")), off16(9, sym("_g1"))],
+    );
+    let p = program16(&[&load(0x14), &load(0x18)], &[], vec![]);
+    let mut options = ModuleOptions::default();
+    options.frames.insert("DGROUP".to_string(), seg(0x200, 0));
+    let c = run16(&m, &p, &known_globals(), &options);
+    assert_eq!(c.functions[0].verdict, Verdict::Identical);
+    assert_eq!(
+        c.functions[1].blockers,
+        vec![Blocker::WrongAbsoluteRef { at: 1 }]
+    );
+}
+
+#[test]
+fn majority_with_equal_dissent_gives_no_anchor() {
+    // two votes for 0x2000 (g1, g2), two for 0x1FF0 (g3 twice wrong-shaped): 2:2 is no majority
+    let m = module16(
+        &[LOAD, LOAD, LOAD, LOAD],
+        vec![
+            off16(1, sym("_g1")),
+            off16(9, sym("_g2")),
+            off16(17, sym("_g3")),
+            off16(25, sym("_g4")),
+        ],
+    );
+    let p = program16(
+        &[&load(0x10), &load(0x14), &load(0x28), &load(0x2C)],
+        &[],
+        vec![],
+    );
+    let symbols = Symbols::with(&[
+        (seg(0x200, 0x10), "g1"),
+        (seg(0x200, 0x14), "g2"),
+        (seg(0x200, 0x18), "g3"),
+        (seg(0x200, 0x1C), "g4"),
+    ]);
+    let c = run16(&m, &p, &symbols, &ModuleOptions::default());
+    for f in &c.functions {
+        assert_eq!(f.blockers, vec![Blocker::UncheckedRef { at: 1 }]);
+    }
+}
+
+/// `mov ax,offset _BSS+rel` per entry of `rels` (one function each) against original words `words`; `_BSS` (no
+/// initialised bytes) is a member of DGROUP, whose base is configured at linear 0x2000.
+fn bss16_case(rels: &[u32], words: &[u16]) -> ModuleComparison {
+    let codes: Vec<Vec<u8>> = rels
+        .iter()
+        .map(|&r| {
+            let [lo, hi] = (r as u16).to_le_bytes();
+            vec![0xB8, lo, hi, 0xC3]
+        })
+        .collect();
+    let code_refs: Vec<&[u8]> = codes.iter().map(Vec::as_slice).collect();
+    let relocs = (0..rels.len() as u32)
+        .map(|i| {
+            off16(
+                8 * i + 1,
+                RefTarget::Section {
+                    index: 2,
+                    offset: 0,
+                },
+            )
+        })
+        .collect();
+    let mut m = module16(&code_refs, relocs);
+    m.sections.push(Section::new(
+        "_BSS",
+        "BSS",
+        SectionKind::Bss,
+        16,
+        vec![],
+        vec![],
+    ));
+    m.groups = vec![Group::new("DGROUP", vec![1, 2])];
+    let originals: Vec<Vec<u8>> = words
+        .iter()
+        .map(|&w| {
+            let [lo, hi] = w.to_le_bytes();
+            vec![0xB8, lo, hi, 0xC3]
+        })
+        .collect();
+    let original_refs: Vec<&[u8]> = originals.iter().map(Vec::as_slice).collect();
+    let p = program16(&original_refs, &[], vec![]);
+    let mut options = ModuleOptions::default();
+    options.frames.insert("DGROUP".to_string(), seg(0x200, 0));
+    run16(&m, &p, &Symbols::default(), &options)
+}
+
+#[test]
+fn lone_reference_into_bss_is_unchecked() {
+    // no bytes to compare: a lone field would anchor `_BSS` wherever it points
+    let c = bss16_case(&[0], &[0x1234]);
+    assert_eq!(
+        c.functions[0].blockers,
+        vec![Blocker::UncheckedRef { at: 1 }]
+    );
+}
+
+#[test]
+fn consistent_references_into_bss_anchor_it() {
+    let c = bss16_case(&[0, 4], &[0x80, 0x84]);
+    for f in &c.functions {
+        assert_eq!(f.verdict, Verdict::Identical, "{:?}", f.blockers);
+    }
+    let a = anchor(&c, "DGROUP", Some("_BSS"));
+    assert_eq!((a.base, a.votes, a.dissent), (0x80, 2, 0));
+
+    // 1:1 in `_BSS`: neither is identical
+    let c = bss16_case(&[0, 4], &[0x80, 0x90]);
+    for f in &c.functions {
+        assert_ne!(f.verdict, Verdict::Identical, "{:?}", f.blockers);
+    }
+}
+
+#[test]
+fn lone_flat_reference_into_bss_is_unchecked() {
+    let m = ObjectModule::new(
+        "t.c",
+        vec![
+            Section::new(
+                "_TEXT",
+                "CODE",
+                SectionKind::Code,
+                32,
+                vec![0xB8, 0, 0, 0, 0, 0xC3],
+                vec![flat_reloc(
+                    1,
+                    RelocKind::Absolute,
+                    RefTarget::Section {
+                        index: 1,
+                        offset: 0,
+                    },
+                )],
+            ),
+            Section::new("_BSS", "BSS", SectionKind::Bss, 32, vec![], vec![]),
+        ],
+        vec![ObjSymbol::new("f_", 0, 0, true)],
+    );
+    // the original points into its code: no data can confirm the rebuild's `_BSS`
+    let p = flat_program(
+        &[0xB8, 0x00, 0x01, 0x01, 0x00, 0xC3],
+        &[],
+        vec![absolute(AT + 1, 0x10100)],
+    );
+    let fs = functions(&m);
+    let c = compare_module(
+        &[Placement::new(fs[0].clone(), Address::Flat(AT), None)],
+        &p,
+        &Symbols::default(),
+        &Decoration::watcom(),
+        &ModuleOptions::default(),
+    );
+    assert_eq!(
+        c.functions[0].blockers,
+        vec![Blocker::UncheckedRef { at: 1 }]
+    );
 }
