@@ -1,6 +1,10 @@
 //! `decovery mcp` speaks newline-delimited JSON-RPC over stdio.
 
+#[path = "../../decovery-facade/tests/support/build_fixture.rs"]
+mod build_fixture;
+
 use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
@@ -81,10 +85,14 @@ struct Server {
 
 impl Server {
     fn start(dir: &tempfile::TempDir) -> Server {
+        Server::start_at(dir.path())
+    }
+
+    fn start_at(root: &Path) -> Server {
         let mut child = Command::new(env!("CARGO_BIN_EXE_decovery"))
             .arg("mcp")
             .arg("--workspace")
-            .arg(dir.path())
+            .arg(root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -183,7 +191,7 @@ fn envelope(result: &Value) -> Value {
 }
 
 #[test]
-fn lists_six_tools() {
+fn lists_nine_tools() {
     let dir = workspace();
     let mut server = Server::start(&dir);
     let response = server.request(2, "tools/list", json!({}));
@@ -192,7 +200,9 @@ fn lists_six_tools() {
     names.sort_unstable();
     assert_eq!(
         names,
-        ["analyze", "annotate", "detail", "find", "show", "status"]
+        [
+            "analyze", "annotate", "build", "detail", "diagnose", "find", "link", "show", "status"
+        ]
     );
     for tool in tools {
         assert!(tool["description"].as_str().is_some_and(|d| !d.is_empty()));
@@ -212,6 +222,41 @@ fn lists_six_tools() {
     }
     let show = tools.iter().find(|t| t["name"] == "show").unwrap();
     assert_eq!(show["inputSchema"]["required"], json!(["target"]));
+    let tool = |name: &str| tools.iter().find(|t| t["name"] == name).unwrap();
+    let build = tool("build");
+    let props = build["inputSchema"]["properties"].as_object().unwrap();
+    let mut keys: Vec<&String> = props.keys().collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["budget", "files", "function", "variants"]);
+    assert!(
+        build["inputSchema"]["required"]
+            .as_array()
+            .is_none_or(Vec::is_empty)
+    );
+    let text = format!(
+        "{}{}",
+        build["description"], props["variants"]["description"]
+    );
+    for word in ["shrunk", "confirmed_on", "diagnose"] {
+        assert!(text.contains(word), "build description lacks {word}");
+    }
+    let variant = &build["inputSchema"]["$defs"]["VariantParams"]["properties"];
+    for key in ["label", "source", "function_source"] {
+        assert!(
+            variant[key]["description"]
+                .as_str()
+                .is_some_and(|d| !d.is_empty()),
+            "variant field {key} lacks a description"
+        );
+    }
+    let diagnose = tool("diagnose");
+    assert_eq!(diagnose["inputSchema"]["required"], json!(["target"]));
+    assert!(diagnose["inputSchema"]["properties"]["budget"].is_object());
+    assert!(
+        tool("link")["inputSchema"]["properties"]
+            .as_object()
+            .is_none_or(serde_json::Map::is_empty)
+    );
     let annotate = tools.iter().find(|t| t["name"] == "annotate").unwrap();
     let props = annotate["inputSchema"]["properties"].as_object().unwrap();
     for key in [
@@ -504,5 +549,144 @@ command = [{}, {}]
     assert!(before.is_empty(), "{before:?}");
 
     let result = server.call(4, "analyze", json!({"plugin": "nosuch"}));
+    assert_eq!(result["isError"], true, "{result}");
+}
+
+#[test]
+fn diagnose_over_stdio_needs_rebuilt_object() {
+    let dir = workspace();
+    let mut server = Server::start(&dir);
+    let result = server.call(2, "diagnose", json!({"target": "alpha"}));
+    assert_eq!(result["isError"], true, "{result}");
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("no rebuilt object for alpha; run `decovery build"),
+        "{text}"
+    );
+}
+
+#[test]
+fn link_over_stdio_reports_facade_errors() {
+    let dir = workspace();
+    let mut server = Server::start(&dir);
+    let result = server.call(2, "link", json!({}));
+    assert_eq!(result["isError"], true, "{result}");
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("link supports MZ and LE"),
+        "{result}"
+    );
+}
+
+#[test]
+fn build_over_stdio_rejects_bad_variants() {
+    let dir = workspace();
+    let mut server = Server::start(&dir);
+    for variant in [
+        json!({"label": "none"}),
+        json!({"source": "a", "function_source": "b"}),
+    ] {
+        let result = server.call(
+            2,
+            "build",
+            json!({"function": "alpha", "variants": [variant]}),
+        );
+        assert_eq!(result["isError"], true, "{result}");
+        assert_eq!(
+            result["content"][0]["text"],
+            "each variant needs exactly one of source and function_source"
+        );
+    }
+}
+
+const SUB_SOURCE: &str = "int sub(int a, int b)\n{\n    return a - b;\n}\n";
+
+#[test]
+fn build_over_stdio_ranks_variants() {
+    let python = python_or_skip!();
+    let f = build_fixture::fixture(&python, "");
+    let mut worse = build_fixture::SUB.to_vec();
+    worse[6] = 0x33;
+    f.write_obj("V001", &[("_sub", &worse)]);
+    f.write_obj("V002", &[("_sub", build_fixture::SUB)]);
+    let mut server = Server::start_at(f.root());
+    let arguments = json!({
+        "function": "sub",
+        "variants": [
+            {"label": "worse", "source": format!("{SUB_SOURCE}/* 1 */\n")},
+            {"label": "better", "source": format!("{SUB_SOURCE}/* 2 */\n")}
+        ]
+    });
+    let (response, before) = server.request_with_notifications(
+        2,
+        "tools/call",
+        json!({"name": "build", "arguments": arguments, "_meta": {"progressToken": "b1"}}),
+    );
+    let result = &response["result"];
+    assert_eq!(result["isError"], false, "{response}");
+    let env = envelope(result);
+    let d = &env["data"];
+    assert_eq!(d["function"], "sub");
+    assert_eq!(d["best"], 2);
+    assert_eq!(d["variants"][0]["label"], "better");
+    assert_eq!(d["variants"][0]["verdict"], "identical");
+    assert_eq!(d["variants"][1]["label"], "worse");
+    assert!(
+        before.iter().all(
+            |m| m["method"] == "notifications/progress" && m["params"]["progressToken"] == "b1"
+        ),
+        "{before:?}"
+    );
+    // a ranking records nothing
+    assert!(!f.root().join("cache/rebuild/obj").exists());
+
+    // the same candidates again: served from the object cache, no new compiler call
+    let calls = f.log("calls.log").len();
+    let result = server.call(3, "build", arguments);
+    assert_eq!(result["isError"], false, "{result}");
+    let env = envelope(&result);
+    assert_eq!(env["data"]["timing"]["cached"], 2, "{env}");
+    assert_eq!(f.log("calls.log").len(), calls);
+}
+
+#[test]
+fn build_over_stdio_function_source_variant() {
+    let python = python_or_skip!();
+    let f = build_fixture::fixture(&python, "");
+    // the full file (validation) and the shrunk file (the attempt) give the same code
+    f.write_obj(
+        "F001",
+        &[("_add", build_fixture::ADD), ("_sub", build_fixture::SUB)],
+    );
+    f.write_obj("V001", &[("_sub", build_fixture::SUB)]);
+    let mut server = Server::start_at(f.root());
+    let result = server.call(
+        2,
+        "build",
+        json!({"function": "sub", "variants": [{"function_source": SUB_SOURCE}]}),
+    );
+    assert_eq!(result["isError"], false, "{result}");
+    let env = envelope(&result);
+    let v = &env["data"]["variants"][0];
+    assert_eq!(v["verdict"], "identical", "{env}");
+    assert_eq!(v["shrunk"], true, "{env}");
+    assert_eq!(v["confirmed_on"], "full", "{env}");
+}
+
+#[test]
+fn build_over_stdio_builds_files() {
+    let python = python_or_skip!();
+    let f = build_fixture::fixture(&python, "");
+    let mut server = Server::start_at(f.root());
+    let result = server.call(2, "build", json!({"files": ["a.c"]}));
+    assert_eq!(result["isError"], false, "{result}");
+    assert_eq!(
+        envelope(&result)["summary"],
+        "a.c: 2 functions, 2 identical"
+    );
+    assert!(f.root().join("knowledge/rebuild.toml").is_file());
+    let result = server.call(3, "build", json!({"files": ["nosuch.c"]}));
     assert_eq!(result["isError"], true, "{result}");
 }

@@ -1,5 +1,5 @@
-//! MCP server of decovery: the six facade tools (`status`, `find`, `show`, `annotate`, `analyze`, `detail`)
-//! over stdio.
+//! MCP server of decovery: the nine facade tools (`status`, `find`, `show`, `annotate`, `analyze`, `build`,
+//! `link`, `diagnose`, `detail`) over stdio.
 //!
 //! The server is a thin adapter. Every call re-opens the session from disk, so knowledge changed by another
 //! writer between calls is seen. Results are the facade envelope as JSON text; facade errors become tool
@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 
 use decovery_core::{ClaimSource, Confidence};
 use decovery_facade::{
-    AnalyzeOptions, AnnotateAction, Annotation, Budget, DEFAULT_LIMIT, FacadeError, FindQuery,
-    FindWhat, FunctionFilter, FunctionSort, Progress, Response, Session,
+    AnalyzeOptions, AnnotateAction, Annotation, Budget, BuildRequest, DEFAULT_LIMIT, FacadeError,
+    FindQuery, FindWhat, FunctionFilter, FunctionSort, Progress, Response, Session, Variant,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -22,10 +22,10 @@ use rmcp::schemars::JsonSchema;
 use rmcp::{Peer, RoleServer, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use serde::Deserialize;
 
-const INSTRUCTIONS: &str = "Tools over one decovery workspace (a reverse-engineered executable). Rebuild \
-verdicts are tool findings; names, types and comments are claims with a source and confidence.";
+const INSTRUCTIONS: &str = "Nine tools over one decovery workspace (a reverse-engineered executable). Rebuild \
+verdicts (`build`, `link`) are tool findings; names, types and comments are claims with a source and confidence.";
 
-/// Serves the six tools for the workspace at `root` on stdin/stdout until the client disconnects.
+/// Serves the nine tools for the workspace at `root` on stdin/stdout until the client disconnects.
 pub fn serve_stdio(root: PathBuf) -> Result<(), FacadeError> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -178,6 +178,47 @@ struct AnalyzeParams {
 #[derive(Deserialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 #[serde(deny_unknown_fields)]
+struct VariantParams {
+    /// Name shown in the ranking (default: its position in the request).
+    label: Option<String>,
+    /// A whole replacement of the function's source file.
+    source: Option<String>,
+    /// A definition of `function` alone, spliced into its file.
+    function_source: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(deny_unknown_fields)]
+struct BuildParams {
+    /// Source files in `src/` (e.g. `ai.c`); default: all.
+    files: Option<Vec<String>>,
+    /// Report this function only (name or address); its file is built. Required with `variants`.
+    function: Option<String>,
+    /// Candidate sources for `function` (at most 64): compiled and ranked best first, nothing is recorded.
+    /// Each has exactly one of `source` and `function_source`. A `function_source` variant may be compiled in a
+    /// file shrunk to what the function needs (`shrunk: true`, for ranking); `identical` is only reported after
+    /// the full file confirms it (`confirmed_on: "full"`). Variants are not diagnosed: call `diagnose` for a
+    /// function that differs.
+    variants: Option<Vec<VariantParams>>,
+    /// Characters of the function list returned inline (default 8000); the rest is stored as a handle.
+    /// Not used with `variants`.
+    budget: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(deny_unknown_fields)]
+struct DiagnoseParams {
+    /// Rebuilt function: name or address.
+    target: String,
+    /// Characters of the instruction pairs returned inline (default 8000); the rest is stored as a handle.
+    budget: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(deny_unknown_fields)]
 struct DetailParams {
     /// Handle id (`h_` plus 12 hex characters) from another tool's `handles`.
     handle: String,
@@ -277,34 +318,65 @@ impl Server {
             plugin: p.plugin.unwrap_or_else(|| "ghidra".into()),
             functions: p.functions,
         };
-        let root = self.root.clone();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Progress>();
-        let forward = meta.get_progress_token().map(|token| {
-            tokio::spawn(async move {
-                while let Some(p) = rx.recv().await {
-                    let mut note = ProgressNotificationParam::new(token.clone(), p.done as f64);
-                    if let Some(total) = p.total {
-                        note = note.with_total(total as f64);
-                    }
-                    if let Some(message) = p.message.filter(|m| !m.trim().is_empty()) {
-                        note = note.with_message(message);
-                    }
-                    // a client that went away does not stop the analysis
-                    let _ = peer.notify_progress(note).await;
-                }
-            })
-        });
-        let result = tokio::task::spawn_blocking(move || {
-            let progress = |p: Progress| {
-                let _ = tx.send(p);
-            };
-            decovery_facade::analyze(&root, &options, &progress)
+        self.with_progress(meta, peer, move |root, progress| {
+            decovery_facade::analyze(root, &options, progress)
         })
-        .await;
-        if let Some(forward) = forward {
-            let _ = forward.await;
+        .await
+    }
+
+    #[tool(
+        description = "Compile the rebuild sources in `src/`, compare their functions with the original and record the verdicts (identical, differs, error); decovery sets them, not the caller. Slow (minutes); reports progress. With `variants` (and `function`) it compiles candidate sources instead and ranks them best first without recording anything; those results are not diagnosed, so call `diagnose` for a function that differs. A variant compiled in a shrunk file (`shrunk: true`, for ranking) is reported `identical` only after confirmation on the full file (`confirmed_on: \"full\"`)."
+    )]
+    async fn build(
+        &self,
+        Parameters(p): Parameters<BuildParams>,
+        meta: RequestMetaObject,
+        peer: Peer<RoleServer>,
+    ) -> CallToolResult {
+        let mut request = BuildRequest::default();
+        request.files = p.files.unwrap_or_default();
+        request.function = p.function;
+        request.budget = p.budget;
+        for v in p.variants.unwrap_or_default() {
+            let variant = match (v.source, v.function_source) {
+                (Some(source), None) => Variant::new(source),
+                (None, Some(source)) => Variant::function(source),
+                _ => {
+                    return CallToolResult::error(vec![ContentBlock::text(
+                        "each variant needs exactly one of source and function_source",
+                    )]);
+                }
+            };
+            request.variants.push(match v.label {
+                Some(label) => variant.with_label(label),
+                None => variant,
+            });
         }
-        tool_result(result)
+        self.with_progress(meta, peer, move |root, progress| {
+            decovery_facade::build(root, &request, progress)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Link the whole program with the original linker and compare it with the original file (MZ: all rebuild sources are compiled and linked; LE: identical rebuilds are inserted into the original image). Records the result; `data.result` is identical, differs or a link failure. Slow; reports progress."
+    )]
+    async fn link(&self, meta: RequestMetaObject, peer: Peer<RoleServer>) -> CallToolResult {
+        self.with_progress(meta, peer, |root, progress| {
+            decovery_facade::link(root, progress)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Explain why a rebuilt function differs from the original: findings with a suggestion each, the kind of deviation and the instruction pairs side by side. Reads the object of the last `build` of its file; run `build` first."
+    )]
+    async fn diagnose(&self, Parameters(p): Parameters<DiagnoseParams>) -> CallToolResult {
+        let budget = budget(p.budget);
+        self.blocking(move |root| {
+            decovery_facade::diagnose(&Session::open(root)?, &p.target, budget)
+        })
+        .await
     }
 
     #[tool(description = "Page the stored content of a handle returned by another tool.")]
@@ -331,6 +403,47 @@ impl ServerHandler for Server {
 }
 
 impl Server {
+    /// Runs the long facade call `op` on the blocking pool and forwards its progress as MCP progress
+    /// notifications when the client sent a progress token.
+    async fn with_progress<F>(
+        &self,
+        meta: RequestMetaObject,
+        peer: Peer<RoleServer>,
+        op: F,
+    ) -> CallToolResult
+    where
+        F: FnOnce(&Path, &dyn Fn(Progress)) -> Result<Response, FacadeError> + Send + 'static,
+    {
+        let root = self.root.clone();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Progress>();
+        let forward = meta.get_progress_token().map(|token| {
+            tokio::spawn(async move {
+                while let Some(p) = rx.recv().await {
+                    let mut note = ProgressNotificationParam::new(token.clone(), p.done as f64);
+                    if let Some(total) = p.total {
+                        note = note.with_total(total as f64);
+                    }
+                    if let Some(message) = p.message.filter(|m| !m.trim().is_empty()) {
+                        note = note.with_message(message);
+                    }
+                    // a client that went away does not stop the call
+                    let _ = peer.notify_progress(note).await;
+                }
+            })
+        });
+        let result = tokio::task::spawn_blocking(move || {
+            let progress = |p: Progress| {
+                let _ = tx.send(p);
+            };
+            op(&root, &progress)
+        })
+        .await;
+        if let Some(forward) = forward {
+            let _ = forward.await;
+        }
+        tool_result(result)
+    }
+
     /// Runs `op` on the blocking pool (facade calls do file I/O and may wait for the workspace lock).
     async fn blocking<F>(&self, op: F) -> CallToolResult
     where

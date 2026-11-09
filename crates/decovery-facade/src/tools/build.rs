@@ -45,6 +45,8 @@ pub struct BuildRequest {
     pub files: Vec<String>,
     pub function: Option<String>,
     pub variants: Vec<Variant>,
+    /// Characters of the function list returned inline (default [`Budget::default`]); the rest is a handle.
+    pub budget: Option<usize>,
 }
 
 /// The build directory; removed when dropped.
@@ -881,7 +883,7 @@ fn respond(
             .iter()
             .filter(|r| r.verdict == Some(VerdictId::Identical)),
     );
-    let budget = Budget::default().chars;
+    let budget = request.budget.unwrap_or(Budget::default().chars);
     let mut used = 0usize;
     let mut shown = Vec::new();
     for r in &ordered {
