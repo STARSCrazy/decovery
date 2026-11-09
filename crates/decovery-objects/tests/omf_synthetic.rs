@@ -456,6 +456,45 @@ mod writer {
     };
 
     #[test]
+    fn overlapping_fixups_are_rejected() {
+        // an Off32 at +0 and a 2-byte field at +1 in one run: the run's end is not the last field's end
+        let segments = [WriteSegment::new("_TEXT", "CODE", 0x10, true)];
+        let write = |fixups: &[WriteFixup]| {
+            write_omf_module(
+                "m",
+                &segments,
+                &[],
+                &[],
+                &[(1, vec![0u8; 0x10])],
+                fixups,
+                None,
+            )
+        };
+        let overlapping = [
+            WriteFixup::new(1, 0, WriteFixupKind::Off32, 1, Some(0)),
+            WriteFixup::new(1, 1, WriteFixupKind::Off16, 1, Some(2)),
+        ];
+        let err = write(&overlapping).unwrap_err().to_string();
+        assert!(
+            err.contains("overlap") && err.contains("segment 1") && err.contains("+0x1"),
+            "{err}"
+        );
+        // in any order, and the same field twice
+        let err = write(&[overlapping[1], overlapping[0]])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("overlap"), "{err}");
+        let twice = WriteFixup::new(1, 4, WriteFixupKind::Off16, 1, None);
+        assert!(write(&[twice, twice]).is_err());
+        // adjacent fields are fine
+        let adjacent = [
+            WriteFixup::new(1, 0, WriteFixupKind::Off32, 1, None),
+            WriteFixup::new(1, 4, WriteFixupKind::Off16, 1, Some(2)),
+        ];
+        assert!(write(&adjacent).is_ok());
+    }
+
+    #[test]
     fn omf_writer_round_trips_through_reader() {
         let text: Vec<u8> = (0..0x900u32).map(|i| (i * 7) as u8).collect();
         let data: Vec<u8> = (0..0x40u8).collect();

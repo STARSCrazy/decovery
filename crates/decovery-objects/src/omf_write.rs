@@ -199,6 +199,22 @@ pub fn write_omf_module(
             )));
         }
     }
+    // overlapping fields cannot both be written (and the data under one would be cleared for the other)
+    let mut spans: Vec<(u32, u32, u64)> = fixups
+        .iter()
+        .map(|f| (f.segment, f.offset, f.end()))
+        .collect();
+    spans.sort_unstable();
+    for pair in spans.windows(2) {
+        if let [(segment, before, end), (next_segment, offset, _)] = *pair
+            && segment == next_segment
+            && u64::from(offset) < end
+        {
+            return Err(unwritable(format!(
+                "fixups overlap: segment {segment} +{offset:#x} lies inside the field at +{before:#x}"
+            )));
+        }
+    }
     let mut names: Vec<&str> = vec![""];
     for s in segments {
         for n in [s.name.as_str(), s.class.as_str()] {
@@ -310,8 +326,15 @@ fn run(out: &mut Vec<u8>, run: &[WriteFixup], data: &[u8]) -> Result<(), ObjectE
         return Ok(());
     };
     let start = first.offset as usize;
-    let end = last.end() as usize;
-    let mut chunk = data[start..end].to_vec();
+    // the field ending last, not necessarily the last one (the caller rejects overlapping fields)
+    let end = run.iter().map(WriteFixup::end).max().unwrap_or(last.end()) as usize;
+    let Some(span) = data.get(start..end) else {
+        return Err(unwritable(format!(
+            "fixup outside the data: segment {} +{:#x}",
+            first.segment, first.offset
+        )));
+    };
+    let mut chunk = span.to_vec();
     for f in run.iter().filter(|f| f.target_offset.is_some()) {
         let at = f.offset as usize - start;
         chunk[at..at + f.kind.width() as usize].fill(0);
