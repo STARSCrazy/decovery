@@ -61,6 +61,25 @@ pub fn link(
         &config.libraries,
     )?;
     let file = linker.output.replace("{name}", output);
+    run_linker(
+        ws, profile, line, file, build_dir, runners, cancel, progress,
+    )
+}
+
+/// Runs the link command `line` of `profile` in one runner job (build dir `C:`, tool dir `D:`) after the profile's
+/// prelude and reads the linked `file` from `build_dir`. Returns the result and the runners' warnings; a runner that
+/// cannot run at all is an error.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_linker(
+    ws: &Workspace,
+    profile: &Profile,
+    line: String,
+    file: String,
+    build_dir: &Path,
+    runners: &[Box<dyn Runner>],
+    cancel: Option<CancelToken>,
+    progress: &dyn Fn(Progress),
+) -> Result<(Linked, Vec<String>), ToolchainError> {
     let user = read_user_config().map_err(|e| ToolchainError::Invalid(e.to_string()))?;
     let dir = tool_dir(profile, ws.config.rebuild.as_ref(), &user, &ws.root)?;
     let timeout = Duration::from_secs(u64::from(

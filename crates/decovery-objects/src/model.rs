@@ -114,6 +114,9 @@ pub enum ObjectError {
     BadChecksum { offset: u64 },
     #[error("malformed object file at offset {offset:#x}: {what}")]
     Malformed { offset: u64, what: String },
+    /// The writer cannot express the module.
+    #[error("cannot write the object: {0}")]
+    Unwritable(String),
 }
 
 impl ObjectModule {

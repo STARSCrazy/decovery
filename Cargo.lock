@@ -391,6 +391,8 @@ dependencies = [
  "blake3",
  "decovery-core",
  "decovery-diff",
+ "decovery-loaders",
+ "decovery-objects",
  "decovery-plugin",
  "serde",
  "serde_json",

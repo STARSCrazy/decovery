@@ -60,6 +60,7 @@ mod compare;
 mod diagnose;
 mod instructions;
 mod pairs;
+mod program_le;
 mod program_mz;
 mod sequence;
 
@@ -69,9 +70,13 @@ use decovery_core::Address;
 use decovery_objects::FunctionView;
 
 pub use classify::{DeviationKind, Stage, classify_code, classify_deviation};
-pub use compare::{SharedFunctions, compare, compare_module, compare_module_with, same_code};
+pub use compare::{
+    InsertCode, SharedFunctions, compare, compare_module, compare_module_with, insert_code,
+    same_code,
+};
 pub use diagnose::{Finding, diagnose};
 pub use pairs::{Pair, PairKind, instruction_pairs, pairs_text};
+pub use program_le::compare_le;
 pub use program_mz::{Place, PlaceKind, diagnose_mz_link, load_image};
 
 /// The name of an address in the original, and whether it is only a default name (`fun_0001A2B0`).

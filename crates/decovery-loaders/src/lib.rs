@@ -3,7 +3,10 @@
 pub mod le;
 pub mod mz;
 
-pub use le::{LeHeader, LeImage, RawFixup, load_le};
+pub use le::{
+    FIXUP_BLOCK, LeHeader, LeImage, LeObject, RawFixup, fixup_processing_order, load_le,
+    processing_order,
+};
 pub use mz::{MzHeader, MzImage, load_com, load_mz, mz_image_range, parse_mz_header};
 
 /// Why a file could not be loaded. Offsets are byte offsets into the input.

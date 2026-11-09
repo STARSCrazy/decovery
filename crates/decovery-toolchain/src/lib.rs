@@ -5,6 +5,7 @@ mod cache;
 mod cheat;
 mod cp437;
 mod error;
+mod le_link;
 mod link;
 mod profile;
 mod runner;
@@ -19,6 +20,11 @@ pub use build::{
 pub use cache::{OBJECT_CACHE_DIR, ObjectCache};
 pub use cheat::{CheatFinding, CheatKind, find_cheats};
 pub use cp437::decode as from_cp437;
+pub use le_link::{
+    Insert, LE_DEFAULT_MODULE, LE_DEFAULT_STACK, LE_OBJECT_FILE, LE_RESPONSE_STEM, LE_START_SYMBOL,
+    LE_STUB_FILE, SegmentPlan, build_insert, le_linker, le_module, link_le, module_name,
+    response_file, segment_plan, usable_inserts,
+};
 pub use link::{DEFAULT_STARTUP, Linked, link};
 pub use runner::{
     JobOutcome, JobStatus, Mount, NativeRunner, PluginRunner, RunJob, RunRequest, Runner,

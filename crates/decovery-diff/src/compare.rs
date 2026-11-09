@@ -161,6 +161,70 @@ pub fn same_code(a: &FunctionView<'_>, b: &FunctionView<'_>) -> bool {
     }
 }
 
+/// A rebuilt function as it goes into a linked image (Decomp's `BibFunktion` after `_ohne_endfuellung`, with the
+/// calls of `_interne_aufrufe`): see [`insert_code`]. Offsets are relative to the function start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct InsertCode {
+    /// The bytes as Decomp's reader produced them (own-section absolute fields it could name are zeroed), without
+    /// the padding behind the function.
+    pub bytes: Vec<u8>,
+    /// Bytes overwritten by a fixup.
+    pub gaps: BTreeSet<u32>,
+    /// Named fixup fields: field offset → public (decorated) name.
+    pub references: BTreeMap<u32, String>,
+    /// Self-relative fixup fields.
+    pub relative: BTreeSet<u32>,
+    /// `E8`/`E9` fields without a fixup whose target is another function of the same section: field → name. They
+    /// are self-relative too.
+    pub internal_calls: BTreeMap<u32, String>,
+    /// Displacements of the fixup records of named references (non-zero ones).
+    pub addends: BTreeMap<u32, i64>,
+}
+
+/// [`InsertCode`] of `f`, for linking it into an image; `None` when its section is not 16 or 32 bits wide. The
+/// padding behind the function goes: in the original another function's jump table may already lie there (Watcom
+/// pads to the next 16-byte boundary), and so may a following function's jump table the rebuild hangs onto this
+/// one, whose targets lie in a function that may still differ. The original's bytes stay there.
+pub fn insert_code(f: &FunctionView<'_>) -> Option<InsertCode> {
+    let section = f.module.sections.get(f.section as usize)?;
+    let bits = u32::from(section.bits);
+    if bits != 16 && bits != 32 {
+        return None;
+    }
+    let rebuild = Rebuild::new(f);
+    let decoded = decode_detailed(
+        &rebuild.bytes,
+        bits,
+        0,
+        &DecodeOptions::new(rebuild.gaps.clone(), false),
+    );
+    let end = decoded
+        .iter()
+        .rev()
+        .take_while(|d| d.is_padding())
+        .last()
+        .map_or(rebuild.bytes.len() as u32, |d| d.offset);
+    let width = bits / 8;
+    let internal_calls = rebuild
+        .internal_calls(width)
+        .into_iter()
+        .filter(|&(field, _)| field + width <= end)
+        .collect();
+    Some(InsertCode {
+        bytes: rebuild.bytes[..end as usize].to_vec(),
+        gaps: rebuild.gaps.range(..end).copied().collect(),
+        references: rebuild.refs.into_iter().filter(|&(k, _)| k < end).collect(),
+        relative: rebuild.relative.range(..end).copied().collect(),
+        internal_calls,
+        addends: rebuild
+            .addends
+            .into_iter()
+            .filter(|&(k, _)| k < end)
+            .collect(),
+    })
+}
+
 /// What [`same_code`] compares of one function.
 #[derive(PartialEq, Eq)]
 struct CodeCore {

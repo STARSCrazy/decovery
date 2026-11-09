@@ -10,6 +10,10 @@ A job whose last command runs TLINK is a link job: its command line is appended 
 object of the line is missing in the C mount, else copies `REBUILD.EXE` from FAKE_OMF_DIR into the C mount (exit 0)
 or, without that file, prints a linker error and exits 2.
 
+A job whose last command runs WLINK is an LE link job: its command line goes to `link.log`, the files it links
+(`NB.OBJ`, `NB.LNK`, `STUB.EXE`) are copied to `linked/` in FAKE_OMF_DIR, and `REBUILD.EXE` from FAKE_OMF_DIR is
+copied into the C mount as the program `NB.LNK` names (exit 0); without it the job prints an error and exits 1.
+
 With FAKE_NOT_RUN_ONCE=1 the first call with more than one job answers only its first job; the others come back
 `failed` with "job not run: ..." like the dosbox-lab runner after a hang.
 """
@@ -45,7 +49,24 @@ def link_job(job, c_root):
     return {"status": "done", "exit_code": 0, "stdout": "Turbo Link Version 2.0\r\n"}
 
 
+def wlink_job(job, c_root):
+    append("link.log", job["commands"][-1])
+    kept = os.path.join(OBJECTS, "linked")
+    os.makedirs(kept, exist_ok=True)
+    for name in ("NB.OBJ", "NB.LNK", "STUB.EXE"):
+        shutil.copyfile(os.path.join(c_root, name), os.path.join(kept, name))
+    with open(os.path.join(c_root, "NB.LNK"), encoding="ascii") as f:
+        output = next(line.split()[1] for line in f if line.startswith("name "))
+    exe = os.path.join(OBJECTS, "REBUILD.EXE")
+    if not os.path.isfile(exe):
+        return {"status": "done", "exit_code": 1, "stdout": "Error! E2028: _cstart_ is an undefined reference\r\n"}
+    shutil.copyfile(exe, os.path.join(c_root, output.upper()))
+    return {"status": "done", "exit_code": 0, "stdout": "WATCOM Linker Version 9.5\r\n"}
+
+
 def run_job(job, c_root):
+    if "WLINK" in job["commands"][-1].split()[0].upper():
+        return wlink_job(job, c_root)
     if "TLINK" in job["commands"][-1].split()[0].upper():
         return link_job(job, c_root)
     cd = None

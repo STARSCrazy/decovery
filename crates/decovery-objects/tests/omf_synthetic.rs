@@ -426,3 +426,143 @@ fn undefined_frame_thread_is_unknown() {
     let f = read_omf(&bytes, "t.obj").unwrap();
     assert_eq!(f.modules[0].sections[0].relocs[0].frame, Frame::Unknown);
 }
+
+mod writer {
+    use decovery_core::RelocKind;
+    use decovery_objects::{
+        Frame, RefTarget, SectionKind, WriteFixup, WriteFixupKind, WriteSegment, read_omf,
+        write_omf_module,
+    };
+
+    #[test]
+    fn omf_writer_round_trips_through_reader() {
+        let text: Vec<u8> = (0..0x900u32).map(|i| (i * 7) as u8).collect();
+        let data: Vec<u8> = (0..0x40u8).collect();
+        let segments = [
+            WriteSegment::new("_TEXT", "CODE", 0x900, true),
+            WriteSegment::new("_DATA", "DATA", 0x40, true),
+            WriteSegment::new("STACK", "STACK", 0x100, true)
+                .with_combine(5)
+                .with_align(1),
+        ];
+        let groups = [("DGROUP".to_string(), vec![2, 3])];
+        let publics = [("_cstart_".to_string(), 1, 0x10)];
+        let mut fixups = vec![
+            WriteFixup::new(1, 0x01, WriteFixupKind::Off32, 2, None),
+            WriteFixup::new(1, 0x06, WriteFixupKind::Rel32, 1, None),
+            WriteFixup::new(1, 0x0C, WriteFixupKind::Off16, 2, Some(0x22)),
+            WriteFixup::new(1, 0x10, WriteFixupKind::Sel16, 2, None),
+            WriteFixup::new(2, 0x08, WriteFixupKind::Off32, 1, None),
+        ];
+        // more than one run per record: over 200 fixups and over 1000 bytes
+        fixups.extend(
+            (0..300).map(|i| WriteFixup::new(1, 0x20 + 6 * i, WriteFixupKind::Off32, 2, None)),
+        );
+        let bytes = write_omf_module(
+            "decovery_rebuild",
+            &segments,
+            &groups,
+            &publics,
+            &[(1, text.clone()), (2, data.clone())],
+            &fixups,
+            Some((1, 0x10)),
+        )
+        .unwrap();
+        let file = read_omf(&bytes, "NB.OBJ").unwrap();
+        assert!(
+            file.unknown_records.is_empty(),
+            "{:?}",
+            file.unknown_records
+        );
+        let m = &file.modules[0];
+        assert_eq!(m.name, "decovery_rebuild");
+        let names: Vec<(&str, &str, SectionKind, u8)> = m
+            .sections
+            .iter()
+            .map(|s| (s.name.as_str(), s.class.as_str(), s.kind, s.bits))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("_TEXT", "CODE", SectionKind::Code, 32),
+                ("_DATA", "DATA", SectionKind::Data, 32),
+                ("STACK", "STACK", SectionKind::Bss, 32)
+            ]
+        );
+        assert_eq!(m.groups.len(), 1);
+        assert_eq!(
+            (m.groups[0].name.as_str(), &m.groups[0].sections[..]),
+            ("DGROUP", &[1, 2][..])
+        );
+        assert_eq!(m.symbols.len(), 1);
+        assert_eq!(
+            (
+                m.symbols[0].name.as_str(),
+                m.symbols[0].section,
+                m.symbols[0].offset
+            ),
+            ("_cstart_", 0, 0x10)
+        );
+        // the off16 field with a displacement is written empty, everything else as given
+        let mut expected = text.clone();
+        expected[0x0C..0x0E].fill(0);
+        assert_eq!(m.sections[0].data, expected);
+        assert_eq!(m.sections[1].data, data);
+        let relocs = &m.sections[0].relocs;
+        assert_eq!(relocs.len(), 304);
+        let shape = |i: usize| {
+            let r = &relocs[i];
+            (r.offset, r.width, r.kind, r.target.clone(), r.frame.clone())
+        };
+        let section = |index, offset| RefTarget::Section { index, offset };
+        assert_eq!(
+            shape(0),
+            (0x01, 4, RelocKind::Absolute, section(1, 0), Frame::Target)
+        );
+        assert_eq!(
+            shape(1),
+            (0x06, 4, RelocKind::Relative, section(0, 0), Frame::Target)
+        );
+        assert_eq!(
+            shape(2),
+            (
+                0x0C,
+                2,
+                RelocKind::Absolute,
+                section(1, 0x22),
+                Frame::Target
+            )
+        );
+        assert_eq!(
+            shape(3),
+            (0x10, 2, RelocKind::Selector, section(1, 0), Frame::Target)
+        );
+        assert_eq!(
+            shape(303),
+            (
+                0x20 + 6 * 299,
+                4,
+                RelocKind::Absolute,
+                section(1, 0),
+                Frame::Target
+            )
+        );
+        assert_eq!(m.sections[1].relocs.len(), 1);
+        assert_eq!(m.sections[1].relocs[0].target, section(0, 0));
+    }
+
+    #[test]
+    fn omf_writer_rejects_fixup_outside_data() {
+        let err = write_omf_module(
+            "m",
+            &[WriteSegment::new("_TEXT", "CODE", 4, true)],
+            &[],
+            &[],
+            &[(1, vec![0; 4])],
+            &[WriteFixup::new(1, 2, WriteFixupKind::Off32, 1, None)],
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("segment 1 +0x2"), "{err}");
+    }
+}

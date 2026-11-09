@@ -1,30 +1,38 @@
-//! `link`: compile all rebuild sources, link them with the original linker into the whole program and compare it
-//! with the original file (port of Decomp's `nachbau_linken`, `_anteile` and `_linkdiagnose`).
+//! `link`: link the whole program with the original linker and compare it with the original file (port of
+//! Decomp's `nachbau_linken`, `_nachbau_linken_le`, `_le_einsaetze`, `_anteile` and `_linkdiagnose`). MZ compiles
+//! all rebuild sources and links them; LE hands the original image with the identical rebuilds inserted to WLINK as
+//! one module.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use decovery_core::{
     Address, Analysis, AnalyzedFunction, ClaimSource, Confidence, ProgramRecord, RebuildRecord,
-    RebuildResult, SegmentConfig, Shares, Symbol, SymbolKind, TargetFormat, Workspace,
+    RebuildResult, SegmentConfig, Shares, Symbol, SymbolKind, TargetFormat, Used, Workspace,
     read_program_record, read_rebuild, read_user_config, save_program_record, today, write_atomic,
 };
-use decovery_diff::{Place, PlaceKind, Stage, classify_code, diagnose_mz_link, load_image};
+use decovery_diff::{
+    Decoration, Place, PlaceKind, Stage, SymbolView, classify_code, compare_le, diagnose_mz_link,
+    load_image,
+};
+use decovery_loaders::{LeImage, load_le};
+use decovery_objects::{functions, read_omf};
 use decovery_plugin::Progress;
 use decovery_toolchain::{
-    Profile, SourceJob, compile_planned, find_sources, link as run_link, open_runners,
-    plan_compile, rebuild_profile, stage_text,
+    Insert, LE_DEFAULT_STACK, Linked, Profile, SourceJob, SourceSet, build_insert, compile_planned,
+    find_sources, le_linker, le_module, link as run_link, link_le, module_name, open_runners,
+    plan_compile, rebuild_profile, stage_text, usable_inserts,
 };
 use rayon::prelude::*;
 use serde_json::{Value, json};
 
 use super::build::{
-    failure_text, file_flags, file_name, is_c, ms, new_run_dir, read_text, runner_names,
-    stage_headers, toolchain,
+    OBJECT_FORMAT, OBJECTS_DIR, failure_text, file_flags, file_name, is_c, ms, new_run_dir,
+    read_text, runner_names, stage_headers, toolchain,
 };
-use crate::session::default_name;
-use crate::{FacadeError, Response};
+use crate::session::{default_name, parse_default_name};
+use crate::{FacadeError, KnowledgeView, Response};
 
 const LOCK_WAIT: Duration = Duration::from_secs(30);
 /// The linked program of the last `link`, relative to the workspace root.
@@ -32,24 +40,20 @@ pub const LINKED_FILE: &str = "cache/rebuild/REBUILD.EXE";
 /// Name of the linked program (without extension) as the linker writes it.
 const OUTPUT: &str = "REBUILD";
 
+/// Most diagnosis lines of an LE comparison (fixup lines and order-only pages listed).
+const LE_DIAGNOSIS_LINES: usize = 20;
+
 /// Links the whole program and records the comparison with the original in `knowledge/rebuild-program.toml`
-/// (MZ; LE is dispatched to its own linking, other formats are refused).
+/// (MZ and LE; other formats are refused).
 pub fn link(root: &Path, progress: &dyn Fn(Progress)) -> Result<Response, FacadeError> {
     let ws = Workspace::open(root)?;
     match ws.config.target.format {
         TargetFormat::Mz => link_mz(root, ws, progress),
-        TargetFormat::Le => link_le(&ws),
+        TargetFormat::Le => link_le_program(root, ws, progress),
         format => Err(FacadeError::Invalid(format!(
             "link supports MZ and LE, not {format:?}"
         ))),
     }
-}
-
-/// LE: the original image with the identical rebuilds inserted, linked as one module.
-fn link_le(_ws: &Workspace) -> Result<Response, FacadeError> {
-    Err(FacadeError::Invalid(
-        "linking LE programs is not implemented yet".into(),
-    ))
 }
 
 fn link_mz(
@@ -161,50 +165,19 @@ fn link_mz(
         analysis.as_ref(),
         &rebuild_records,
         &profile,
-        &original,
+        load_image(&original),
+        Positions::Linear,
     );
-    let shares = analysis.as_ref().map(|_| layout.shares());
     let exe = linked.as_ref().and_then(|l| l.program.as_deref());
-    let mut record = ProgramRecord::new(RebuildResult::Error);
-    record.compiler = Some(profile.id.clone());
-    record.original_bytes = original.len() as u64;
-    record.date = Some(today());
-    record.shares = shares;
-    match exe {
-        None => record.message = message.clone(),
-        Some(exe) => {
-            let differing_bytes = original.iter().zip(exe).filter(|(a, b)| a != b).count();
-            let differing = differing_bytes as u64 + original.len().abs_diff(exe.len()) as u64;
-            record.rebuilt_bytes = exe.len() as u64;
-            record.differing = differing;
-            if differing == 0 {
-                record.result = RebuildResult::Identical;
-            } else {
-                record.result = RebuildResult::Differs;
-                record.first_difference = Some(
-                    original
-                        .iter()
-                        .zip(exe)
-                        .position(|(a, b)| a != b)
-                        .unwrap_or(original.len().min(exe.len())) as u64,
-                );
-                record.diagnosis = diagnose_mz_link(&original, exe, &|at| layout.place(at));
-            }
-        }
+    let mut record = program_record(&profile, &original, exe, message.clone());
+    record.shares = analysis.as_ref().map(|_| layout.shares());
+    if record.result == RebuildResult::Differs
+        && let Some(exe) = exe
+    {
+        record.diagnosis = diagnose_mz_link(&original, exe, &|at| layout.place(at));
     }
     let compare_ms = ms(compare_started.elapsed());
-
-    // record under the lock; unknown keys of the previous record stay
-    let lock = ws.lock(LOCK_WAIT)?;
-    if let Some(before) = read_program_record(root)? {
-        record.extra = before.extra;
-    }
-    save_program_record(root, &record, &lock)?;
-    if let Some(exe) = exe {
-        let path = root.join(LINKED_FILE);
-        write_atomic(&path, exe).map_err(|source| FacadeError::Output { path, source })?;
-    }
-    drop(lock);
+    store(root, &ws, &mut record, exe)?;
 
     let timing = json!({
         "build_ms": build_ms,
@@ -221,13 +194,499 @@ fn link_mz(
     ))
 }
 
-/// What lies in the original load image: the analysis' functions sorted by image offset (with what each one is)
-/// and the named globals, for [`Layout::place`] (binary search) and [`Layout::shares`].
+/// The program record of a link: compiler, sizes, date, and against the original the result, the number of
+/// differing bytes (plus the length difference) and the first differing file offset; `message` without a program.
+fn program_record(
+    profile: &Profile,
+    original: &[u8],
+    exe: Option<&[u8]>,
+    message: Option<String>,
+) -> ProgramRecord {
+    let mut record = ProgramRecord::new(RebuildResult::Error);
+    record.compiler = Some(profile.id.clone());
+    record.original_bytes = original.len() as u64;
+    record.date = Some(today());
+    let Some(exe) = exe else {
+        record.message = message;
+        return record;
+    };
+    let differing_bytes = original.iter().zip(exe).filter(|(a, b)| a != b).count();
+    let differing = differing_bytes as u64 + original.len().abs_diff(exe.len()) as u64;
+    record.rebuilt_bytes = exe.len() as u64;
+    record.differing = differing;
+    if differing == 0 {
+        record.result = RebuildResult::Identical;
+    } else {
+        record.result = RebuildResult::Differs;
+        record.first_difference = Some(
+            original
+                .iter()
+                .zip(exe)
+                .position(|(a, b)| a != b)
+                .unwrap_or(original.len().min(exe.len())) as u64,
+        );
+    }
+    record
+}
+
+/// Records `record` under the lock (unknown keys of the previous record stay) and keeps the linked program.
+fn store(
+    root: &Path,
+    ws: &Workspace,
+    record: &mut ProgramRecord,
+    exe: Option<&[u8]>,
+) -> Result<(), FacadeError> {
+    let lock = ws.lock(LOCK_WAIT)?;
+    if let Some(before) = read_program_record(root)? {
+        record.extra = before.extra;
+    }
+    save_program_record(root, record, &lock)?;
+    if let Some(exe) = exe {
+        let path = root.join(LINKED_FILE);
+        write_atomic(&path, exe).map_err(|source| FacadeError::Output { path, source })?;
+    }
+    drop(lock);
+    Ok(())
+}
+
+/// LE: the original image with the identical rebuilds inserted ([`le_inserts`]), handed as one module to the linker
+/// of `[rebuild.link] profile` (else the compiler's), linked with the original's stub and compared with the
+/// original ([`compare_le`]). `[rebuild.link]` is optional: `insert` (default true), `stack` (default 4096).
+fn link_le_program(
+    root: &Path,
+    ws: Workspace,
+    progress: &dyn Fn(Progress),
+) -> Result<Response, FacadeError> {
+    let started = Instant::now();
+    let (compiler, default_flags) = rebuild_profile(&ws).map_err(toolchain)?;
+    let rebuild = ws.config.rebuild.clone().unwrap_or_default();
+    let link_config = rebuild.link.clone().unwrap_or_default();
+    let profile = match &link_config.profile {
+        Some(id) => decovery_toolchain::profile(id).map_err(toolchain)?,
+        None => compiler.clone(),
+    };
+    // early: can this profile link LE programs at all?
+    let start_option = le_linker(&profile).map_err(toolchain)?.start_option;
+    let target = crate::program::target_path(&ws);
+    let original = std::fs::read(&target).map_err(|e| {
+        FacadeError::Invalid(format!("cannot read target {}: {e}", target.display()))
+    })?;
+    let image = load_le(&original).map_err(|e| {
+        FacadeError::Invalid(format!("cannot load target {}: {e}", target.display()))
+    })?;
+    let analysis = Analysis::load(root)?.filter(|a| a.target_sha256 == ws.config.target.sha256);
+    let records = read_rebuild(root)?;
+    let mut warnings: Vec<String> = Vec::new();
+    let run_dir = new_run_dir(root)?;
+
+    // the module
+    let module_started = Instant::now();
+    let (inserts, mut hints) = if link_config.insert.unwrap_or(true) {
+        let knowledge = KnowledgeView::new(&ws, analysis.as_ref());
+        let sources = Sources {
+            root,
+            dir: &run_dir.0,
+            compiler: &compiler,
+            default_flags: &default_flags,
+            file_flags: &rebuild.file_flags,
+        };
+        le_inserts(&sources, &records, &image, &knowledge)?
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let stack = link_config.stack.unwrap_or(LE_DEFAULT_STACK);
+    let (module, more) =
+        le_module(&original, &image, &inserts, stack, !start_option).map_err(toolchain)?;
+    hints.extend(more);
+    let mut used = Used::default();
+    for i in usable_inserts(&image, &inserts).0 {
+        used.functions += 1;
+        used.bytes += inserts[i].bytes.len() as u64;
+    }
+    let module_ms = ms(module_started.elapsed());
+
+    // link
+    let link_started = Instant::now();
+    let name = module_name(image.header.resident_name.as_deref().unwrap_or(""));
+    let stub = original
+        .get(..usize::try_from(image.header.le_offset).unwrap_or(usize::MAX))
+        .unwrap_or(&original);
+    let user = read_user_config()?;
+    let (runners, more) = open_runners(&runner_names(&ws, &profile), &ws, &user);
+    warnings.extend(more);
+    progress(Progress::new(0, Some(1), Some("linking".to_string())));
+    let (linked, more): (Linked, Vec<String>) = link_le(
+        &ws, &profile, &module, stub, &name, &run_dir.0, &runners, None, progress,
+    )
+    .map_err(toolchain)?;
+    warnings.extend(more);
+    drop(runners);
+    drop(run_dir);
+    let link_ms = ms(link_started.elapsed());
+
+    // compare
+    let compare_started = Instant::now();
+    let segments = &ws.config.target.segments;
+    let image_bytes = segment_image(&image, segments);
+    let layout = Layout::new(
+        &ws,
+        analysis.as_ref(),
+        &records,
+        &compiler,
+        &image_bytes,
+        Positions::segments(segments),
+    );
+    let exe = linked.program.as_deref();
+    let mut record = program_record(&profile, &original, exe, Some(linked.message.clone()));
+    record.shares = analysis.as_ref().map(|_| layout.shares());
+    record.used = Some(used);
+    if record.result == RebuildResult::Differs
+        && let Some(exe) = exe
+    {
+        let place = |va: u32| {
+            let at = Address::Flat(va);
+            layout
+                .positions
+                .of(at)
+                .and_then(|p| layout.place(p))
+                .map_or_else(|| at.to_string(), |p| p.description)
+        };
+        record.diagnosis = compare_le(&original, exe, &place, LE_DIAGNOSIS_LINES);
+    }
+    let compare_ms = ms(compare_started.elapsed());
+    store(root, &ws, &mut record, exe)?;
+
+    let timing = json!({
+        "module_ms": module_ms,
+        "link_ms": link_ms,
+        "compare_ms": compare_ms,
+        "total_ms": ms(started.elapsed()),
+    });
+    Ok(respond(
+        &record,
+        exe.is_some(),
+        Some(linked.line.as_str()),
+        hints,
+        warnings,
+        timing,
+    ))
+}
+
+/// What the provenance check of the kept objects needs; sources are staged into `dir`.
+struct Sources<'a> {
+    root: &'a Path,
+    dir: &'a Path,
+    compiler: &'a Profile,
+    default_flags: &'a str,
+    file_flags: &'a BTreeMap<String, String>,
+}
+
+/// The `<stem>.json` beside a kept object, as `build` writes it.
+#[derive(serde::Deserialize)]
+struct KeptMeta {
+    schema: u32,
+    format: String,
+    file: String,
+    profile: String,
+    flags: String,
+    inputs: BTreeMap<String, String>,
+    object: String,
+    identical: BTreeMap<String, KeptFunction>,
+}
+
+#[derive(serde::Deserialize)]
+struct KeptFunction {
+    address: String,
+}
+
+/// Port of `_le_einsaetze`: every function whose rebuild record is identical with no differing instruction (flat
+/// address) as an [`Insert`], built from the object the last `build` kept for its file
+/// (`cache/rebuild/obj/<stem>.obj`) when that object is still current: its metadata names the compiler, the flags
+/// and the hashes of the source and of every header as staged now, the function as identical at this address, and
+/// the object's hash. Files are handled in parallel. Hints name every function left out and why, and inserts that
+/// keep linker bytes of the original.
+fn le_inserts(
+    sources: &Sources<'_>,
+    records: &[RebuildRecord],
+    image: &LeImage,
+    knowledge: &KnowledgeView<'_>,
+) -> Result<(Vec<Insert>, Vec<String>), FacadeError> {
+    let mut by_file: BTreeMap<&str, Vec<&RebuildRecord>> = BTreeMap::new();
+    for r in records.iter().filter(|r| {
+        r.effective_result() == RebuildResult::Identical
+            && r.instructions_differing == 0
+            && matches!(r.address, Address::Flat(_))
+    }) {
+        by_file
+            .entry(r.file.as_deref().unwrap_or(""))
+            .or_default()
+            .push(r);
+    }
+    if by_file.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let set = find_sources(&sources.root.join(super::SOURCE_DIR), &[]).map_err(toolchain)?;
+    let headers = stage_headers(&set, sources.dir)?;
+    let decoration = &sources.compiler.decoration;
+    let address_of = |name: &str| reference_address(knowledge, decoration, name);
+    let per_file: Vec<(Vec<Insert>, Vec<String>)> = by_file
+        .par_iter()
+        .map(|(file, records)| {
+            if !is_c(file) {
+                // no assembler run yet: `build` keeps no object for it
+                let reason = if file.is_empty() {
+                    "the record names no source file".to_string()
+                } else {
+                    format!("{file} is not built (no assembler available)")
+                };
+                let hints = records
+                    .iter()
+                    .map(|r| format!("{}: {reason}, not inserted", r.name))
+                    .collect();
+                return (Vec::new(), hints);
+            }
+            match current_object(sources, &set, &headers, file) {
+                Err(reason) => (
+                    Vec::new(),
+                    records
+                        .iter()
+                        .map(|r| {
+                            format!(
+                                "{}: {reason}; run `decovery build {file}` first, not inserted",
+                                r.name
+                            )
+                        })
+                        .collect(),
+                ),
+                Ok((meta, object)) => file_inserts(
+                    file,
+                    records,
+                    &meta,
+                    &object,
+                    image,
+                    decoration,
+                    &address_of,
+                ),
+            }
+        })
+        .collect();
+    let mut inserts = Vec::new();
+    let mut hints = Vec::new();
+    for (i, h) in per_file {
+        inserts.extend(i);
+        hints.extend(h);
+    }
+    // by place, as Decomp takes them (records by address): of two overlapping inserts the first wins
+    inserts.sort_by_key(|e| (e.object, e.offset));
+    Ok((inserts, hints))
+}
+
+/// The kept object of `file` with its metadata when it is current, else why not.
+fn current_object(
+    sources: &Sources<'_>,
+    set: &SourceSet,
+    headers: &BTreeMap<String, String>,
+    file: &str,
+) -> Result<(KeptMeta, Vec<u8>), String> {
+    let path = set
+        .sources
+        .iter()
+        .find(|p| file_name(p) == file)
+        .ok_or_else(|| format!("the source {file} does not exist"))?;
+    let text = read_text(path).map_err(|e| e.to_string())?;
+    let dos_name = stage_text(file, &text, sources.dir).map_err(|e| e.to_string())?;
+    let staged = std::fs::read(sources.dir.join(&dos_name)).map_err(|e| e.to_string())?;
+    let stem = file
+        .rsplit_once('.')
+        .map_or(file, |(s, _)| s)
+        .to_ascii_lowercase();
+    let dir = sources.root.join(OBJECTS_DIR);
+    let meta: KeptMeta = std::fs::read_to_string(dir.join(format!("{stem}.json")))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .ok_or_else(|| "no kept object".to_string())?;
+    let flags = file_flags(sources.file_flags, file).map_or(sources.default_flags, String::as_str);
+    let staged_hash = blake3::hash(&staged).to_hex().to_string();
+    let current = meta.schema == 1
+        && meta.format == OBJECT_FORMAT
+        && meta.file == file
+        && meta.profile == sources.compiler.id
+        && meta.flags == flags
+        && meta.inputs.get(&dos_name) == Some(&staged_hash)
+        && headers
+            .iter()
+            .all(|(h, hash)| meta.inputs.get(h) == Some(hash));
+    if !current {
+        return Err("the kept object is stale (source, headers, flags or compiler changed)".into());
+    }
+    let object =
+        std::fs::read(dir.join(format!("{stem}.obj"))).map_err(|_| "no kept object".to_string())?;
+    if blake3::hash(&object).to_hex().as_str() != meta.object {
+        return Err("the kept object does not match its metadata".into());
+    }
+    Ok((meta, object))
+}
+
+/// The inserts of the identical functions of one file from its current kept object.
+fn file_inserts(
+    file: &str,
+    records: &[&RebuildRecord],
+    meta: &KeptMeta,
+    object: &[u8],
+    image: &LeImage,
+    decoration: &Decoration,
+    address_of: &(dyn Fn(&str) -> Option<Address> + Sync),
+) -> (Vec<Insert>, Vec<String>) {
+    let (mut inserts, mut hints) = (Vec::new(), Vec::new());
+    let parsed = match read_omf(object, &file.to_ascii_uppercase()) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            hints.extend(records.iter().map(|r| {
+                format!(
+                    "{}: the kept object of {file} cannot be read ({e}), not inserted",
+                    r.name
+                )
+            }));
+            return (inserts, hints);
+        }
+    };
+    let views: Vec<_> = parsed.modules.iter().flat_map(functions).collect();
+    for r in records {
+        let checked = meta
+            .identical
+            .get(&r.name)
+            .is_some_and(|f| f.address == r.address.to_string());
+        if !checked {
+            hints.push(format!(
+                "{}: the last build did not find it identical at {}; run `decovery build {file}` first, not inserted",
+                r.name, r.address
+            ));
+            continue;
+        }
+        let Some(f) = views
+            .iter()
+            .find(|f| decoration.undecorate(f.name) == r.name || f.name == r.name)
+        else {
+            hints.push(format!(
+                "{}: missing in the kept object of {file}, not inserted",
+                r.name
+            ));
+            continue;
+        };
+        match build_insert(f, r.address, image, address_of) {
+            Ok(mut insert) => {
+                insert.name = r.name.clone();
+                if !insert.keep.is_empty() {
+                    hints.push(format!(
+                        "{}: {} linker bytes without a name taken from the original",
+                        r.name,
+                        insert.keep.len()
+                    ));
+                }
+                inserts.push(insert);
+            }
+            Err(reason) => hints.push(format!("{}: {reason}, not inserted", r.name)),
+        }
+    }
+    (inserts, hints)
+}
+
+/// Port of `_verweis_adresse`: where a public name of an object lies in the original. The C name first, then the
+/// raw name (the prefix belongs to the name: Watcom `-4s`, `_dos_setvect`), then a default name (`fun_`, `FUN_`,
+/// `DAT_` with eight hex digits).
+fn reference_address(
+    knowledge: &KnowledgeView<'_>,
+    decoration: &Decoration,
+    name: &str,
+) -> Option<Address> {
+    let c = decoration.undecorate(name);
+    knowledge
+        .address_of(c)
+        .or_else(|| (c != name).then(|| knowledge.address_of(name)).flatten())
+        .or_else(|| parse_default_name(c))
+        .or_else(|| {
+            let hex = ["DAT_", "FUN_", "fun_"]
+                .iter()
+                .find_map(|p| c.strip_prefix(p))?;
+            (hex.len() == 8 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+                .then(|| u32::from_str_radix(hex, 16).ok().map(Address::Flat))
+                .flatten()
+        })
+}
+
+/// The load image of an LE program for the shares: the configured segments back to back, each its full length
+/// (uninitialized parts zero).
+fn segment_image(image: &LeImage, segments: &[SegmentConfig]) -> Vec<u8> {
+    let total = segments
+        .iter()
+        .map(|s| usize::try_from(s.length).unwrap_or(0))
+        .sum();
+    let mut out = vec![0u8; total];
+    let mut start = 0usize;
+    for s in segments {
+        let len = usize::try_from(s.length).unwrap_or(0);
+        let source = s.start.linear().and_then(|at| {
+            let region = image.program.region_at(s.start)?;
+            let from = usize::try_from(at.checked_sub(region.start.linear()?)?).ok()?;
+            region.data.get(from..)
+        });
+        if let Some(bytes) = source {
+            let n = bytes.len().min(len);
+            out[start..start + n].copy_from_slice(&bytes[..n]);
+        }
+        start += len;
+    }
+    out
+}
+
+/// Where an address lies in the image the shares count over.
+enum Positions {
+    /// MZ: the linear address is the load image offset.
+    Linear,
+    /// LE: the segments back to back: (linear start, length, image offset).
+    Segments(Vec<(u64, u64, u64)>),
+}
+
+impl Positions {
+    fn segments(segments: &[SegmentConfig]) -> Self {
+        let mut at = 0u64;
+        Positions::Segments(
+            segments
+                .iter()
+                .filter_map(|s| {
+                    let entry = (s.start.linear()?, s.length, at);
+                    at += s.length;
+                    Some(entry)
+                })
+                .collect(),
+        )
+    }
+
+    /// The image offset of `at`.
+    fn of(&self, at: Address) -> Option<u64> {
+        let linear = at.linear()?;
+        match self {
+            Positions::Linear => Some(linear),
+            Positions::Segments(list) => list
+                .iter()
+                .find(|&&(start, len, _)| start <= linear && linear - start < len)
+                .map(|&(start, _, offset)| offset + linear - start),
+        }
+    }
+}
+
+/// What lies in the original load image (MZ: the file without its header; LE: the segments back to back): the
+/// analysis' functions sorted by image offset (with what each one is) and the named globals, for [`Layout::place`]
+/// (binary search) and [`Layout::shares`].
 struct Layout<'a> {
     functions: Vec<Located<'a>>,
+    /// Per function (same index): the largest end of it and all functions before it, so that [`Layout::place`] finds
+    /// a function enclosing an offset even when a later-starting one ends before it.
+    max_end: Vec<u64>,
     /// Named globals by image offset.
     globals: Vec<(u64, &'a Symbol)>,
     segments: &'a [SegmentConfig],
+    positions: Positions,
     image_len: u64,
 }
 
@@ -251,9 +710,9 @@ impl<'a> Layout<'a> {
         analysis: Option<&'a Analysis>,
         records: &[RebuildRecord],
         profile: &Profile,
-        original: &[u8],
+        image: &[u8],
+        positions: Positions,
     ) -> Self {
-        let image = load_image(original);
         let mut symbols: HashMap<Address, &Symbol> = HashMap::new();
         for s in &ws.symbols {
             if s.confidence != Confidence::Refuted && !s.name.is_empty() {
@@ -276,10 +735,9 @@ impl<'a> Layout<'a> {
         let mut located: Vec<Located<'a>> = functions
             .par_iter()
             .filter_map(|f| {
-                let (start, end) = (f.start.linear()?, f.end.linear()?);
-                if end < start {
-                    return None;
-                }
+                let len = f.end.linear()?.checked_sub(f.start.linear()?)?;
+                let start = positions.of(f.start)?;
+                let end = start.checked_add(len)?;
                 let symbol = symbols.get(&f.start).copied();
                 let library = symbol.is_some_and(|s| {
                     s.source == ClaimSource::Signature
@@ -309,29 +767,43 @@ impl<'a> Layout<'a> {
             })
             .collect();
         located.sort_by_key(|f| (f.start, f.end));
+        let max_end = located
+            .iter()
+            .scan(0u64, |max, f| {
+                *max = (*max).max(f.end);
+                Some(*max)
+            })
+            .collect();
         let mut globals: Vec<(u64, &Symbol)> = symbols
             .values()
             .filter(|s| s.kind == SymbolKind::Global)
-            .filter_map(|s| Some((s.address.linear()?, *s)))
+            .filter_map(|s| Some((positions.of(s.address)?, *s)))
             .collect();
         globals.sort_by_key(|(at, s)| (*at, s.address));
         Layout {
             functions: located,
+            max_end,
             globals,
             segments: &ws.config.target.segments,
+            positions,
             image_len: image.len() as u64,
         }
+    }
+
+    /// The function containing `offset` with the nearest start.
+    fn enclosing(&self, offset: u64) -> Option<&Located<'a>> {
+        let after = self.functions.partition_point(|f| f.start <= offset);
+        (0..after)
+            .rev()
+            .take_while(|&i| self.max_end[i] >= offset)
+            .map(|i| &self.functions[i])
+            .find(|f| offset <= f.end)
     }
 
     /// What lies at `offset` of the load image: the function containing it (library, rebuilt, assembly or other),
     /// else the nearest named global before it, else data at its address.
     fn place(&self, offset: u64) -> Option<Place> {
-        let after = self.functions.partition_point(|f| f.start <= offset);
-        if let Some(f) = after
-            .checked_sub(1)
-            .map(|i| &self.functions[i])
-            .filter(|f| offset <= f.end)
-        {
+        if let Some(f) = self.enclosing(offset) {
             let kind = if f.library {
                 PlaceKind::Library
             } else if f.identical.is_some() {
@@ -341,33 +813,29 @@ impl<'a> Layout<'a> {
             } else {
                 PlaceKind::Function
             };
-            let at = moved(f.address, offset - f.start);
+            let delta = offset - f.start;
             let name = f
                 .name
                 .map_or_else(|| default_name(f.address), str::to_string);
-            return Some(Place::new(
-                format!(
-                    "{} in {name}",
-                    at.map_or_else(String::new, |a| a.to_string())
-                ),
-                Some(kind),
-                Some(f.start),
-            ));
+            let description = match moved(f.address, delta) {
+                Some(at) => format!("{at} in {name}"),
+                None => format!("{name}+{delta:#x}"),
+            };
+            return Some(Place::new(description, Some(kind), Some(f.start)));
         }
         let after = self.globals.partition_point(|(at, _)| *at <= offset);
         if let Some(&(at, s)) = after.checked_sub(1).map(|i| &self.globals[i]) {
             let delta = offset - at;
-            let address = moved(s.address, delta).map_or_else(String::new, |a| a.to_string());
-            return Some(Place::new(
-                format!("{address}, {}+{delta:#x}", s.name),
-                Some(PlaceKind::Data),
-                None,
-            ));
+            let description = match moved(s.address, delta) {
+                Some(address) => format!("{address}, {}+{delta:#x}", s.name),
+                None => format!("{}+{delta:#x}", s.name),
+            };
+            return Some(Place::new(description, Some(PlaceKind::Data), None));
         }
         self.segments
             .iter()
             .find_map(|s| {
-                let start = s.start.linear()?;
+                let start = self.positions.of(s.start)?;
                 (start <= offset && offset < start.saturating_add(s.length))
                     .then(|| moved(s.start, offset - start))
                     .flatten()
@@ -480,6 +948,7 @@ fn respond(
             "link_line": line,
             "diagnosis": r.diagnosis,
             "shares": r.shares.as_ref().map(shares_json),
+            "used": r.used.as_ref().map(|u| json!({ "functions": u.functions, "bytes": u.bytes })),
             "hints": hints,
             "warnings": warnings,
             "timing": timing,

@@ -166,8 +166,9 @@ enum Command {
         #[arg(long = "function-source", value_name = "FILE")]
         function_source: Vec<PathBuf>,
     },
-    /// Compile all rebuild sources, link them with the original linker into the whole program
-    /// (`cache/rebuild/REBUILD.EXE`) and compare it with the original file; the result goes to
+    /// Link the whole program with the original linker (`cache/rebuild/REBUILD.EXE`) and compare it
+    /// with the original file (MZ: compile all rebuild sources and link them; LE: insert the identical
+    /// rebuilds into the original image and link it as one module); the result goes to
     /// `knowledge/rebuild-program.toml`. Exit code 0 when identical, 1 when it differs, 2 when the
     /// link failed or on errors. Progress goes to stderr.
     Link,
@@ -929,6 +930,12 @@ fn link(workspace: &Path, json: bool) -> Result<ExitCode, FacadeError> {
             .map(|(k, v)| format!("{k} {v}"))
             .collect();
         println!("shares (bytes): {}", parts.join(", "));
+    }
+    if let Some(used) = d["used"].as_object() {
+        println!(
+            "inserted: {} functions, {} bytes",
+            used["functions"], used["bytes"]
+        );
     }
     for hint in d["hints"].as_array().into_iter().flatten() {
         if let Some(text) = hint.as_str() {

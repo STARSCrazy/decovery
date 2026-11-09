@@ -21,6 +21,8 @@ data = "_{name}"
 command = "WLINK @{response}"
 library_dir = 'D:\LIB386'
 output = "{name}.EXE"
+# WLINK 9.5 refuses `option start` for DOS/4G: the entry point goes into the module end record
+start_option = false
 
 [assembler]
 profile = "watcom-10.6"

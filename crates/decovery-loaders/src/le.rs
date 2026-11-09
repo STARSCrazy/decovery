@@ -25,6 +25,14 @@ pub struct LeImage {
     /// Every fixup table entry in table order (page by page). Diagnostics and tests only; empty when the
     /// table uses features the raw reader does not handle (a warning says why).
     pub raw_fixups: Vec<RawFixup>,
+    /// Why [`LeImage::raw_fixups`] is empty although the table has entries (features the raw reader does not
+    /// handle: imports, source lists, other target flags).
+    pub raw_fixup_error: Option<LoadError>,
+    /// The object table, in order (object `n` at index `n - 1`).
+    pub objects: Vec<LeObject>,
+    /// Per object (same index as [`LeImage::objects`]): its bytes as stored in the file, without fixups applied,
+    /// [`LeObject::file_length`] long.
+    pub raw_data: Vec<Vec<u8>>,
     pub warnings: Vec<String>,
 }
 
@@ -32,14 +40,51 @@ pub struct LeImage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct LeHeader {
-    /// File offset of the LE/LX header (`e_lfanew`).
+    /// File offset of the LE/LX header (`e_lfanew`), i.e. the length of the MZ stub.
     pub le_offset: u64,
+    /// Header 0x10.
+    pub module_flags: u32,
+    /// Header 0x14.
+    pub page_count: u32,
     pub page_size: u32,
     pub last_page_size: u32,
     pub object_count: u32,
     pub entry: Address,
     pub stack: Address,
+    /// Header 0x18 and 0x1C: entry point as 1-based object and offset.
+    pub entry_object: u32,
+    pub entry_offset: u32,
+    /// Header 0x20 and 0x24: stack as 1-based object and ESP.
+    pub stack_object: u32,
+    pub esp: u32,
+    /// Header 0x30.
+    pub fixup_section_size: u32,
+    /// Header 0x38.
+    pub loader_section_size: u32,
+    /// Header 0x94: the automatic data object (0 = none).
+    pub auto_data_object: u32,
+    /// First entry of the resident name table (the module name), when there is one.
+    pub resident_name: Option<String>,
 }
+
+/// One entry of the object table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LeObject {
+    /// 1-based.
+    pub number: u32,
+    pub base: u32,
+    /// Size in memory.
+    pub size: u32,
+    pub flags: u32,
+    /// File offset of the first page when the object's pages lie contiguously in the file.
+    pub file_offset: Option<u64>,
+    /// Bytes the file holds for the object (its pages, the last one possibly short).
+    pub file_length: u32,
+}
+
+/// WLINK collects the fixup records of a page in blocks of at most this many bytes, the newest block first.
+pub const FIXUP_BLOCK: u32 = 512;
 
 /// One entry of the fixup record table.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -240,6 +285,8 @@ pub fn load_le(bytes: &[u8]) -> Result<LeImage, LoadError> {
     let mut entries = Vec::new();
     let mut contents: Vec<Vec<u8>> = Vec::new();
     let mut regions = Vec::new();
+    let mut objects = Vec::new();
+    let mut raw_data = Vec::new();
     // 1-based page -> (0-based object, offset of the page inside the object).
     let mut page_owner: Vec<Option<(usize, u64)>> =
         vec![None; usize::try_from(page_count).unwrap_or(0) + 1];
@@ -272,6 +319,7 @@ pub fn load_le(bytes: &[u8]) -> Result<LeImage, LoadError> {
         }
         let mut buffer = vec![0u8; entry.size as usize];
         let mut locations = Vec::new();
+        let mut loaded = 0u64;
         for j in 0..u64::from(entry.page_count) {
             let (off, len) = page_location(u64::from(entry.first_page) + j)?;
             let take = len.min(size.saturating_sub(j * page));
@@ -280,6 +328,7 @@ pub fn load_le(bytes: &[u8]) -> Result<LeImage, LoadError> {
                 let start = (j * page) as usize;
                 buffer[start..start + chunk.len()].copy_from_slice(chunk);
             }
+            loaded = j * page + chunk.len() as u64;
             page_owner[(u64::from(entry.first_page) + j) as usize] = Some((o as usize, j * page));
             locations.push(off);
         }
@@ -300,6 +349,18 @@ pub fn load_le(bytes: &[u8]) -> Result<LeImage, LoadError> {
             ArchMode::X86Flat32,
         );
         region.file_offset = locations.first().filter(|_| contiguous).copied();
+        let loaded = usize::try_from(loaded)
+            .unwrap_or(usize::MAX)
+            .min(buffer.len());
+        objects.push(LeObject {
+            number: entry.number,
+            base: entry.base,
+            size: entry.size,
+            flags: entry.flags,
+            file_offset: region.file_offset,
+            file_length: loaded as u32,
+        });
+        raw_data.push(buffer[..loaded].to_vec());
         regions.push(region);
         contents.push(buffer);
         entries.push(entry);
@@ -434,6 +495,7 @@ pub fn load_le(bytes: &[u8]) -> Result<LeImage, LoadError> {
     let entry = virtual_address(h.field(0x18)?, h.field(0x1C)?, "entry point")?;
     let stack = virtual_address(h.field(0x20)?, h.field(0x24)?, "stack")?;
 
+    let mut raw_fixup_error = None;
     let raw_fixups = match read_raw_fixups(
         &h,
         &entries,
@@ -445,6 +507,7 @@ pub fn load_le(bytes: &[u8]) -> Result<LeImage, LoadError> {
         Ok(raw) => raw,
         Err(error) => {
             warnings.push(format!("raw fixup table not read: {error}"));
+            raw_fixup_error = Some(error);
             Vec::new()
         }
     };
@@ -456,15 +519,163 @@ pub fn load_le(bytes: &[u8]) -> Result<LeImage, LoadError> {
         program: Program::new(ExecutableFormat::Le, regions, vec![entry], relocations),
         header: LeHeader {
             le_offset: h.base,
+            module_flags: h.field(0x10)?,
+            page_count: page_count as u32,
             page_size,
             last_page_size,
             object_count,
             entry,
             stack,
+            entry_object: h.field(0x18)?,
+            entry_offset: h.field(0x1C)?,
+            stack_object: h.field(0x20)?,
+            esp: h.field(0x24)?,
+            fixup_section_size: h.field(0x30)?,
+            loader_section_size: h.field(0x38)?,
+            auto_data_object: h.field(0x94)?,
+            resident_name: resident_name(&h)?,
         },
         raw_fixups,
+        raw_fixup_error,
+        objects,
+        raw_data,
         warnings,
     })
+}
+
+/// The first entry of the resident name table (Latin-1), when the table offset is set and lies in the file.
+fn resident_name(h: &Header<'_>) -> Result<Option<String>, LoadError> {
+    let relative = u64::from(h.field(0x58)?);
+    let at = h.base + relative;
+    if relative == 0 || at >= h.input.bytes.len() as u64 {
+        return Ok(None);
+    }
+    let len = usize::from(h.input.u8(at)?);
+    let start = at as usize + 1;
+    let end = (start + len).min(h.input.bytes.len());
+    Ok(Some(
+        h.input.bytes[start.min(end)..end]
+            .iter()
+            .map(|&b| char::from(b))
+            .collect(),
+    ))
+}
+
+/// Port of Decomp's `verarbeitungsfolge`, the inverse of WLINK's block packing: from the lengths of one page's
+/// fixup records in table order (newest block first, every block at most [`FIXUP_BLOCK`] bytes, every older block
+/// full, i.e. the first record of the next newer block did not fit into it) the processing order as indices into
+/// `lengths`. Of the possible blocks at a position the largest whose rest is decomposable wins. `None` when no such
+/// decomposition exists.
+pub fn processing_order(lengths: &[u32]) -> Option<Vec<usize>> {
+    let n = lengths.len();
+    let mut sum = Vec::with_capacity(n + 1);
+    sum.push(0u64);
+    for &len in lengths {
+        sum.push(sum[sum.len() - 1] + u64::from(len));
+    }
+    let limit = u64::from(FIXUP_BLOCK);
+    // valid[a] = end b of the largest block [a, b) behind which the rest decomposes validly
+    let mut valid: Vec<Option<usize>> = vec![None; n + 1];
+    for a in (0..n).rev() {
+        let mut b = a + 1;
+        while b <= n && sum[b] - sum[a] <= limit {
+            let fits =
+                b == n || valid[b].is_some_and(|c| sum[c] - sum[b] + u64::from(lengths[a]) > limit);
+            if fits {
+                valid[a] = Some(b);
+            }
+            b += 1;
+        }
+    }
+    let mut blocks = Vec::new();
+    let mut a = 0;
+    while a < n {
+        let b = valid[a]?;
+        blocks.push(a..b);
+        a = b;
+    }
+    Some(blocks.into_iter().rev().flatten().collect())
+}
+
+/// Port of Decomp's `fixup_folge`: the fixups of `raw` (table order, as [`LeImage::raw_fixups`]) in WLINK's
+/// processing order, as indices into `raw`, each fixup once. Per page the order is [`processing_order`]; a page
+/// without a valid decomposition keeps its table order and is returned among the unclear pages. A fixup over a page
+/// boundary is stored on both pages: everything before it on either page comes before it (topological merge of the
+/// page chains, ties by first appearance); it counts at its first appearance. Contradicting pages leave the rest in
+/// first-appearance order.
+pub fn fixup_processing_order(raw: &[RawFixup]) -> (Vec<usize>, Vec<u32>) {
+    use std::collections::{BinaryHeap, HashMap};
+
+    type Key = (u32, i32, u8, u32, u32);
+    let key = |f: &RawFixup| -> Key {
+        (
+            f.object,
+            f.offset,
+            f.source_type,
+            f.target_object,
+            f.target_offset,
+        )
+    };
+    // pages in the order of their first record
+    let mut pages: Vec<(u32, Vec<usize>)> = Vec::new();
+    let mut page_index: HashMap<u32, usize> = HashMap::new();
+    for (i, f) in raw.iter().enumerate() {
+        let p = *page_index.entry(f.page).or_insert_with(|| {
+            pages.push((f.page, Vec::new()));
+            pages.len() - 1
+        });
+        pages[p].1.push(i);
+    }
+    let mut unclear = Vec::new();
+    // rank (first appearance) per key, first raw index per key, successors and predecessor counts by rank
+    let mut rank: HashMap<Key, usize> = HashMap::new();
+    let mut first: Vec<usize> = Vec::new();
+    let mut after: Vec<Vec<usize>> = Vec::new();
+    let mut before: Vec<usize> = Vec::new();
+    let mut edges: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    for (page, records) in &pages {
+        let lengths: Vec<u32> = records.iter().map(|&i| raw[i].length).collect();
+        let order = processing_order(&lengths).unwrap_or_else(|| {
+            unclear.push(*page);
+            (0..records.len()).collect()
+        });
+        let mut previous: Option<usize> = None;
+        for i in order.into_iter().map(|k| records[k]) {
+            let r = *rank.entry(key(&raw[i])).or_insert_with(|| {
+                first.push(i);
+                after.push(Vec::new());
+                before.push(0);
+                first.len() - 1
+            });
+            if let Some(v) = previous
+                && edges.insert((v, r))
+            {
+                after[v].push(r);
+                before[r] += 1;
+            }
+            previous = Some(r);
+        }
+    }
+    let mut ready: BinaryHeap<std::cmp::Reverse<usize>> = (0..first.len())
+        .filter(|&r| before[r] == 0)
+        .map(std::cmp::Reverse)
+        .collect();
+    let mut done = vec![false; first.len()];
+    let mut order = Vec::with_capacity(first.len());
+    while let Some(std::cmp::Reverse(r)) = ready.pop() {
+        done[r] = true;
+        order.push(first[r]);
+        for &n in &after[r] {
+            before[n] -= 1;
+            if before[n] == 0 {
+                ready.push(std::cmp::Reverse(n));
+            }
+        }
+    }
+    if order.len() < first.len() {
+        order.extend((0..first.len()).filter(|&r| !done[r]).map(|r| first[r]));
+    }
+    (order, unclear)
 }
 
 /// Writes the fixed-up field exactly as Decomp's `_setzen` does (values truncated to the field width).

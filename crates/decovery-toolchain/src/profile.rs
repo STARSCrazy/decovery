@@ -43,6 +43,14 @@ pub struct LinkerSpec {
     pub library_dir: String,
     /// Pattern of the linked file name, e.g. `{name}.EXE`.
     pub output: String,
+    /// Whether the linker accepts `option start=` when linking an LE program (WLINK 9.5 refuses it for DOS/4G;
+    /// the entry point then goes into the module end record).
+    #[serde(default = "accepts_start_option")]
+    pub start_option: bool,
+}
+
+fn accepts_start_option() -> bool {
+    true
 }
 
 /// The assembler: another profile's assembler or an own command (`{output}`, `{input}`).
@@ -275,11 +283,13 @@ mod tests {
         }
         let w10 = profile("watcom-10.6").unwrap();
         assert_eq!(w10.runners, ["dosbox-lab"]);
+        assert!(w10.linker.as_ref().unwrap().start_option);
         assert_eq!(
             w10.assembler.unwrap().command.unwrap(),
             "WASM -zq -fo={output} {input}"
         );
         let w95 = profile("watcom-9.5").unwrap();
+        assert!(!w95.linker.as_ref().unwrap().start_option);
         assert_eq!(w95.assembler.unwrap().profile.unwrap(), "watcom-10.6");
         assert_eq!(
             w95.prelude,
