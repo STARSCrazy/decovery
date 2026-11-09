@@ -289,10 +289,12 @@ impl Compare<'_> {
             comparison.blockers.iter().map(blocker_record).collect();
         let mut message = (!checked)
             .then(|| "the original bytes of the function are not in the program".to_string());
-        // inline assembly is never identical
+        // inline assembly is never identical; a code pragma or a finding outside any function blocks every
+        // function of the file
+        let name = placed[at].name.as_str();
         let findings: Vec<CheatFinding> = find_cheats(text)
             .into_iter()
-            .filter(|f| f.function.as_deref() == Some(placed[at].name.as_str()))
+            .filter(|f| f.blocks(name))
             .collect();
         let cheat = !findings.is_empty();
         if cheat {
@@ -302,7 +304,7 @@ impl Compare<'_> {
             }
             let found = findings
                 .iter()
-                .map(|f| format!("line {}: {} {}", f.line, f.kind.id(), f.text))
+                .map(|f| f.describe(name))
                 .collect::<Vec<_>>()
                 .join("\n");
             message = Some(match message {

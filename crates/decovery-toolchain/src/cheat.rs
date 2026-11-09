@@ -42,6 +42,31 @@ pub struct CheatFinding {
     pub text: String,
 }
 
+impl CheatFinding {
+    /// Whether the finding blocks `function`: a finding inside it, and every finding outside a function body. The
+    /// machine code of a `#pragma aux` is inlined into each caller (Watcom), and code at file level can reach any
+    /// function of the file, so neither may be attributed to one function.
+    pub fn blocks(&self, function: &str) -> bool {
+        self.kind == CheatKind::PragmaCode || self.function.as_deref().is_none_or(|f| f == function)
+    }
+
+    /// One line for the result of `function`: line, kind and text, and why a finding outside `function` blocks it.
+    pub fn describe(&self, function: &str) -> String {
+        let line = format!("line {}: {} {}", self.line, self.kind.id(), self.text);
+        if self.kind == CheatKind::PragmaCode {
+            format!(
+                "{line} (machine code inlined into its callers: blocks every function of the file)"
+            )
+        } else if self.function.is_none() {
+            format!("{line} (outside a function: blocks every function of the file)")
+        } else if self.function.as_deref() != Some(function) {
+            format!("{line} (in another function)")
+        } else {
+            line
+        }
+    }
+}
+
 pub(crate) fn is_word(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
@@ -236,6 +261,43 @@ fn pragma_code_name(span: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pragma_code_and_file_level_findings_block_every_function() {
+        let src = "#pragma aux trick = 0x90 0x90;
+int f(void)
+{
+    trick();
+    return 1;
+}
+                   int g(void) { _asm nop; return 2; }
+int h(void) { return 3; }
+";
+        let found = find_cheats(src);
+        assert_eq!(found.len(), 2, "{found:?}");
+        let pragma = &found[0];
+        assert_eq!(pragma.kind, CheatKind::PragmaCode);
+        for function in ["f", "g", "h", "trick"] {
+            assert!(pragma.blocks(function), "{function}");
+        }
+        assert!(
+            pragma.describe("f").contains("blocks every function"),
+            "{}",
+            pragma.describe("f")
+        );
+        let asm = &found[1];
+        assert!(asm.blocks("g") && !asm.blocks("f") && !asm.blocks("h"));
+        assert_eq!(asm.describe("g"), "line 7: inline-asm _asm");
+
+        let file_level = &find_cheats(
+            "asm(\"nop\");
+int f(void) { return 1; }
+",
+        )[0];
+        assert_eq!(file_level.function, None);
+        assert!(file_level.blocks("f"));
+        assert!(file_level.describe("f").contains("outside a function"));
+    }
 
     #[test]
     fn finds_inline_asm_in_function() {

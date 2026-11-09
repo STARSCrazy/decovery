@@ -212,6 +212,68 @@ fn inline_asm_downgrades() {
     );
 }
 
+#[test]
+fn code_pragma_blocks_every_function_of_the_file() {
+    // Watcom inlines the bytes of `trick` into `add`; neither function may be recorded identical
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    f.write_source(
+        "a.c",
+        "#pragma aux trick = 0x90;
+int add(int a, int b)
+{
+    trick();
+    return a + b;
+}
+
+int sub(int a, int b)
+{
+    return a - b;
+}
+",
+    );
+    run(&f, &["a.c"]);
+    for name in ["add", "sub"] {
+        let r = record(&f, name);
+        assert_eq!(r.verdict, Some(VerdictId::Differs), "{name}");
+        assert_eq!(r.result, RebuildResult::Differs, "{name}");
+        assert!(
+            r.blockers
+                .contains(&BlockerRecord::new("inline-assembly", None, None)),
+            "{name}: {:?}",
+            r.blockers
+        );
+        let message = r.message.unwrap();
+        assert!(
+            message.contains("line 1: pragma-code")
+                && message.contains("blocks every function of the file"),
+            "{message}"
+        );
+    }
+}
+
+#[test]
+fn variant_calling_a_code_pragma_is_not_identical() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    f.write_obj("V001", &[("_sub", SUB)]);
+    let pragma = "#pragma aux trick = 0x90;
+int sub(int a, int b)
+{
+    trick();
+    return a - b;
+}
+";
+    let response = run_variants(&f, "sub", &[pragma]);
+    let v = &response.data["variants"][0];
+    assert_eq!(v["verdict"], "differs", "{v}");
+    assert_eq!(v["blockers"][0]["kind"], "inline-assembly", "{v}");
+    assert!(
+        v["message"].as_str().unwrap().contains("pragma-code"),
+        "{v}"
+    );
+}
+
 const OTHER_FILES: &str = r#"schema = 1
 
 [[function]]

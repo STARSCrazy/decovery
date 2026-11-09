@@ -342,9 +342,9 @@ pub fn build(
     drop(placements);
 
     // inline assembly
-    let mut cheats: Vec<BTreeMap<String, Vec<CheatFinding>>> = Vec::new();
+    let mut cheats: Vec<Vec<CheatFinding>> = Vec::new();
     for source in &sources {
-        let mut by_function: BTreeMap<String, Vec<CheatFinding>> = BTreeMap::new();
+        let mut findings: Vec<CheatFinding> = Vec::new();
         if is_c(&source.name) {
             for finding in find_cheats(&source.text) {
                 hints.push(format!(
@@ -357,12 +357,10 @@ pub fn build(
                         .as_deref()
                         .map_or_else(|| "outside a function".to_string(), |f| format!("in {f}"))
                 ));
-                if let Some(f) = &finding.function {
-                    by_function.entry(f.clone()).or_default().push(finding);
-                }
+                findings.push(finding);
             }
         }
-        cheats.push(by_function);
+        cheats.push(findings);
     }
     let compare_ms = ms(compare_started.elapsed());
 
@@ -372,7 +370,12 @@ pub fn build(
     for (built, comparison) in placed.iter().zip(&comparisons) {
         let source = &sources[built.source];
         let mut r = record(built, comparison, source, &profile.id, &date);
-        if let Some(findings) = cheats[built.source].get(&built.name) {
+        // a code pragma or a finding outside any function blocks every function of the file
+        let findings: Vec<&CheatFinding> = cheats[built.source]
+            .iter()
+            .filter(|f| f.blocks(&built.name))
+            .collect();
+        if !findings.is_empty() {
             r.blockers.push(blocker_record(&Blocker::InlineAssembly));
             // an unchecked comparison stays unchecked (and keeps its message); the findings are added
             if r.verdict != Some(VerdictId::Unchecked) {
@@ -383,7 +386,7 @@ pub fn build(
             }
             let found = findings
                 .iter()
-                .map(|f| format!("line {}: {} {}", f.line, f.kind.id(), f.text))
+                .map(|f| f.describe(&built.name))
                 .collect::<Vec<_>>()
                 .join("\n");
             r.message = Some(match r.message.take() {
