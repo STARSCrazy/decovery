@@ -17,8 +17,8 @@ Phase 2 — decovery rebuilds functions and whole programs with the original DOS
 rebuild sources, compares every function with the original and records the verdicts; `link` links the whole program
 with the original linker and compares it with the original file; `diagnose` explains why a function differs. The
 compilers run in the `unicorn-dos` emulator plugin (or in DOSBox through `dosbox-lab`). On the two reference
-targets (a Watcom 9.5 LE game and a Turbo C 2.0 MZ tool) the build verdicts equal Decomp's, the MZ tool links
-byte-identical, and the LE game links with identical code and data pages (see
+targets (a Watcom 9.5 LE game and a Turbo C 2.0 MZ tool) the build verdicts equal Decomp's except one listed
+deviation where decovery's stricter reference check is right, the MZ tool links byte-identical, and the LE game links with identical code and data pages (see
 [the phase-2 parity report](docs/parity/phase-2.md)). Assembler sources are not built yet. See
 [the design](docs/design/0001-decovery-design.md) and [the phase-2 plan](docs/plans/2026-11-05-phase-2.md).
 

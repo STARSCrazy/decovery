@@ -1,6 +1,8 @@
 //! The comment header above each generated function file (port of Decomp's `ausgabe.kopf`).
 
-use decovery_core::{Address, AnalyzedFunction, RebuildRecord, RebuildResult, Symbol};
+use decovery_core::{
+    Address, AnalyzedFunction, BlockerRecord, RebuildRecord, RebuildResult, Symbol, VerdictId,
+};
 
 /// Entries shown in a header list before it is cut.
 const MAX_LIST: usize = 20;
@@ -152,11 +154,52 @@ pub(crate) fn string_entry(at: Address, text: &str) -> String {
     format!("{at} \"{head}\"").replace('\n', "\\n")
 }
 
-/// The `@rebuild` value (port of Decomp's `nachbau.ergebnis.kopfzeile`).
+/// The `@rebuild` value. Without a verdict (records migrated from Decomp) or with `identical` it is Decomp's
+/// `nachbau.ergebnis.kopfzeile` text; any other verdict is decovery's and leads the line with its blockers, the
+/// byte facts follow (design 4: verdicts are decovery's, 7.1: blockers next to the verdict).
 pub(crate) fn rebuild_line(record: Option<&RebuildRecord>) -> String {
     let Some(e) = record else {
         return "not tried".to_string();
     };
+    let bytes = byte_line(e);
+    let verdict = match e.verdict {
+        None | Some(VerdictId::Identical) => return bytes,
+        Some(v) => v,
+    };
+    let mut lead = match verdict {
+        VerdictId::Other => "unknown verdict".to_string(),
+        v => v.id().to_string(),
+    };
+    if !e.blockers.is_empty() {
+        let blockers: Vec<String> = e.blockers.iter().map(blocker_text).collect();
+        lead.push_str(&format!(": {}", blockers.join(", ")));
+    }
+    match bytes
+        .strip_prefix("identical (")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        Some(inner) => format!("{lead} (bytes identical, {inner})"),
+        None => match bytes.strip_prefix("differs: ") {
+            Some(rest) => format!("{lead}; bytes differ: {rest}"),
+            None => format!("{lead}; {bytes}"),
+        },
+    }
+}
+
+/// `kind@+0x40d`, with `(n×)` for a count.
+fn blocker_text(b: &BlockerRecord) -> String {
+    let mut text = b.kind.clone();
+    if let Some(at) = b.at {
+        text.push_str(&format!("@+{at:#x}"));
+    }
+    if let Some(n) = b.count {
+        text.push_str(&format!(" ({n}×)"));
+    }
+    text
+}
+
+/// The byte facts of the last rebuild (port of Decomp's `nachbau.ergebnis.kopfzeile`).
+fn byte_line(e: &RebuildRecord) -> String {
     let file = e.file.as_deref().unwrap_or("");
     let date = e.date.as_deref().unwrap_or("");
     match e.result {
@@ -501,6 +544,49 @@ mod tests {
         assert_eq!(
             rebuild_line(Some(&small)),
             "differs: 2 of 10 bytes, 1 wrong ref, instructions equal (a.c, wcc, 2026-01-01)"
+        );
+    }
+
+    #[test]
+    fn rebuild_line_without_verdict_or_identical_verdict_is_decomps_text() {
+        let mut e = record(serde_json::json!({
+            "address": "flat:00010010", "name": "a", "file": "main.c", "compiler": "watcom-9.5",
+            "flags": "-ox", "result": "identical", "equal": 300, "gaps": 60, "date": "2026-01-02"
+        }));
+        let plain = "identical (main.c, watcom-9.5 -ox, 300 fixed + 60 linker, 2026-01-02)";
+        assert_eq!(rebuild_line(Some(&e)), plain);
+        e.verdict = Some(VerdictId::Identical);
+        assert_eq!(rebuild_line(Some(&e)), plain);
+    }
+
+    #[test]
+    fn rebuild_line_leads_with_the_verdict_and_blockers() {
+        let e = record(serde_json::json!({
+            "address": "flat:00010010", "name": "a", "file": "main.c", "compiler": "watcom-9.5",
+            "flags": "-ox", "result": "identical", "verdict": "differs", "equal": 300, "gaps": 60,
+            "date": "2026-01-02",
+            "blockers": [{"kind": "data-layout", "at": 1037}, {"kind": "bytes-differ", "count": 2}]
+        }));
+        assert_eq!(
+            rebuild_line(Some(&e)),
+            "differs: data-layout@+0x40d, bytes-differ (2×) (bytes identical, main.c, watcom-9.5 -ox, 300 fixed + 60 linker, 2026-01-02)"
+        );
+        let d = record(serde_json::json!({
+            "address": "flat:00010010", "name": "a", "file": "a.c", "compiler": "wcc",
+            "result": "differs", "verdict": "differs", "bytes": 10, "differing": 2, "date": "d",
+            "blockers": [{"kind": "bytes-differ", "count": 2}]
+        }));
+        assert_eq!(
+            rebuild_line(Some(&d)),
+            "differs: bytes-differ (2×); bytes differ: 2 of 10 bytes, instructions equal (a.c, wcc, d)"
+        );
+        let u = record(serde_json::json!({
+            "address": "flat:00010010", "name": "a", "file": "a.c", "result": "error",
+            "verdict": "unchecked", "message": "inline asm", "date": "d"
+        }));
+        assert_eq!(
+            rebuild_line(Some(&u)),
+            "unchecked; error: inline asm (a.c, d)"
         );
     }
 

@@ -37,7 +37,7 @@ One function of the first target. Its bytes equal the original's; one string lit
 blocker. In the rebuild the literal is an item of the module's constant data, right after the module's other
 strings. In the original that place holds another module's data, and the literal lies elsewhere in the data
 object, among strings of another module. Linking the rebuilt module would therefore not reproduce the original
-image: decovery's `differs` is right, Decomp only compared bytes. The fix is on the source side (the literal belongs
+image: decovery's `differs` is right, Decomp did not check absolute data references. The fix is on the source side (the literal belongs
 to the module that owns its data).
 
 The detailed list with function names, addresses and evidence is kept privately

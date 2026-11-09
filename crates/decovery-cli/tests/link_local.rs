@@ -78,16 +78,12 @@ fn first_target_le_link() {
     for line in &diagnosis {
         body.push_str(&format!("- {line}\n"));
     }
-    if result == "error" {
-        body.push_str(&format!(
-            "\nWLINK did not link: {}\n",
-            d["message"].as_str().unwrap_or("")
-        ));
-        record_parity("link: first target (LE)", &body);
-        eprintln!("WLINK 9.5 did not link; recorded in the parity document");
-        return;
-    }
     record_parity("link: first target (LE)", &body);
+    assert!(
+        result == "differs" || result == "identical",
+        "link result {result}: {}",
+        d["message"].as_str().unwrap_or("")
+    );
     assert!(functions > 0 && bytes > 0, "nothing inserted: {hints:?}");
     // every inserted rebuild reproduces the original: no page and no fixup content differs
     assert!(

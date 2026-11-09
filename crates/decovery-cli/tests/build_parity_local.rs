@@ -6,8 +6,10 @@
 //! - second target (MZ, Turbo C 2.0): `DECOVERY_LOCAL_WORKSPACE_MZ=<Decomp workspace>`,
 //!   `DECOVERY_TARGET_MZ=<the original program>`; optional `DECOVERY_TOOLCHAIN_TC20=<Turbo C 2.0 directory>`;
 //! - `DECOVERY_GOLDEN_DIR=<private dir>`: mismatches go to `parity-phase-2.md` there, and each must be listed in
-//!   `phase-2-deviations.txt` there (one line per accepted mismatch: the function's address as decovery writes it,
-//!   e.g. `flat:00012340`, then the evidence that decovery's verdict is right; `#` starts a comment).
+//!   `phase-2-deviations.txt` there (one line per accepted blocker of a mismatch: the function's address as decovery writes it,
+//!   e.g. `flat:00012340`, the blocker kind, e.g. `data-layout`, then the evidence that decovery's verdict is
+//!   right; `#` starts a comment). A function with a verdict but no blocker is listed by the verdict, one that was
+//!   not built as `not-built`. Entries that no longer mismatch are printed as stale warnings.
 //!
 //! The workspace is migrated into a temporary directory (the Decomp workspace is never touched) and built in full.
 //! Every function Decomp records as identical must get `verdict = identical`, except functions of sources the build
@@ -40,6 +42,8 @@ struct Mismatch {
     file: String,
     verdict: String,
     blockers: String,
+    /// Blocker kinds (`not-built` when there is no record, the verdict when it has no blocker).
+    kinds: Vec<String>,
     decomp: String,
 }
 
@@ -84,6 +88,24 @@ fn built_functions(response: &Value, ws: &Path) -> Vec<Value> {
         .collect()
 }
 
+/// The blocker kinds of a record; `not-built` without a record, the verdict when it names no blocker.
+fn kinds(f: Option<&Value>, verdict: &str) -> Vec<String> {
+    let Some(f) = f else {
+        return vec!["not-built".to_string()];
+    };
+    let kinds: Vec<String> = f["blockers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|b| b["kind"].as_str().unwrap_or("?").to_string())
+        .collect();
+    if kinds.is_empty() {
+        vec![verdict.to_string()]
+    } else {
+        kinds
+    }
+}
+
 /// `kind` or `kind@0x…` per blocker.
 fn blockers(f: &Value) -> String {
     f["blockers"]
@@ -102,8 +124,9 @@ fn blockers(f: &Value) -> String {
         .join(", ")
 }
 
-/// Addresses listed in `$DECOVERY_GOLDEN_DIR/phase-2-deviations.txt`.
-fn listed_deviations() -> BTreeSet<String> {
+/// `(address, blocker kind)` pairs listed in `$DECOVERY_GOLDEN_DIR/phase-2-deviations.txt`
+/// (`<address> <blocker kind> <evidence>` per line).
+fn listed_deviations() -> BTreeSet<(String, String)> {
     let Some(dir) = std::env::var_os("DECOVERY_GOLDEN_DIR") else {
         return BTreeSet::new();
     };
@@ -112,8 +135,19 @@ fn listed_deviations() -> BTreeSet<String> {
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .filter_map(|l| l.split_whitespace().next().map(str::to_string))
+        .filter_map(|l| {
+            let mut words = l.split_whitespace();
+            Some((words.next()?.to_string(), words.next()?.to_string()))
+        })
         .collect()
+}
+
+/// A mismatch is accepted when every one of its blocker kinds is listed for its address.
+fn is_listed(listed: &BTreeSet<(String, String)>, m: &Mismatch) -> bool {
+    !m.kinds.is_empty()
+        && m.kinds
+            .iter()
+            .all(|k| listed.contains(&(m.address.clone(), k.clone())))
 }
 
 struct Target<'a> {
@@ -197,6 +231,7 @@ fn parity(t: &Target) {
     .unwrap();
     let (mut identical, mut agree, mut not_built) = (0usize, 0usize, 0usize);
     let mut mismatches = Vec::new();
+    let mut compared: BTreeSet<String> = BTreeSet::new();
     for e in recorded[DECOMP_RECORD_TABLE].as_array().unwrap() {
         let e = e.as_table().unwrap();
         let text = |key: &str| {
@@ -214,6 +249,7 @@ fn parity(t: &Target) {
             continue;
         }
         let address = address(&text(DECOMP_KEY_ADDRESS));
+        compared.insert(address.clone());
         let ours = ours.get(&address);
         let verdict = ours
             .and_then(|f| f["verdict"].as_str())
@@ -228,6 +264,7 @@ fn parity(t: &Target) {
             file: text(DECOMP_KEY_FILE),
             verdict: verdict.to_string(),
             blockers: ours.map(blockers).unwrap_or_default(),
+            kinds: kinds(ours, verdict),
             decomp: format!(
                 "{} ({} bytes, {} equal, refs ok {}, refs wrong {})",
                 text(DECOMP_KEY_RESULT),
@@ -266,11 +303,7 @@ fn parity(t: &Target) {
             m.verdict,
             m.blockers,
             m.decomp,
-            if listed.contains(&m.address) {
-                "yes"
-            } else {
-                "no"
-            }
+            if is_listed(&listed, m) { "yes" } else { "no" }
         )
         .unwrap();
     }
@@ -279,9 +312,21 @@ fn parity(t: &Target) {
 
     let unlisted: Vec<String> = mismatches
         .iter()
-        .filter(|m| !listed.contains(&m.address))
+        .filter(|m| !is_listed(&listed, m))
         .map(|m| format!("{} {} {}: {}", m.address, m.name, m.verdict, m.blockers))
         .collect();
+    // listed entries of this target that no longer mismatch: a warning, not a failure
+    for (address, kind) in &listed {
+        if compared.contains(address)
+            && !mismatches
+                .iter()
+                .any(|m| &m.address == address && m.kinds.contains(kind))
+        {
+            eprintln!(
+                "warning: stale entry in phase-2-deviations.txt (no longer mismatches): {address} {kind}"
+            );
+        }
+    }
     assert!(
         unlisted.is_empty(),
         "not in phase-2-deviations.txt: {unlisted:#?}"

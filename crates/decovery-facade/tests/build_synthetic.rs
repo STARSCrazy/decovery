@@ -356,7 +356,7 @@ fn output_header_shows_new_result() {
     run(&f, &["a.c"]);
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(
-        text.contains("@rebuild    differs: 1 of 11 bytes"),
+        text.contains("@rebuild    differs: bytes-differ (1×), instructions-differ (1×); bytes differ: 1 of 11 bytes"),
         "{text}"
     );
     let index = std::fs::read_to_string(f.root().join("output/index.md")).unwrap();
