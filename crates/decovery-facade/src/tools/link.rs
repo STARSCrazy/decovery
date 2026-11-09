@@ -596,8 +596,8 @@ fn current_object(
         && builder_ok
         && meta.flags == flags
         && meta.inputs.get(&dos_name) == Some(&staged_hash)
-        // a byte listing includes no header; a build of assembler sources alone records none
-        && (is_asm(file)
+        // a byte listing (built-in assembler) includes no header; a build of assembler sources alone records none
+        && ((is_asm(file) && meta.profile == BUILTIN_ASSEMBLER)
             || headers
                 .iter()
                 .all(|(h, hash)| meta.inputs.get(h) == Some(hash)));
