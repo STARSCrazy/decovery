@@ -141,7 +141,7 @@ pub fn is_job_not_run(outcome: &JobOutcome) -> bool {
             .is_some_and(|m| m.starts_with(JOB_NOT_RUN))
 }
 
-fn absolute(path: &Path) -> PathBuf {
+pub(crate) fn absolute(path: &Path) -> PathBuf {
     std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
@@ -169,11 +169,11 @@ fn staged_headers(build_dir: &Path) -> Result<Vec<(String, Vec<u8>)>, ToolchainE
     Ok(headers)
 }
 
-/// Why a job did not yield its object.
-fn failure(outcome: &JobOutcome, object: &str) -> String {
+/// Why a job of `tool` (`compiler`, `linker`) did not yield its `output`.
+pub(crate) fn failure(outcome: &JobOutcome, tool: &str, output: &str) -> String {
     let reason = match (outcome.status, outcome.exit_code) {
-        (JobStatus::Done, Some(code)) if code != 0 => format!("compiler exit code {code}"),
-        (JobStatus::Done, _) => format!("the compiler wrote no {object}"),
+        (JobStatus::Done, Some(code)) if code != 0 => format!("{tool} exit code {code}"),
+        (JobStatus::Done, _) => format!("the {tool} wrote no {output}"),
         (JobStatus::Timeout, _) => outcome
             .message
             .clone()
@@ -381,7 +381,7 @@ pub fn compile_planned(
         let object_name = &job.expected[0];
         let file = &mut files[i];
         if !outcome.succeeded() {
-            file.message = failure(&outcome, object_name);
+            file.message = failure(&outcome, "compiler", object_name);
             continue;
         }
         // a produced object that cannot be read fails this file, not the build

@@ -21,5 +21,5 @@ pub use session::{DisplayName, KnowledgeView, Session};
 pub use tools::{
     AnalyzeOptions, AnnotateAction, Annotation, BuildRequest, DEFAULT_LIMIT, FindQuery, FindWhat,
     FunctionFilter, FunctionSort, Variant, analyze, analyze_with_user_plugins, annotate, build,
-    detail, diagnose, find, program_description, show, status,
+    detail, diagnose, find, link, program_description, show, status,
 };

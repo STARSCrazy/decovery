@@ -587,12 +587,7 @@ pub(super) fn compile_jobs(
         Some(format!("compiling {} sources", jobs_input.len())),
     ));
     let user = read_user_config()?;
-    let rebuild = ws.config.rebuild.clone().unwrap_or_default();
-    let runner_names = if rebuild.runners.is_empty() {
-        profile.runners.clone()
-    } else {
-        rebuild.runners.clone()
-    };
+    let runner_names = runner_names(ws, profile);
     // every input (tool fingerprint, sources, headers, cached objects) is read once, here
     let plan = if jobs_input.is_empty() {
         None
@@ -623,6 +618,14 @@ pub(super) fn compile_jobs(
         input_hashes,
         warnings,
     })
+}
+
+/// The runners to try: `[rebuild] runners`, else the profile's.
+pub(super) fn runner_names(ws: &Workspace, profile: &Profile) -> Vec<String> {
+    match ws.config.rebuild.as_ref() {
+        Some(r) if !r.runners.is_empty() => r.runners.clone(),
+        _ => profile.runners.clone(),
+    }
 }
 
 /// Why a file without object failed.

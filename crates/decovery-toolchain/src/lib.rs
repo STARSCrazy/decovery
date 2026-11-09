@@ -5,6 +5,7 @@ mod cache;
 mod cheat;
 mod cp437;
 mod error;
+mod link;
 mod profile;
 mod runner;
 mod schedule;
@@ -18,6 +19,7 @@ pub use build::{
 pub use cache::{OBJECT_CACHE_DIR, ObjectCache};
 pub use cheat::{CheatFinding, CheatKind, find_cheats};
 pub use cp437::decode as from_cp437;
+pub use link::{DEFAULT_STARTUP, Linked, link};
 pub use runner::{
     JobOutcome, JobStatus, Mount, NativeRunner, PluginRunner, RunJob, RunRequest, Runner,
     RunnerError, open_runners, run_with_fallback, run_with_fallback_reporting,

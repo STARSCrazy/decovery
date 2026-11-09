@@ -15,10 +15,15 @@ fn locate(path: &Path, root: &Path) -> PathBuf {
     }
 }
 
+/// The file of the target of `ws`.
+pub fn target_path(ws: &Workspace) -> PathBuf {
+    locate(Path::new(&ws.config.target.file), &ws.root)
+}
+
 /// Loads the target of `ws`, dispatching on its format.
 pub fn load(ws: &Workspace) -> Result<Program, FacadeError> {
     let format = ws.config.target.format;
-    let file = locate(Path::new(&ws.config.target.file), &ws.root);
+    let file = target_path(ws);
     let bytes = std::fs::read(&file)
         .map_err(|e| FacadeError::Invalid(format!("cannot read target {}: {e}", file.display())))?;
     let loaded = match format {

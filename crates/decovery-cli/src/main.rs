@@ -166,6 +166,11 @@ enum Command {
         #[arg(long = "function-source", value_name = "FILE")]
         function_source: Vec<PathBuf>,
     },
+    /// Compile all rebuild sources, link them with the original linker into the whole program
+    /// (`cache/rebuild/REBUILD.EXE`) and compare it with the original file; the result goes to
+    /// `knowledge/rebuild-program.toml`. Exit code 0 when identical, 1 when it differs, 2 when the
+    /// link failed or on errors. Progress goes to stderr.
+    Link,
     /// Page the content of a handle returned by another command.
     Detail {
         /// Handle id (`h_` plus 12 hex characters).
@@ -438,6 +443,13 @@ fn main() -> ExitCode {
         ) {
             Ok(true) => ExitCode::SUCCESS,
             Ok(false) => ExitCode::from(1),
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::from(e.exit_code())
+            }
+        },
+        Command::Link => match link(&cli.workspace, cli.json) {
+            Ok(code) => code,
             Err(e) => {
                 eprintln!("error: {e}");
                 ExitCode::from(e.exit_code())
@@ -882,6 +894,48 @@ fn build(
         }
     }
     Ok(complete)
+}
+
+/// Links and prints the result; the exit code follows the result (0 identical, 1 differs, 2 error).
+fn link(workspace: &Path, json: bool) -> Result<ExitCode, FacadeError> {
+    let progress = |p: Progress| {
+        if let Some(message) = p.message.filter(|m| !m.trim().is_empty()) {
+            eprintln!("{message}");
+        }
+    };
+    let response = decovery_facade::link(workspace, &progress)?;
+    let d = &response.data;
+    let code = match d["result"].as_str() {
+        Some("identical") => ExitCode::SUCCESS,
+        Some("differs") => ExitCode::from(1),
+        _ => ExitCode::from(2),
+    };
+    if json {
+        print_json(&response)?;
+        return Ok(code);
+    }
+    print_summary(&response, false)?;
+    // the summary carries the first line of the message
+    for line in d["message"].as_str().unwrap_or("").lines().skip(1) {
+        println!("  {line}");
+    }
+    for line in d["diagnosis"].as_array().into_iter().flatten() {
+        println!("{}", line.as_str().unwrap_or(""));
+    }
+    if let Some(shares) = d["shares"].as_object() {
+        let parts: Vec<String> = shares
+            .iter()
+            .filter(|(_, v)| v.as_u64().unwrap_or(0) > 0)
+            .map(|(k, v)| format!("{k} {v}"))
+            .collect();
+        println!("shares (bytes): {}", parts.join(", "));
+    }
+    for hint in d["hints"].as_array().into_iter().flatten() {
+        if let Some(text) = hint.as_str() {
+            eprintln!("hint: {text}");
+        }
+    }
+    Ok(code)
 }
 
 /// Prints the ranked variants (best first); `true` when the best one is identical.

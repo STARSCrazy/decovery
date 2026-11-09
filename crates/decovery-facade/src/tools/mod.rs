@@ -6,6 +6,7 @@ mod build;
 mod detail;
 mod diagnose;
 mod find;
+mod link;
 mod show;
 mod status;
 mod variants;
@@ -16,6 +17,7 @@ pub use build::{BuildRequest, OBJECT_FORMAT, OBJECTS_DIR, RUNS_DIR, SOURCE_DIR, 
 pub use detail::detail;
 pub use diagnose::diagnose_tool as diagnose;
 pub use find::{DEFAULT_LIMIT, FindQuery, FindWhat, FunctionFilter, FunctionSort, find};
+pub use link::link;
 pub use show::show;
 pub use status::status;
 pub use variants::{MAX_VARIANTS, Variant};

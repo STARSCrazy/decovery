@@ -6,6 +6,10 @@ appends its source name to `calls.log` and its `SET TMP=` directory (and whether
 call appends its job count to `requests.log` (all in FAKE_OMF_DIR). The staged source of every job is copied to
 `sources/<D>/<X.C>` (`sources/<X.C>` without a `CD` line) in FAKE_OMF_DIR.
 
+A job whose last command runs TLINK is a link job: its command line is appended to `link.log`, it fails when an
+object of the line is missing in the C mount, else copies `REBUILD.EXE` from FAKE_OMF_DIR into the C mount (exit 0)
+or, without that file, prints a linker error and exits 2.
+
 With FAKE_NOT_RUN_ONCE=1 the first call with more than one job answers only its first job; the others come back
 `failed` with "job not run: ..." like the dosbox-lab runner after a hang.
 """
@@ -27,7 +31,23 @@ def append(name, line):
         f.write(line + "\n")
 
 
+def link_job(job, c_root):
+    line = job["commands"][-1]
+    append("link.log", line)
+    objects = [t for t in line.split(",")[0].split()[1:] if "\\" not in t and not t.startswith("/")]
+    missing = [o for o in objects if not os.path.isfile(os.path.join(c_root, o + ".OBJ"))]
+    if missing:
+        return {"status": "done", "exit_code": 2, "stdout": f"Fatal: unable to open {missing[0]}.OBJ\r\n"}
+    exe = os.path.join(OBJECTS, "REBUILD.EXE")
+    if not os.path.isfile(exe):
+        return {"status": "done", "exit_code": 2, "stdout": "Error: Undefined symbol _main in module C0S\r\n"}
+    shutil.copyfile(exe, os.path.join(c_root, "REBUILD.EXE"))
+    return {"status": "done", "exit_code": 0, "stdout": "Turbo Link Version 2.0\r\n"}
+
+
 def run_job(job, c_root):
+    if "TLINK" in job["commands"][-1].split()[0].upper():
+        return link_job(job, c_root)
     cd = None
     for line in job["commands"]:
         if line.upper().startswith("SET TMP=C:\\"):

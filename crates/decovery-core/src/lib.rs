@@ -24,8 +24,9 @@ pub use program::{
     ArchMode, ExecutableFormat, Permissions, Program, Region, RelocKind, Relocation,
 };
 pub use records::{
-    BlockerRecord, Equivalence, RebuildRecord, RebuildResult, Reference, ReferenceKind, VerdictId,
-    merge_rebuild, read_rebuild, read_references, save_rebuild,
+    BlockerRecord, Equivalence, ProgramRecord, RebuildRecord, RebuildResult, Reference,
+    ReferenceKind, Shares, Used, VerdictId, merge_rebuild, read_program_record, read_rebuild,
+    read_references, save_program_record, save_rebuild,
 };
 pub use store::{WorkspaceLock, write_atomic};
 pub use user_config::{

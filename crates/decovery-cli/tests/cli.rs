@@ -514,6 +514,48 @@ fn build_exit_codes() {
     assert!(String::from_utf8(out.stderr).unwrap().contains("missing.c"));
 }
 
+fn link_cli(root: &std::path::Path) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_decovery"))
+        .args(["link", "--json", "--workspace"])
+        .arg(root)
+        .output()
+        .expect("run decovery")
+}
+
+#[test]
+fn link_exit_codes() {
+    let python = python_or_skip!();
+    let f = build_fixture::fixture(&python, "");
+    // without [rebuild.link]
+    let out = link_cli(f.root());
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(
+        String::from_utf8(out.stderr)
+            .unwrap()
+            .contains("[rebuild.link]")
+    );
+
+    let config = f.root().join("decovery.toml");
+    let text = std::fs::read_to_string(&config).unwrap().replacen(
+        "\n[plugins.fake]",
+        "\n[rebuild.link]\nlibraries = [\"CS\"]\n\n[plugins.fake]",
+        1,
+    );
+    std::fs::write(config, text).unwrap();
+    // the fake linker has no program to produce: the link fails
+    let out = link_cli(f.root());
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["data"]["result"], "error");
+
+    let mut exe = std::fs::read(f.root().join("t.exe")).unwrap();
+    std::fs::write(f.objects.path().join("REBUILD.EXE"), &exe).unwrap();
+    assert_eq!(link_cli(f.root()).status.code(), Some(0));
+    exe.push(0);
+    std::fs::write(f.objects.path().join("REBUILD.EXE"), &exe).unwrap();
+    assert_eq!(link_cli(f.root()).status.code(), Some(1));
+}
+
 #[test]
 fn build_variants_ranks_and_sets_exit_code() {
     let python = python_or_skip!();

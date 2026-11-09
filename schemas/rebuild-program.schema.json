@@ -14,7 +14,7 @@
       "properties": {
         "result": {
           "type": "string",
-          "description": "identical, differs"
+          "description": "identical, differs, error"
         },
         "compiler": {
           "type": "string"
@@ -30,6 +30,21 @@
         "differing": {
           "type": "integer",
           "minimum": 0
+        },
+        "first_difference": {
+          "type": ["integer", "string"],
+          "description": "file offset of the first differing byte; text such as \"0x4C\" is read too"
+        },
+        "message": {
+          "type": "string",
+          "description": "why the link failed (result error)"
+        },
+        "diagnosis": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "hints why the linked program differs"
         },
         "date": {
           "type": "string"

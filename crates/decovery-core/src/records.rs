@@ -1,4 +1,5 @@
-//! Typed views of `knowledge/rebuild.toml` and `knowledge/references.toml` as migrate writes them.
+//! Typed views of `knowledge/rebuild.toml`, `knowledge/rebuild-program.toml` and `knowledge/references.toml` as
+//! migrate writes them.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -12,6 +13,8 @@ use crate::workspace::{SCHEMA, WorkspaceError};
 
 /// Path of the rebuild records relative to the workspace root.
 pub const REBUILD_FILE: &str = "knowledge/rebuild.toml";
+/// Path of the program record (the last `link`) relative to the workspace root.
+pub const REBUILD_PROGRAM_FILE: &str = "knowledge/rebuild-program.toml";
 /// Path of the reference records relative to the workspace root.
 pub const REFERENCES_FILE: &str = "knowledge/references.toml";
 
@@ -225,25 +228,28 @@ pub struct Equivalence {
 }
 
 /// `first_difference` is an integer in practice, but the schema allows text (`"12"`, `"0x0C"`).
-fn number_or_text<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u32>, D::Error> {
+fn number_or_text<'de, D: Deserializer<'de>, T: TryFrom<u64>>(d: D) -> Result<Option<T>, D::Error> {
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum Raw {
-        Number(u32),
+        Number(u64),
         Text(String),
     }
-    match Option::<Raw>::deserialize(d)? {
-        None => Ok(None),
-        Some(Raw::Number(n)) => Ok(Some(n)),
+    let n = match Option::<Raw>::deserialize(d)? {
+        None => return Ok(None),
+        Some(Raw::Number(n)) => n,
         Some(Raw::Text(t)) => {
             let t = t.trim();
-            let parsed = match t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
-                Some(hex) => u32::from_str_radix(hex, 16),
+            match t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+                Some(hex) => u64::from_str_radix(hex, 16),
                 None => t.parse(),
-            };
-            parsed.map(Some).map_err(serde::de::Error::custom)
+            }
+            .map_err(serde::de::Error::custom)?
         }
-    }
+    };
+    T::try_from(n)
+        .map(Some)
+        .map_err(|_| serde::de::Error::custom(format!("{n} is out of range")))
 }
 
 /// How a reference transfers control.
@@ -373,6 +379,130 @@ pub fn merge_rebuild(
         merged.insert(r.address, r);
     }
     merged.into_values().collect()
+}
+
+/// Bytes of the original image by origin (Decomp's `anteile`): each byte counts once, for the first of c (rebuilt
+/// identical from C), library, assembly, other functions; the rest is data and gaps.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct Shares {
+    #[serde(default)]
+    pub c: u64,
+    #[serde(default)]
+    pub library: u64,
+    #[serde(default)]
+    pub assembly: u64,
+    #[serde(default)]
+    pub other_functions: u64,
+    #[serde(default)]
+    pub rest: u64,
+}
+
+/// Rebuilt functions used in a linked program (LE: inserted into the original image).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct Used {
+    #[serde(default)]
+    pub functions: u64,
+    #[serde(default)]
+    pub bytes: u64,
+}
+
+fn is_zero_u64(n: &u64) -> bool {
+    *n == 0
+}
+
+/// The last `link`: the whole program against the original file (`[program]` in `knowledge/rebuild-program.toml`).
+/// `first_difference` is a file offset. Keys this version does not know are kept in `extra` and written back.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ProgramRecord {
+    pub result: RebuildResult,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compiler: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub original_bytes: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub rebuilt_bytes: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub differing: u64,
+    #[serde(
+        default,
+        deserialize_with = "number_or_text",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub first_difference: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnosis: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shares: Option<Shares>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used: Option<Used>,
+    /// Keys this version does not know.
+    #[serde(flatten)]
+    pub extra: toml::Table,
+}
+
+impl ProgramRecord {
+    /// A record with only the result set.
+    pub fn new(result: RebuildResult) -> Self {
+        ProgramRecord {
+            result,
+            compiler: None,
+            original_bytes: 0,
+            rebuilt_bytes: 0,
+            differing: 0,
+            first_difference: None,
+            message: None,
+            date: None,
+            diagnosis: Vec::new(),
+            shares: None,
+            used: None,
+            extra: toml::Table::new(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct ProgramFile {
+    schema: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    program: Option<ProgramRecord>,
+}
+
+/// Reads `knowledge/rebuild-program.toml`; `None` when the file or its `[program]` does not exist.
+pub fn read_program_record(root: &Path) -> Result<Option<ProgramRecord>, WorkspaceError> {
+    let path = root.join(REBUILD_PROGRAM_FILE);
+    Ok(read_optional::<ProgramFile>(&path, |f| f.schema)?.and_then(|f| f.program))
+}
+
+/// Writes `knowledge/rebuild-program.toml` atomically and deterministically (LF line ends). Refuses a record with
+/// an unknown result.
+pub fn save_program_record(
+    root: &Path,
+    record: &ProgramRecord,
+    _lock: &WorkspaceLock,
+) -> Result<(), WorkspaceError> {
+    let path = root.join(REBUILD_PROGRAM_FILE);
+    if record.result == RebuildResult::Other {
+        return Err(WorkspaceError::UnknownValue {
+            file: path,
+            detail: "program record has an unknown result".into(),
+        });
+    }
+    let text = toml::to_string(&ProgramFile {
+        schema: SCHEMA,
+        program: Some(record.clone()),
+    })
+    .map_err(|e| WorkspaceError::Io {
+        path: path.clone(),
+        source: std::io::Error::other(e),
+    })?;
+    write_atomic(&path, text.as_bytes()).map_err(|source| WorkspaceError::Io { path, source })
 }
 
 fn read_optional<T: for<'de> Deserialize<'de>>(
