@@ -20,4 +20,5 @@ data = "_{name}"
 [linker]
 command = 'D:\TLINK {flags} {library_dir}\{startup} {objects},{output},,{libraries}'
 library_dir = 'D:\LIB'
+startup = "C0S"
 output = "{name}.EXE"

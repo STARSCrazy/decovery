@@ -60,8 +60,8 @@ impl Drop for RunDir {
     }
 }
 
-/// The frame bases the startup object of `[rebuild.link]` proves in the original (ADR 0006 item 10), for an MZ
-/// target; why the startup gives none goes into `warnings`.
+/// The frame bases the program's startup object ([`startup_object`]) proves in the original (ADR 0006 item 10),
+/// for an MZ target; why the startup gives none goes into `warnings` (nothing when the toolchain has none).
 pub(super) fn startup_frames(
     ws: &Workspace,
     profile: &Profile,
@@ -80,8 +80,18 @@ pub(super) fn startup_frames(
         }
     };
     let name = file_name(&path);
+    let configured = ws
+        .config
+        .rebuild
+        .as_ref()
+        .and_then(|r| r.link.as_ref())
+        .is_some_and(|l| l.startup.is_some());
     let object = match std::fs::read(&path) {
         Ok(bytes) => read_omf(&bytes, &name).map_err(|e| e.to_string()),
+        // the profile's default startup missing from a tool directory (a partial toolchain): nothing to say
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && !configured => {
+            return BTreeMap::new();
+        }
         Err(e) => Err(e.to_string()),
     };
     match object {

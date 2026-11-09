@@ -55,7 +55,11 @@ pub fn link(
     }
     let line = profile.link_line(
         config.flags.as_deref().unwrap_or(""),
-        config.startup.as_deref().unwrap_or(DEFAULT_STARTUP),
+        config
+            .startup
+            .as_deref()
+            .or(linker.startup.as_deref())
+            .unwrap_or(DEFAULT_STARTUP),
         &stems,
         output,
         &config.libraries,
@@ -129,17 +133,23 @@ pub(crate) fn run_linker(
     Ok((linked, warnings))
 }
 
-/// The host path of the startup object `[rebuild.link]` links in (`startup`, default [`DEFAULT_STARTUP`]): the
-/// profile's library directory on the tool drive `D:` inside the tool directory. `None` when the workspace has no
-/// `[rebuild.link]`, the profile no linker, or the library directory is not on `D:`.
+/// The host path of the program's startup object: `[rebuild.link] startup`, else the profile linker's `startup`, in
+/// the profile's library directory on the tool drive `D:` inside the tool directory. `None` when neither names a
+/// startup object, the profile has no linker, or the library directory is not on `D:`.
 pub fn startup_object(
     ws: &Workspace,
     profile: &Profile,
 ) -> Result<Option<PathBuf>, ToolchainError> {
-    let (Some(config), Some(linker)) = (
-        ws.config.rebuild.as_ref().and_then(|r| r.link.as_ref()),
-        profile.linker.as_ref(),
-    ) else {
+    let Some(linker) = profile.linker.as_ref() else {
+        return Ok(None);
+    };
+    let configured = ws
+        .config
+        .rebuild
+        .as_ref()
+        .and_then(|r| r.link.as_ref())
+        .and_then(|l| l.startup.as_deref());
+    let Some(startup) = configured.or(linker.startup.as_deref()) else {
         return Ok(None);
     };
     let Some(library) = linker
@@ -152,7 +162,54 @@ pub fn startup_object(
     let user = read_user_config().map_err(|e| ToolchainError::Invalid(e.to_string()))?;
     let mut path = tool_dir(profile, ws.config.rebuild.as_ref(), &user, &ws.root)?;
     path.extend(library.split(['\\', '/']).filter(|p| !p.is_empty()));
-    let startup = config.startup.as_deref().unwrap_or(DEFAULT_STARTUP);
     path.push(format!("{startup}.{}", profile.object_extension));
     Ok(Some(path))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A workspace with `[rebuild] compiler` and a tool directory `tools`, plus `extra` TOML.
+    fn workspace(compiler: &str, extra: &str) -> (tempfile::TempDir, Workspace) {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("tools")).unwrap();
+        std::fs::write(
+            root.path().join("decovery.toml"),
+            format!(
+                "schema = 1\n[target]\nfile = \"t.exe\"\nsha256 = \"00\"\nformat = \"mz\"\n\
+                 processor = \"x86\"\n[rebuild]\ncompiler = \"{compiler}\"\ntool_dir = \"tools\"\n{extra}"
+            ),
+        )
+        .unwrap();
+        let ws = Workspace::open(root.path()).unwrap();
+        (root, ws)
+    }
+
+    #[test]
+    fn startup_object_from_profile_without_link_config() {
+        let (root, ws) = workspace("turbo-c-2.0", "");
+        let profile = crate::profile("turbo-c-2.0").unwrap();
+        assert_eq!(
+            startup_object(&ws, &profile).unwrap(),
+            Some(root.path().join("tools").join("LIB").join("C0S.OBJ"))
+        );
+    }
+
+    #[test]
+    fn startup_object_from_link_config() {
+        let (root, ws) = workspace("turbo-c-2.0", "[rebuild.link]\nstartup = \"C0L\"\n");
+        let profile = crate::profile("turbo-c-2.0").unwrap();
+        assert_eq!(
+            startup_object(&ws, &profile).unwrap(),
+            Some(root.path().join("tools").join("LIB").join("C0L.OBJ"))
+        );
+    }
+
+    #[test]
+    fn no_startup_object_when_the_profile_has_none() {
+        let (_root, ws) = workspace("watcom-10.6", "");
+        let profile = crate::profile("watcom-10.6").unwrap();
+        assert_eq!(startup_object(&ws, &profile).unwrap(), None);
+    }
 }

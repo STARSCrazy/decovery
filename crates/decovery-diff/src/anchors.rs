@@ -173,6 +173,9 @@ struct SectionAnchor {
     tally: Tally,
     /// Referenced offsets (`rel`) whose item differs from the original.
     differing: BTreeSet<i64>,
+    /// A data section whose items cannot be compared because its frame has no anchor: its fields stay unchecked
+    /// (ADR 0006 item 5, amendment 2026-11-09).
+    uncompared: bool,
     /// Dissenting (rel, candidate) pairs whose item equals the original at the candidate's position: the item
     /// exists unchanged, only at another offset of the section (data layout).
     moved: BTreeSet<(i64, i64)>,
@@ -338,12 +341,14 @@ impl Anchors {
                     BTreeSet::new()
                 }
             };
+            let uncompared = checked && frame_base.is_none();
             anchors.sections.insert(
                 key,
                 SectionAnchor {
                     tally: t,
                     differing,
                     moved,
+                    uncompared,
                 },
             );
         }
@@ -380,10 +385,14 @@ impl Anchors {
                     key,
                     rel,
                     candidate,
-                } => self
-                    .sections
-                    .get(key)
-                    .is_some_and(|s| s.tally.base == *candidate && !s.differing.contains(rel)),
+                } => match self.sections.get(key) {
+                    Some(s) if s.tally.base == *candidate && !s.differing.contains(rel) => {
+                        // the offset agrees, but an item that cannot be compared is not checked
+                        unverified |= s.uncompared;
+                        true
+                    }
+                    _ => false,
+                },
                 Condition::Segment { frame, base } => match self.frames.get(frame) {
                     Some(f) => f.base == *base,
                     None => {

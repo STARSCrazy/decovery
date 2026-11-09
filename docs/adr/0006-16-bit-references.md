@@ -45,6 +45,11 @@ functions it compares (`compare_module`: first pass collects, second pass checks
    first; the section's own fixup fields inside it are not compared. A field is `WrongAbsoluteRef` only if its own
    item differs, so a difference elsewhere in the section (another function's string) does not mark it. Without a
    frame anchor the byte check is skipped and the comparison carries a warning naming the section and the frame.
+   *Amendment 2026-11-09 (fail closed):* a field whose item cannot be compared because the frame has no anchor is
+   an `UncheckedRef`, even when its offset agrees with the section anchor; the warning stays. The section anchor
+   alone only shows that the rebuild's references are consistent with each other, not that they name the
+   original's data: a wrong string at the right offset passed as identical. Design 5.11 item 1 requires every
+   relocated field to be checked, and a false `identical` is the outcome decovery must never produce.
 6. **Selector fields** need the original's MZ relocation at the same place; its segment value times 16 must equal
    the frame anchor's base. Without a frame anchor a selector field is an `UncheckedRef`. Selector fields do not
    vote.
@@ -59,9 +64,9 @@ functions it compares (`compare_module`: first pass collects, second pass checks
    relocation must point at a table whose consecutive entries lead to the same offsets relative to the function
    start as the rebuild's entries.
 10. **Startup frames** (amendment 2026-11-09). A frame base can come from the program's startup code instead of
-    votes. For an MZ target, `build` reads the startup object that `[rebuild.link]` links in (`startup`, from the
-    profile's library directory) and places its start address (OMF `MODEND`) at the program's entry point. The
-    startup gives frame bases only if its code section equals the original there outside its own fixup fields and
+    votes. For an MZ target, `build` reads the startup object (`[rebuild.link] startup`, else the profile linker's
+    `startup`; none for a toolchain without one) from the profile's library directory and places its start
+    address (OMF `MODEND`) at the program's entry point. The startup gives frame bases only if its code section equals the original there outside its own fixup fields and
     each of its 16-bit selector fields has a segment relocation of the original at the same place; the
     original's segment value times 16 is then the base of the field's frame (a selector that targets a group,
     `mov dx, DGROUP`, names the group). A frame whose selector fields give different bases gets none. The base is

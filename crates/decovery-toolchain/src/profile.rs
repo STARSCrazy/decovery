@@ -47,6 +47,10 @@ pub struct LinkerSpec {
     /// the entry point then goes into the module end record).
     #[serde(default = "accepts_start_option")]
     pub start_option: bool,
+    /// Startup object (name without extension, in `library_dir`) linked when `[rebuild.link] startup` is not
+    /// set; `None` when the toolchain has no separate startup object.
+    #[serde(default)]
+    pub startup: Option<String>,
 }
 
 fn accepts_start_option() -> bool {
@@ -284,6 +288,9 @@ mod tests {
         let w10 = profile("watcom-10.6").unwrap();
         assert_eq!(w10.runners, ["dosbox-lab"]);
         assert!(w10.linker.as_ref().unwrap().start_option);
+        assert_eq!(w10.linker.as_ref().unwrap().startup, None);
+        let tc = profile("turbo-c-2.0").unwrap();
+        assert_eq!(tc.linker.unwrap().startup.as_deref(), Some("C0S"));
         assert_eq!(
             w10.assembler.unwrap().command.unwrap(),
             "WASM -zq -fo={output} {input}"

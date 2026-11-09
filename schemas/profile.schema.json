@@ -41,7 +41,11 @@
           "description": "Placeholders {response} {flags} {library_dir} {startup} {objects} {output} {libraries}."
         },
         "library_dir": { "type": "string" },
-        "output": { "type": "string" }
+        "output": { "type": "string" },
+        "startup": {
+          "type": "string",
+          "description": "Startup object in library_dir (name without extension) when [rebuild.link] startup is not set."
+        }
       }
     },
     "assembler": {

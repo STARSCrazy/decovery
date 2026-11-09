@@ -263,12 +263,17 @@ fn unrelated_section_difference_does_not_mark_ref() {
 }
 
 #[test]
-fn no_frame_anchor_warns_and_skips_bytes() {
-    // `_g1` unknown: no field names a known address, so DGROUP has no anchor.
+fn no_frame_anchor_warns_and_leaves_items_unchecked() {
+    // `_g1` unknown: no field names a known address, so DGROUP has no anchor. The string fields agree with their
+    // section anchor, but their items cannot be compared: unchecked, not identical (item 5, 2026-11-09).
     let c = strings_case(b"different", &Symbols::default());
     assert_eq!(
         c.functions[0].blockers,
-        vec![Blocker::UncheckedRef { at: 1 }]
+        vec![
+            Blocker::UncheckedRef { at: 1 },
+            Blocker::UncheckedRef { at: 4 },
+            Blocker::UncheckedRef { at: 7 }
+        ]
     );
     assert!(c.anchors.iter().all(|a| a.section.is_some()));
     let a = anchor(&c, "DGROUP", Some("_DATA"));
@@ -484,7 +489,14 @@ fn section_frame_is_the_section_itself() {
     );
     assert_eq!(c.warnings.len(), 1, "{:?}", c.warnings);
     assert!(c.warnings[0].contains("frame _DATA"), "{:?}", c.warnings);
-    assert_eq!(c.functions[0].verdict, Verdict::Identical);
+    // `_g1` is checked by DGROUP, the two string items are not comparable without a `_DATA` frame
+    assert_eq!(
+        c.functions[0].blockers,
+        vec![
+            Blocker::UncheckedRef { at: 4 },
+            Blocker::UncheckedRef { at: 7 }
+        ]
+    );
 
     // with the `_DATA` frame configured at linear 0x2040 the items are compared
     let mut options = ModuleOptions::default();
@@ -577,10 +589,18 @@ fn startup_frame_checks_unnamed_references() {
         &[0xBA, 0x00, 0x02, 0xC3],
         vec![segment_reloc(STARTUP_AT + 1, 0x200)],
     );
-    // without a frame base the strings are not compared
+    // without a frame base the strings are not compared: unchecked, so not identical
     let before = run16(&m, &p, &Symbols::default(), &ModuleOptions::default());
     assert_eq!(before.warnings.len(), 1, "{:?}", before.warnings);
     assert!(before.warnings[0].contains("frame DGROUP has no anchor"));
+    assert_eq!(before.functions[0].verdict, Verdict::Differs);
+    assert_eq!(
+        before.functions[0].blockers,
+        vec![
+            Blocker::UncheckedRef { at: 1 },
+            Blocker::UncheckedRef { at: 4 }
+        ]
+    );
 
     let found = startup_frames(&startup16(STARTUP, &[1]), &p);
     assert!(found.warnings.is_empty(), "{:?}", found.warnings);
@@ -638,6 +658,14 @@ fn startup_unlike_the_original_gives_no_frame() {
         c.anchors
     );
     assert!(c.warnings[0].contains("frame DGROUP has no anchor"));
+    // the wrong string is not identical either: its field is unchecked
+    assert_eq!(
+        c.functions[0].blockers,
+        vec![
+            Blocker::UncheckedRef { at: 1 },
+            Blocker::UncheckedRef { at: 4 }
+        ]
+    );
 }
 
 #[test]
