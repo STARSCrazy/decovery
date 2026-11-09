@@ -84,7 +84,11 @@ def die_once_then_wait(job):
     if not os.path.exists(marker):
         Path(marker).touch()
         os._exit(3)
+    started = time.monotonic()
     time.sleep(min(job["wait"], job["timeout_s"]))
+    if job.get("log"):  # one line per finished run: its start and end, for counting how many ran at once
+        with open(job["log"], "a") as f:
+            f.write(f"{started!r} {time.monotonic()!r}\n")
     return {"status": "done", "exit_code": 0, "stdout": "", "message": None}
 
 
@@ -291,19 +295,29 @@ class JobPoolTest(unittest.TestCase):
         self.assertGreater(float(outcome["stdout"]), 0.0)
 
     def test_many_reruns_stay_within_the_call_budget(self):
-        # 8 jobs, 2 at once, every worker dies on its first try; a rerun of a job takes 1 s (its limit): without a
-        # live deadline the 4 rounds of reruns would take 4 s each of the full budget
+        # Job 0 kills the pool on its first try, so all 8 jobs run again, each in a fresh process of its own. The other
+        # markers exist already: a job that never ran before must not die on its first rerun (that would be a failure
+        # of its own, not the budget). A rerun takes 1 s, so with a budget of 1.5 s the third rerun of either of the 2
+        # threads starts at 2 s at the earliest, whatever the speed of the machine: it must be skipped.
         with tempfile.TemporaryDirectory() as tmp:
+            log = str(Path(tmp) / "runs.log")
             pool = JobPool(workers=2, worker=die_once_then_wait)
             self.addCleanup(pool.close)
-            jobs = [{"timeout_s": 60.0, "die_once": str(Path(tmp) / f"m{i}"), "wait": 1.0} for i in range(8)]
-            started = time.monotonic()
-            outcomes = pool.run(jobs, parallel=2, budget_s=2.5)
-            wall = time.monotonic() - started
-        self.assertLess(wall, 2.5 + 3.0, f"the call took {wall:.1f} s")  # budget plus start-up of the processes
+            jobs = [{"timeout_s": 60.0, "die_once": str(Path(tmp) / f"m{i}"), "wait": 1.0, "log": log} for i in range(8)]
+            for job in jobs[1:]:
+                Path(job["die_once"]).touch()
+            outcomes = pool.run(jobs, parallel=2, budget_s=1.5)
+            runs = [tuple(map(float, line.split())) for line in Path(log).read_text().splitlines()] if Path(log).exists() else []
         skipped = [o for o in outcomes if o["status"] == "failed" and "budget" in (o["message"] or "")]
-        self.assertTrue(skipped, "late reruns must be skipped once the budget is used up")
-        self.assertTrue(any(o["status"] == "done" for o in outcomes), "early reruns still run")
+        others = [o for o in outcomes if o not in skipped]
+        self.assertGreaterEqual(len(skipped), 4, f"late reruns must be skipped once the budget is used up: {outcomes}")
+        self.assertTrue(all(o["status"] == "done" for o in others), f"unexpected outcomes: {others}")
+        events = sorted([(s, 1) for s, _ in runs] + [(e, -1) for _, e in runs], key=lambda ev: (ev[0], ev[1]))
+        running = peak = 0
+        for _, delta in events:
+            running += delta
+            peak = max(peak, running)
+        self.assertLessEqual(peak, 2, f"reruns ran {peak} at once, `parallel` is 2")
 
     def test_no_job_is_run_again_after_the_budget_is_used_up(self):
         with tempfile.TemporaryDirectory() as tmp:
