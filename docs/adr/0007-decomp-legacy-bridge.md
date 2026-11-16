@@ -31,7 +31,10 @@ function took 37 s with `DECOMP_WATCOM_EMU=1`.
      only `*.c`, `*.h`, `*.asm`, `*.s`, `*.inc`);
    - names: decovery's function and global names are written into the shadow's `wissen/symbole.toml` (through
      Decomp's own `decomp.wissen` API, so the format stays Decomp's), so rebuild sources that use decovery names
-     resolve in Decomp's comparison;
+     resolve in Decomp's comparison. decovery's name wins (the shadow is decovery's copy): entries are replaced
+     with `quelle = "import"` without Decomp's precedence check, another address holding the same name loses it,
+     and the function names in `wissen/nachbau.toml` are renamed too (Decomp finds a rebuilt function in the
+     sources by that name);
    - own: `cache/nachbau/` (Decomp's run caches and logbook for this shadow).
 3. **One Decomp server per shadow.** On the first call the plugin starts
    `python -m decomp --bereich <shadow> mcp --nur-fernzugang --eltern <plugin pid>` (Decomp tool 40), waits for
@@ -46,9 +49,9 @@ function took 37 s with `DECOMP_WATCOM_EMU=1`.
    | `registers` | `nachbau vergabe F --json J` | report text + JSON |
    | `slots` | `nachbau plaetze F` | report text |
    | `joint` | `nachbau gemeinsam F --json` | report text + JSON |
-   | `chain` | `nachbau kette F --minuten M` | `cache/nachbau/kette/<f>/ergebnis.txt`, `beste.c` |
-   | `permute` | `nachbau permutieren F --minuten M` | report text, best version |
-   | `beam` | `nachbau strahl F --minuten M` | report text, best version |
+   | `chain` | `nachbau kette F [--minuten M]` | `cache/nachbau/kette/<f>/ergebnis.txt`, `ergebnis.json`, `beste.c` |
+   | `permute` | `nachbau permutieren F [--minuten M]` | report text, best version |
+   | `beam` | `nachbau strahl F [--minuten M]` | report text, best version |
    | `forms` | `nachbau formen F` | report text, best version |
    | `equivalence` | `nachbau gleichwertig F --json` | JSON |
    | `behavior` | `nachbau verhalten F [--lauf N]` | report text |
@@ -89,15 +92,19 @@ Options (all optional, closed set; anything else is `-32602`):
 
 | option | type | operations | Decomp flag |
 |---|---|---|---|
-| `minutes` | number | `chain`, `permute`, `beam`, `forms`, `slots`, `equivalence` | `--minuten` |
+| `minutes` | number | `chain`, `permute`, `beam`, `slots`, `equivalence` | `--minuten` |
 | `rounds` | integer | `chain`, `permute`, `beam`, `forms` | `--runden` |
-| `source` | path | `registers`, `slots`, `joint`, `structure`, `permute` | `--datei` (a candidate source of the function) |
+| `source` | path | `registers`, `slots`, `structure`, `permute` | `--datei` (a candidate source of the function, absolute or relative to `sources_dir`) |
 | `all` | bool | `registers` | `--alle` |
 | `run` | string | `behavior` | `--lauf` |
 
 The plugin refreshes the shadow (decision 2; the Ghidra copy only when needed), makes sure the Decomp server runs
 (decision 3), runs the command with `DECOMP_WATCOM_EMU=1` unless the caller's environment sets it, and sends a
-`$/progress` heartbeat at least every 10 s (`message` = Decomp's last stderr line).
+`$/progress` heartbeat at least every 10 s (`message` = Decomp's last stderr line: the CLI's, or, while the CLI only
+forwards, the server log's).
+
+Amended 2026-11-16 by the implementation: Decomp's `nachbau formen` has no `--minuten` and `nachbau gemeinsam` no
+`--datei`, so `minutes` does not apply to `forms` and `source` not to `joint`.
 
 Result:
 
@@ -107,12 +114,19 @@ Result:
  "artifacts": ["<paths of report files>"], "shadow": {"refreshed": true, "ghidra_copied": false}, "seconds": 37.5}
 ```
 
-`json` is null for operations without JSON output; `candidate` is null when the operation found nothing better or
-has no candidate. `kind` is `module` (a whole rebuild source file) or `function` (one function's definition).
+`json` is null for operations without JSON output (`registers`: the raw run `J`; `joint`, `equivalence`: stdout;
+`chain`: `ergebnis.json`); `candidate` is null when the operation found nothing better or has no candidate. `kind`
+is `module` (a whole rebuild source file) or `function` (one function's definition); Decomp's search steps all write
+a module (`beste.c`), and only when it is better than the source, so the bridge reports `module` and only files
+written during this run. `slots` is no search: its `beste.c` is listed in `artifacts`. `report` is Decomp's
+`ergebnis.txt` for `joint` (stdout carries the JSON) and the `bericht` field for `equivalence`, else stdout.
 
 Errors: `-32602` bad params or option; `-32020` Decomp unavailable (`import decomp` fails, server does not start
 within 300 s); `-32021` source workspace missing or not a Decomp workspace; `-32022` Decomp command failed
-(`error.data = {exit_code, stderr_tail}`); `-32002` cancelled (the Decomp subprocess is killed).
+(`error.data = {exit_code, stderr_tail}`; when `timeout_s` passed, `exit_code` is null and `timed_out` true);
+`-32002` cancelled (the Decomp subprocess is killed). A cancelled or timed-out command goes on inside the server the
+CLI forwarded it to, so the plugin kills that server as soon as no other run uses it; the next run starts a fresh
+one.
 
 ## Consequences
 
