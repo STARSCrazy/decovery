@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use decovery_core::{Address, Program, RelocKind, Relocation};
-use decovery_objects::{FunctionView, ObjReloc, ObjectModule, RefTarget, functions};
+use decovery_objects::{FunctionView, ObjReloc, ObjectModule, RefTarget, SectionKind, functions};
 use decovery_x86::{DecodeOptions, decode_detailed, internal_calls, padding_positions};
 use rayon::prelude::*;
 
@@ -488,6 +488,7 @@ pub fn compare_module(
         &modules,
         &options.frames,
         &options.startup_frames,
+        options.literals.as_ref(),
         program,
     );
     let functions = prepared
@@ -630,6 +631,7 @@ pub fn compare_module_with(
         &modules,
         &options.frames,
         &options.startup_frames,
+        options.literals.as_ref(),
         program,
     );
     let functions = prepared
@@ -896,6 +898,12 @@ fn instruction_comparison(
 ) -> (u32, Vec<Pair>) {
     let f = rebuild.f;
     let code = &rebuild.bytes;
+    if !code.is_empty() && (0..code.len() as u32).all(|k| rebuild.gaps.contains(&k)) {
+        // a table of addresses (an assembler source's jump table in a segment of its own): no instructions; every
+        // entry is judged as a relocated field
+        return (0, Vec::new());
+    }
+    let original_len = instruction_span(code, original, &rebuild.gaps, original_len, bits);
     let original_span = original_len
         .and_then(|l| program.read(at, l as usize))
         .unwrap_or(original);
@@ -967,6 +975,35 @@ fn instruction_comparison(
         &data_address,
         keep,
     )
+}
+
+/// The original's length for the instruction comparison: `original_len` (the analysis' function end, else the
+/// symbol's size), unless the rebuild's code (its last item that is no padding and no following function's jump
+/// table) reaches beyond it with bytes equal to the original's up to there, relocated fields aside. The original
+/// then holds the same code there; the analysis only split it (a label that is a jump target of a table elsewhere
+/// starts a function of its own there).
+fn instruction_span(
+    code: &[u8],
+    original: &[u8],
+    gaps: &BTreeSet<u32>,
+    original_len: Option<u32>,
+    bits: u32,
+) -> Option<u32> {
+    let l = original_len?;
+    let len = u32::try_from(code.len()).unwrap_or(u32::MAX);
+    if l >= len {
+        return Some(l);
+    }
+    let code_end = decode_detailed(code, bits, 0, &DecodeOptions::new(gaps.clone(), false))
+        .iter()
+        .filter(|d| !d.is_padding())
+        .map(|d| d.offset + d.len)
+        .max()
+        .unwrap_or(0)
+        .min(len);
+    let equal = (l..code_end)
+        .all(|k| gaps.contains(&k) || code.get(k as usize) == original.get(k as usize));
+    Some(if code_end > l && equal { code_end } else { l })
 }
 
 enum Check<'a> {
@@ -1108,11 +1145,33 @@ impl Site<'_> {
                     .iter()
                     .find(|s| s.section == *index && i64::from(s.offset) == target)
                     .map(|s| s.name.as_str());
-                match name {
-                    Some(name) => self.lookup(name).map_or(Target::Unresolved, Target::Known),
+                if let Some(name) = name {
+                    return self.lookup(name).map_or(Target::Unresolved, Target::Known);
+                }
+                let rel = target + r.addend;
+                // A position inside another code section (an assembler label's offset in the fixup, `dd
+                // stub+1ah`) is that section's symbol before it plus the distance, like a named reference.
+                let code = f
+                    .module
+                    .sections
+                    .get(*index as usize)
+                    .is_some_and(|s| s.kind == SectionKind::Code);
+                let before = f
+                    .module
+                    .symbols
+                    .iter()
+                    .filter(|s| code && s.section == *index && i64::from(s.offset) <= rel)
+                    .max_by_key(|s| s.offset)
+                    .and_then(|s| {
+                        self.lookup(&s.name)?
+                            .offset_by(rel - i64::from(s.offset))
+                            .ok()
+                    });
+                match before {
+                    Some(at) => Target::Known(at),
                     None => Target::Unnamed {
                         section: *index,
-                        rel: target + r.addend,
+                        rel,
                     },
                 }
             }

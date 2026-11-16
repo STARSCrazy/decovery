@@ -6,7 +6,7 @@ use decovery_core::{Address, Program, RelocKind};
 use decovery_objects::{Frame, ObjReloc, ObjectModule, RefTarget, Section, SectionKind};
 
 use crate::compare::relocation_at;
-use crate::{Anchor, AnchorSource, Blocker};
+use crate::{Anchor, AnchorSource, Blocker, LiteralSections};
 
 /// Frame of 32-bit section anchors: the flat model has one frame with base 0.
 pub(crate) const FLAT: &str = "FLAT";
@@ -134,7 +134,9 @@ enum Item {
 /// How the item of `section` at `rel` compares with the original, the section lying at linear `section_at`. The
 /// item reaches from `rel` to the next boundary: the next referenced offset (`referenced`), the next symbol of the
 /// section, or the end of its initialised bytes; with `until_nul`, also its first zero byte (a C string ends
-/// there, the bytes after it belong to unreferenced items). Fixup fields of the section are not compared.
+/// there, the bytes after it belong to unreferenced items). In a literal section (`literal_align`, ADR 0006 item
+/// 12) whose item ends at a multiple of the alignment, it also ends at the first zero byte among its last
+/// `literal_align` bytes: the bytes behind are alignment fill. Fixup fields of the section are not compared.
 #[allow(clippy::too_many_arguments)]
 fn item_check(
     module: &ObjectModule,
@@ -145,6 +147,7 @@ fn item_check(
     flat: bool,
     program: &Program,
     until_nul: bool,
+    literal_align: Option<u32>,
 ) -> Item {
     let Some(s) = module.sections.get(section as usize) else {
         return Item::Differs;
@@ -169,6 +172,14 @@ fn item_check(
     let (start, mut end) = (rel as usize, end as usize);
     if until_nul && let Some(nul) = s.data[start..end].iter().position(|&b| b == 0) {
         end = start + nul + 1;
+    }
+    if let Some(align) = literal_align.map(|a| a as usize)
+        && end % align == 0
+    {
+        let from = end.saturating_sub(align).max(start);
+        if let Some(nul) = s.data[from..end].iter().position(|&b| b == 0) {
+            end = from + nul + 1;
+        }
     }
     let gaps: BTreeSet<usize> = s
         .relocs
@@ -303,6 +314,7 @@ impl Anchors {
         modules: &[&ObjectModule],
         config: &BTreeMap<String, Address>,
         startup: &BTreeMap<String, Address>,
+        literals: Option<&LiteralSections>,
         program: &Program,
     ) -> Anchors {
         let mut frame_votes: BTreeMap<String, BTreeSet<(i64, i64)>> = BTreeMap::new();
@@ -411,6 +423,10 @@ impl Anchors {
             } else {
                 anchors.frames.get(&key.frame).map(|f| f.base)
             };
+            let literal = literals.and_then(|l| {
+                let section = module.sections.get(key.section as usize)?;
+                l.align_for(&module.name, &section.name)
+            });
             let rels = section_rels.remove(&key).unwrap_or_default();
             let bounds = referenced
                 .get(&(key.module, key.section))
@@ -440,6 +456,7 @@ impl Anchors {
                                 key.flat,
                                 program,
                                 false,
+                                literal,
                             ) == Item::Equal
                     })
                 }),
@@ -473,6 +490,7 @@ impl Anchors {
                                 key.flat,
                                 program,
                                 false,
+                                literal,
                             ) == Item::Differs
                         })
                         .copied()
@@ -519,6 +537,7 @@ impl Anchors {
                             key.flat,
                             program,
                             true,
+                            literal,
                         ) != Item::Differs
                     })
                     .copied()
@@ -539,6 +558,7 @@ impl Anchors {
                             key.flat,
                             program,
                             false,
+                            literal,
                         ) == Item::Differs
                     })
                     .collect(),

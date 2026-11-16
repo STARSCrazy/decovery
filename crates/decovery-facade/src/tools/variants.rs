@@ -28,8 +28,9 @@ use serde_json::{Value, json};
 
 use super::build::{
     BuildRequest, Compiled, OBJECT_FORMAT, OBJECTS_DIR, SOURCE_DIR, blocker_json, blocker_record,
-    compile_jobs, failure_text, file_flags, file_name, file_of_function, is_c, ms, new_run_dir,
-    place_objects, read_text, stage_headers, startup_frames, symbol_sizes, toolchain, verdict_id,
+    compile_jobs, failure_text, file_flags, file_name, file_of_function, is_c, literal_sections,
+    ms, new_run_dir, place_objects, read_text, stage_headers, startup_frames, symbol_sizes,
+    toolchain, verdict_id,
 };
 use crate::{FacadeError, KnowledgeView, Response};
 
@@ -825,8 +826,23 @@ pub(super) fn build_variants(
         let index = analysis.as_ref().map(Analysis::index);
         let sizes = symbol_sizes(&ws);
         let program = crate::program::load(&ws)?;
-        let options = ModuleOptions::new(profile.padding, rebuild.frames.clone())
+        let mut options = ModuleOptions::new(profile.padding, rebuild.frames.clone())
             .with_startup_frames(startup_frames(&ws, &profile, &program, &mut warnings));
+        // the variants and the kept C objects are the compiler's
+        let compiler_objects: Vec<&ObjectFile> = objects
+            .iter()
+            .flatten()
+            .chain(
+                others
+                    .iter()
+                    .filter(|(name, _)| is_c(name))
+                    .map(|(_, object)| object),
+            )
+            .collect();
+        if let Some(literals) = literal_sections(&profile, &compiler_objects) {
+            options = options.with_literals(literals);
+        }
+        drop(compiler_objects);
         // the kept objects' functions are placed and prepared once, whatever the number of variants
         let kept: Vec<(usize, &str, &ObjectFile)> = others
             .iter()

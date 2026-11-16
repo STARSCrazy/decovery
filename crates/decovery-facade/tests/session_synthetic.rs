@@ -365,7 +365,12 @@ fn knowledge_view_resolves_flat_data_and_function_default_names() {
     assert_eq!(v.address_of("DAT_00041230"), Some(flat(0x41230)));
     assert_eq!(v.address_of("DAT_0004abcd"), Some(flat(0x4ABCD)));
     assert_eq!(v.address_of("FUN_00010200"), Some(flat(0x10200)));
+    // Decomp's listings write unnamed data as `data_` and lowercase hex digits
+    assert_eq!(v.address_of("data_0005bcfa"), Some(flat(0x5BCFA)));
     for not_default in [
+        "data_5bcfa",
+        "data_0005bcfaX",
+        "Data_0005bcfa",
         "DAT_41230",
         "DAT_00041230X",
         "DAT_1234_0010",

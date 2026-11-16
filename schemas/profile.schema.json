@@ -71,6 +71,16 @@
         "profile": { "type": "string" },
         "command": { "type": "string" }
       }
+    },
+    "literals": {
+      "description": "Sections holding only string literals, each starting at a multiple of align; the fill between them is not compared (ADR 0006 item 12).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sections", "align"],
+      "properties": {
+        "sections": { "type": "array", "items": { "type": "string" } },
+        "align": { "type": "integer", "minimum": 2 }
+      }
     }
   }
 }

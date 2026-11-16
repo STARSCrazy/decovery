@@ -13,6 +13,11 @@ prologue = []
 padding = false
 fingerprint = ["BINW/WCC386.EXE"]
 
+# string literals go to CONST (other constant data to CONST2), each at a multiple of 4 behind uninitialised fill
+[literals]
+sections = ["CONST"]
+align = 4
+
 [decoration]
 function = "{name}_"
 data = "_{name}"

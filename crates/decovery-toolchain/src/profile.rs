@@ -138,6 +138,16 @@ pub struct AssemblerSpec {
     pub command: Option<String>,
 }
 
+/// The sections a compiler puts only string literals in (ADR 0006 item 12): each literal starts at a multiple of
+/// `align` in the section, and the fill between two literals is not initialised by the compiler.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct LiteralSpec {
+    pub sections: Vec<String>,
+    pub align: u32,
+}
+
 /// One compiler: how to run it and what its objects look like.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -164,6 +174,7 @@ pub struct Profile {
     pub fingerprint: Vec<String>,
     pub linker: Option<LinkerSpec>,
     pub assembler: Option<AssemblerSpec>,
+    pub literals: Option<LiteralSpec>,
 }
 
 #[derive(Deserialize)]
@@ -199,6 +210,8 @@ struct RawProfile {
     linker: Option<LinkerSpec>,
     #[serde(default)]
     assembler: Option<AssemblerSpec>,
+    #[serde(default)]
+    literals: Option<LiteralSpec>,
 }
 
 fn parse(text: &str) -> Result<Profile, ToolchainError> {
@@ -227,6 +240,7 @@ fn parse(text: &str) -> Result<Profile, ToolchainError> {
         fingerprint: raw.fingerprint,
         linker: raw.linker,
         assembler: raw.assembler,
+        literals: raw.literals,
     })
 }
 

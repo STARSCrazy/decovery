@@ -66,7 +66,7 @@ mod program_le;
 mod program_mz;
 mod sequence;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use decovery_core::Address;
 use decovery_objects::FunctionView;
@@ -323,6 +323,40 @@ pub struct ModuleOptions {
     /// Compiler family (`turbo-c`, `watcom`) to diagnose differing functions for, from the instruction pairs the
     /// comparison already has ([`Comparison::diagnoses`]); `None` skips the diagnosis.
     pub diagnosis: Option<String>,
+    /// Sections that hold only string literals, aligned with fill the compiler does not initialise
+    /// ([`LiteralSections`]); `None`: no such sections.
+    pub literals: Option<LiteralSections>,
+}
+
+/// String-literal sections of a compiler (ADR 0006 item 12): each literal ends with its NUL and the next one starts
+/// at a multiple of `align` in the section; the bytes in between are fill whose value the compiler leaves to
+/// chance (Watcom: whatever its buffer held). The referenced item of such a section is compared through the
+/// first NUL among its last `align` bytes, when its end is aligned.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct LiteralSections {
+    /// Section names (`CONST`).
+    pub sections: BTreeSet<String>,
+    /// Alignment of the literals in bytes (at least 2).
+    pub align: u32,
+    /// Object modules (by module name) the compiler wrote; other modules (assembler sources) are compared in full.
+    pub modules: BTreeSet<String>,
+}
+
+impl LiteralSections {
+    pub fn new(sections: BTreeSet<String>, align: u32, modules: BTreeSet<String>) -> Self {
+        LiteralSections {
+            sections,
+            align,
+            modules,
+        }
+    }
+
+    /// The literal alignment for section `section` of module `module`, if it is a literal section.
+    pub(crate) fn align_for(&self, module: &str, section: &str) -> Option<u32> {
+        (self.align >= 2 && self.modules.contains(module) && self.sections.contains(section))
+            .then_some(self.align)
+    }
 }
 
 impl ModuleOptions {
@@ -332,7 +366,14 @@ impl ModuleOptions {
             frames,
             startup_frames: BTreeMap::new(),
             diagnosis: None,
+            literals: None,
         }
+    }
+
+    /// The same options with the compiler's string-literal sections.
+    pub fn with_literals(mut self, literals: LiteralSections) -> Self {
+        self.literals = Some(literals);
+        self
     }
 
     /// The same options with the frame bases proven by the startup code ([`startup_frames`]).

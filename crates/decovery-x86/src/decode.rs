@@ -456,10 +456,13 @@ fn pass(
                 let indexed =
                     i.memory_base() != Register::None || i.memory_index() != Register::None;
                 if indexed && has_gap {
-                    // The linker fills in the table address: the table follows directly (after alignment).
+                    // The linker fills in the table address: the table follows directly (after alignment), its
+                    // entries filled in by the linker too. Without such a field behind the jmp the table lies
+                    // elsewhere (Watcom puts it before the function, assembler sources in a segment of its own).
                     let behind = k + size;
-                    let start = (behind..behind + 4).find(|&j| gap(j)).unwrap_or(behind);
-                    found.insert(start as u32);
+                    if let Some(start) = (behind..behind + 4).find(|&j| gap(j)) {
+                        found.insert(start as u32);
+                    }
                 } else if indexed {
                     let disp = if bits == 16 {
                         i.memory_displacement64() & 0xFFFF
@@ -545,6 +548,30 @@ mod tests {
         assert!(
             d.iter()
                 .any(|x| x.kind == DecodedKind::JumpTable { entries: 2 } && x.offset == 8)
+        );
+    }
+
+    #[test]
+    fn relocated_table_address_without_relocated_entries_behind_is_no_table() {
+        // jmp cs:[eax*4 + table] with the table address filled in by the linker, then mov ebx, 1; ret: the
+        // table lies elsewhere, the code behind the jmp is code
+        let code = [
+            0x2E, 0xFF, 0x24, 0x85, 0x00, 0x00, 0x00, 0x00, 0xBB, 0x01, 0x00, 0x00, 0x00, 0xC3,
+        ];
+        let gaps: BTreeSet<u32> = (4..8).collect();
+        let d = decode_detailed(&code, 32, 0x1000, &DecodeOptions::new(gaps.clone(), false));
+        assert!(d.iter().all(|x| x.kind == DecodedKind::Code), "{d:?}");
+        assert_eq!(d[1].mnemonic, "mov");
+        // with a relocated entry right behind, that is the table
+        let mut code = code[..8].to_vec();
+        code.extend_from_slice(&[0, 0, 0, 0, 0xC3]);
+        let mut gaps = gaps;
+        gaps.extend(8..12);
+        let d = decode_detailed(&code, 32, 0x1000, &DecodeOptions::new(gaps, false));
+        assert!(
+            d.iter()
+                .any(|x| x.kind == DecodedKind::JumpTable { entries: 1 } && x.offset == 8),
+            "{d:?}"
         );
     }
 

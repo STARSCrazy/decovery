@@ -16,6 +16,15 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - `decovery setup decomp-legacy --decomp <checkout>` registers `[plugins.decomp-legacy]` with the checkout's venv
   Python and a `PYTHONPATH` of the checkout's `src/`, `plugins/decomp-legacy` and the SDK.
 - Plugin errors carry `error.data` to the host (`PluginError::Remote { data }`).
+- Compiler profiles name their string-literal sections (`[literals]`); the fill between Watcom's literals is not
+  compared (ADR 0006 item 12).
+- Sources in direct subdirectories of `src/`; assembler files marked `decovery: build only` are left out.
+
+### Fixed
+- Assembler sources: jump tables in a segment of their own, label offsets in another code segment and functions
+  the analysis split are compared correctly (ADR 0006 item 13); `data_` default names resolve like `DAT_`.
+- Phase-2 parity refresh: 603 of Decomp's 618 identical functions confirmed, 15 listed deviations
+  (`docs/parity/phase-2.md`).
 
 ## [0.2.0] - 2026-11-09
 

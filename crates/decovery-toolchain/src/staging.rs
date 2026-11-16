@@ -38,7 +38,30 @@ fn split_name(name: &str) -> Result<(String, String), ToolchainError> {
     Ok((stem.to_string(), ext.to_string()))
 }
 
-/// Finds the sources and headers in `src_dir`; `only` (file names) restricts the sources.
+/// First-line markers of a build-only assembler file: data, library and stand-in code a standalone build of the
+/// whole program needs, which is not part of the rebuild (never compiled or compared). `decomp:` is the marker of
+/// workspaces migrated from Decomp.
+pub const BUILD_ONLY_MARKERS: [&str; 2] = ["decovery: build only", "decomp: build only"];
+
+/// Whether `path` is an assembler file whose first line carries a [`BUILD_ONLY_MARKERS`] marker.
+pub fn is_build_only(path: &Path) -> Result<bool, ToolchainError> {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let lower = name.to_ascii_lowercase();
+    if !(lower.ends_with(".asm") || lower.ends_with(".s")) {
+        return Ok(false);
+    }
+    let bytes = fs::read(path).map_err(|e| io(path, e))?;
+    let end = bytes
+        .iter()
+        .position(|&b| b == b'\n')
+        .unwrap_or(bytes.len());
+    let first = String::from_utf8_lossy(&bytes[..end]);
+    Ok(BUILD_ONLY_MARKERS.iter().any(|m| first.contains(m)))
+}
+
+/// Finds the sources and headers in `src_dir` and its direct subdirectories (not those whose name starts with a
+/// dot); `only` (file names) restricts the sources. All files are staged into one flat directory, so a file name
+/// may occur only once. Assembler files marked build-only ([`is_build_only`]) are left out.
 pub fn find_sources(src_dir: &Path, only: &[String]) -> Result<SourceSet, ToolchainError> {
     if !src_dir.is_dir() {
         return Err(ToolchainError::Invalid(format!(
@@ -46,19 +69,63 @@ pub fn find_sources(src_dir: &Path, only: &[String]) -> Result<SourceSet, Toolch
             src_dir.display()
         )));
     }
-    let mut files = Vec::new();
+    let mut dirs = vec![src_dir.to_path_buf()];
+    let mut subdirs = Vec::new();
     for entry in fs::read_dir(src_dir).map_err(|e| io(src_dir, e))? {
         let path = entry.map_err(|e| io(src_dir, e))?.path();
-        if !path.is_file() {
-            continue;
-        }
-        let name = path.file_name().unwrap_or_default().to_string_lossy();
-        let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
-        if matches!(ext.as_deref(), Some("c" | "h" | "cpp" | "s" | "asm")) {
-            files.push(path);
+        let hidden = path
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with('.'));
+        if path.is_dir() && !hidden {
+            subdirs.push(path);
         }
     }
-    files.sort();
+    subdirs.sort();
+    dirs.extend(subdirs);
+    let mut files = Vec::new();
+    for dir in &dirs {
+        for entry in fs::read_dir(dir).map_err(|e| io(dir, e))? {
+            let path = entry.map_err(|e| io(dir, e))?.path();
+            if !path.is_file() {
+                continue;
+            }
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
+            if matches!(ext.as_deref(), Some("c" | "h" | "cpp" | "s" | "asm"))
+                && !is_build_only(&path)?
+            {
+                files.push(path);
+            }
+        }
+    }
+    let mut names: Vec<String> = files
+        .iter()
+        .map(|p| {
+            p.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_ascii_lowercase()
+        })
+        .collect();
+    names.sort();
+    let mut same: Vec<&String> = names
+        .windows(2)
+        .filter(|w| w[0] == w[1])
+        .map(|w| &w[0])
+        .collect();
+    same.dedup();
+    if !same.is_empty() {
+        // every file lands in the same staging directory
+        return Err(ToolchainError::Invalid(format!(
+            "same file name in several directories of {}: {}",
+            src_dir.display(),
+            same.iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+    files.sort_by_key(|p| p.file_name().map(|n| n.to_ascii_lowercase()));
     let mut sources = Vec::new();
     let mut headers = Vec::new();
     let mut stems: Vec<String> = Vec::new();
@@ -244,5 +311,64 @@ mod tests {
         assert_eq!(set.sources, [src.path().join("b.c")]);
         assert!(find_sources(src.path(), &["c.c".to_string()]).is_err());
         assert!(find_sources(&src.path().join("none"), &[]).is_err());
+    }
+
+    #[test]
+    fn subdirectories_are_searched_and_build_only_files_left_out() {
+        let src = tempfile::tempdir().unwrap();
+        let dir = src.path();
+        for sub in ["lib", "data", ".hidden"] {
+            fs::create_dir(dir.join(sub)).unwrap();
+        }
+        fs::write(dir.join("main.c"), "").unwrap();
+        fs::write(
+            dir.join("lib/clib.asm"),
+            "; clib.asm - run-time parts
+",
+        )
+        .unwrap();
+        fs::write(dir.join("lib/libdefs.h"), "").unwrap();
+        fs::write(
+            dir.join("lib/rest.asm"),
+            "; rest.asm (decomp: build only) - library bytes
+",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("data/dconst.asm"),
+            "; dconst.asm (decovery: build only) - data
+",
+        )
+        .unwrap();
+        // the marker counts only on the first line
+        fs::write(
+            dir.join("data/later.asm"),
+            "; later.asm
+; (decovery: build only)
+",
+        )
+        .unwrap();
+        fs::write(dir.join(".hidden/x.c"), "").unwrap();
+        let set = find_sources(dir, &[]).unwrap();
+        let names = |paths: &[PathBuf]| -> Vec<String> {
+            paths
+                .iter()
+                .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(names(&set.sources), ["clib.asm", "later.asm", "main.c"]);
+        assert_eq!(names(&set.headers), ["libdefs.h"]);
+        assert!(is_build_only(&dir.join("lib/rest.asm")).unwrap());
+        assert!(!is_build_only(&dir.join("main.c")).unwrap());
+        let set = find_sources(dir, &["clib.asm".to_string()]).unwrap();
+        assert_eq!(set.sources, [dir.join("lib").join("clib.asm")]);
+
+        // one staging directory: a name may occur only once
+        fs::write(dir.join("data/main.c"), "").unwrap();
+        let err = find_sources(dir, &[]).unwrap_err().to_string();
+        assert!(
+            err.contains("same file name") && err.contains("main.c"),
+            "{err}"
+        );
     }
 }

@@ -36,10 +36,12 @@ pub use runner::{
 };
 pub use schedule::{JobSlots, SlotGuard, default_jobs, global_slots, set_global_jobs};
 pub use shrink::{Definition, Shrunk, definitions, shrink, splice_function};
-pub use staging::{SourceSet, find_sources, stage, stage_text, to_dos_bytes};
+pub use staging::{
+    BUILD_ONLY_MARKERS, SourceSet, find_sources, is_build_only, stage, stage_text, to_dos_bytes,
+};
 
 pub use error::ToolchainError;
 pub use profile::{
-    AssemblerSpec, LinkerSpec, MapFormat, MapSpec, ObjectFormat, Profile, assembler_profile,
-    profile, profiles, rebuild_profile, tool_dir,
+    AssemblerSpec, LinkerSpec, LiteralSpec, MapFormat, MapSpec, ObjectFormat, Profile,
+    assembler_profile, profile, profiles, rebuild_profile, tool_dir,
 };
