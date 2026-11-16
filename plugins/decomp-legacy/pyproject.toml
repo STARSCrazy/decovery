@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "decovery-decomp-legacy"
+version = "0.1.0"
+description = "decovery plugin: drives a local Decomp checkout on a shadow workspace (legacy capability)"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0 OR MIT"
+dependencies = ["decovery-plugin"]
+
+[tool.setuptools]
+packages = ["decovery_decomp_legacy"]
