@@ -987,12 +987,26 @@ fn diagnose(workspace: &Path, target: &str, json: bool) -> Result<(), FacadeErro
     Ok(())
 }
 
+/// Seconds between two "still running" lines while a legacy call's progress message stays the same.
+const LEGACY_STILL_RUNNING_S: u64 = 60;
+
 /// Runs a legacy bridge call (`diagnose --deep`, `search`, `verify`) and prints its result: the summary, Decomp's
 /// report and what decovery adds.
 fn legacy(workspace: &Path, call: &LegacyCall, json: bool) -> Result<(), FacadeError> {
+    // The plugin sends a heartbeat every few seconds, mostly with an unchanged message: print a message when it
+    // changes, otherwise a "still running" line once a minute.
+    let last = std::cell::RefCell::new((String::new(), 0u64));
     let progress = |p: Progress| {
-        if let Some(message) = p.message.filter(|m| !m.trim().is_empty()) {
+        let Some(message) = p.message.filter(|m| !m.trim().is_empty()) else {
+            return;
+        };
+        let mut last = last.borrow_mut();
+        if message != last.0 {
             eprintln!("{message}");
+            *last = (message, p.done);
+        } else if p.done >= last.1 + LEGACY_STILL_RUNNING_S {
+            eprintln!("still running ({} s): {message}", p.done);
+            last.1 = p.done;
         }
     };
     let mut call = call.clone();

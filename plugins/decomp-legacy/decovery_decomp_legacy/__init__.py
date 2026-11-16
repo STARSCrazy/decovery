@@ -79,13 +79,14 @@ def _in_thread(ctx: Context, message: str, work: Callable[[], Any]) -> Any:
     return box.get("value")
 
 
-def _progress_message(call: CliCall, sh: _Shadow) -> str:
+def _progress_message(call: CliCall, sh: _Shadow, log_from: int, operation: str) -> str:
     """The CLI's last stderr line; while it only forwards to the server (its one line is the forwarding note), the
-    server log's last line, where the command's own progress goes."""
+    server log's last line written since the command started, where the command's own progress goes. Older log
+    lines (such as the server's `bereit …`) are not this command's progress."""
     line = call.last_line
     if line and not line.startswith(FORWARD_NOTE):
         return line
-    return sh.server.last_log_line() or line or "running"
+    return sh.server.last_log_line(log_from) or f"Decomp {operation} running"
 
 
 def build_plugin() -> Plugin:
@@ -172,6 +173,7 @@ def build_plugin() -> Plugin:
         if run.operation == "registers":
             run_dir.mkdir(parents=True, exist_ok=True)
             json_path = run_dir / "registers.json"
+        log_from = sh.server.log_size()
         call = CliCall(run.shadow_dir, run.command(json_path))
         last_beat = time.monotonic()
         while call.proc.poll() is None:
@@ -190,7 +192,7 @@ def build_plugin() -> Plugin:
                 raise RpcError(COMMAND_FAILED, f"Decomp command timed out after {run.timeout_s:g} s",
                                {"exit_code": None, "stderr_tail": call.stderr_tail(), "timed_out": True})
             if time.monotonic() - last_beat >= HEARTBEAT_S:
-                ctx.progress(int(elapsed), message=_progress_message(call, sh))
+                ctx.progress(int(elapsed), message=_progress_message(call, sh, log_from, run.operation))
                 last_beat = time.monotonic()
         stdout, _ = call.finish()
         code = call.proc.returncode

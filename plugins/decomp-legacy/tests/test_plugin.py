@@ -340,6 +340,27 @@ class ShadowTest(unittest.TestCase):
         self.assertTrue((self.ws.source / "cache" / "laufzeit" / "login" / "calls.jsonl").is_file())
 
 
+class ProgressMessageTest(unittest.TestCase):
+    """Heartbeats show the command's own progress, not the server's `bereit …` line from before the command."""
+
+    def test_only_log_lines_since_the_command_started(self):
+        from decovery_decomp_legacy import FORWARD_NOTE, _progress_message
+        from decovery_decomp_legacy.process import DecompServer
+        with tempfile.TemporaryDirectory() as tmp:
+            server = DecompServer(Path(tmp))
+            server.log_path.parent.mkdir(parents=True)
+            server.log_path.write_text("=== server start ===\nbereit pid=1 port=2 code=3\n", encoding="utf-8")
+            sh = mock.Mock(server=server)
+            call = mock.Mock(last_line=f"{FORWARD_NOTE} …")
+            start = server.log_size()
+            self.assertEqual(_progress_message(call, sh, start, "permute"), "Decomp permute running")
+            with server.log_path.open("a", encoding="utf-8") as f:
+                f.write("Runde 3 von 20\n")
+            self.assertEqual(_progress_message(call, sh, start, "permute"), "Runde 3 von 20")
+            call.last_line = "eigene Zeile"
+            self.assertEqual(_progress_message(call, sh, start, "permute"), "eigene Zeile")
+
+
 class NamesTest(unittest.TestCase):
     def setUp(self):
         self.ws = Workspace()

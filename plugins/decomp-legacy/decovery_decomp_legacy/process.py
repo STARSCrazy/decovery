@@ -158,12 +158,19 @@ class DecompServer:
             return ""
         return "\n".join(text.splitlines()[-lines:])
 
-    def last_log_line(self) -> str | None:
+    def log_size(self) -> int:
+        try:
+            return self.log_path.stat().st_size
+        except OSError:
+            return 0
+
+    def last_log_line(self, since: int = 0) -> str | None:
+        """The log's last non-empty line written at or after byte offset `since` (None: nothing new)."""
         try:
             with self.log_path.open("rb") as f:
                 f.seek(0, os.SEEK_END)
                 size = f.tell()
-                f.seek(max(0, size - 4096))
+                f.seek(max(since, size - 4096))
                 tail = f.read().decode("utf-8", errors="replace")
         except OSError:
             return None
