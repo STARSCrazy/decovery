@@ -456,8 +456,9 @@ plugin, [request(i + 1, "legacy/run", ws.params(op)) for i, op in enumerate(ops)
         self.assertIn("result", answers[1])
         self.assertIn("result", answers[2])
         befehle = [c["args"][:2] for c in ws.calls()]
-        self.assertEqual(befehle, [["bauen", "ai.c"], ["gleichwertig", "va:00016E40"],
-                                   ["verhalten", "va:00016E40"]])
+        # the build comes first; the two checks run in parallel, in either order
+        self.assertEqual(befehle[0], ["bauen", "ai.c"])
+        self.assertEqual(sorted(befehle[1:]), [["gleichwertig", "va:00016E40"], ["verhalten", "va:00016E40"]])
         (ws.sources / "ai.h").write_text("void ai_find_next_order(int);\n", encoding="utf-8")
         self.run_ops(ws.params("behavior"))
         self.assertEqual([c["args"][:2] for c in ws.calls()][3:], [["bauen", "ai.c"], ["verhalten", "va:00016E40"]])
