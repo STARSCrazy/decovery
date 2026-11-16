@@ -22,6 +22,7 @@ import os
 import re
 import shutil
 import tempfile
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -166,6 +167,39 @@ def _load_state(shadow: Path) -> dict:
     except (OSError, ValueError, AttributeError):
         pass
     return {"schema": STATE_SCHEMA}
+
+
+def load_state(shadow: Path) -> dict:
+    return _load_state(shadow)
+
+
+def function_file(shadow: Path, function: str) -> str | None:
+    """The source file Decomp built `function` (Decomp address) from, per the shadow's `wissen/nachbau.toml`."""
+    try:
+        data = tomllib.loads((shadow / "wissen" / "nachbau.toml").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    for entry in data.get("funktion", []):
+        if isinstance(entry, dict) and entry.get("adresse") == function and isinstance(entry.get("datei"), str):
+            return entry["datei"]
+    return None
+
+
+def build_fingerprint(shadow: Path) -> str:
+    """Hash of what a Decomp build of the shadow depends on: `decomp.toml` and every file under `nachbau/`."""
+    digest = hashlib.sha256()
+    files = [shadow / "decomp.toml"]
+    root = shadow / "nachbau"
+    if root.is_dir():
+        files += sorted(p for p in root.rglob("*") if p.is_file())
+    for path in files:
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        digest.update(path.relative_to(shadow).as_posix().encode("utf-8") + b"\0")
+        digest.update(len(data).to_bytes(8, "little") + data)
+    return digest.hexdigest()
 
 
 def save_state(shadow: Path, state: dict) -> None:

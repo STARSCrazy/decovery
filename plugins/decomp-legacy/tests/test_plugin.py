@@ -442,17 +442,32 @@ plugin, [request(i + 1, "legacy/run", ws.params(op)) for i, op in enumerate(ops)
             self.assertEqual(r["exit_code"], 0)
             self.assertGreaterEqual(r["seconds"], 0)
         calls = ws.calls()
-        self.assertEqual(len(calls), len(ops))
+        self.assertEqual(len(calls), len(ops) + 1)  # equivalence builds ai.c first
         self.assertTrue(all(c["emu"] == "1" and c["server"] for c in calls))
         starts = (ws.shadow / "cache" / "fake-server-starts.txt").read_text().split()
         self.assertEqual(len(starts), 1)
         self.assertFalse((ws.shadow / "cache" / "fernzugang.json").exists())  # stopped at shutdown
 
+    def test_verify_builds_the_file_once_per_source_state(self):
+        """equivalence/behavior read the OBJ of Decomp's last build: the shadow had none, Decomp answered
+        `ungeprueft` / "OBJ fehlt". The function's file is built first, again only after a source change."""
+        ws = self.ws
+        answers, _ = self.run_ops(ws.params("equivalence"), ws.params("behavior"))
+        self.assertIn("result", answers[1])
+        self.assertIn("result", answers[2])
+        befehle = [c["args"][:2] for c in ws.calls()]
+        self.assertEqual(befehle, [["bauen", "ai.c"], ["gleichwertig", "va:00016E40"],
+                                   ["verhalten", "va:00016E40"]])
+        (ws.sources / "ai.h").write_text("void ai_find_next_order(int);\n", encoding="utf-8")
+        self.run_ops(ws.params("behavior"))
+        self.assertEqual([c["args"][:2] for c in ws.calls()][3:], [["bauen", "ai.c"], ["verhalten", "va:00016E40"]])
+
     def test_no_candidate_without_improvement(self):
         answers, _ = self.run_ops(self.ws.params("chain"), self.ws.params("permute"))
         self.assertIsNone(answers[1]["result"]["candidate"])
         self.assertIsNone(answers[2]["result"]["candidate"])
-        self.assertFalse(answers[2]["result"]["shadow"]["refreshed"])
+        # the two runs are prepared in either order (parallel): only the first one refreshes
+        self.assertEqual(sum(answers[i]["result"]["shadow"]["refreshed"] for i in (1, 2)), 1)
 
     def test_stale_candidate_not_reported(self):
         stale = self.ws.shadow / "cache" / "nachbau" / "kette" / "ai_find_next_order" / "beste.c"

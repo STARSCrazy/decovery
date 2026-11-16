@@ -33,6 +33,7 @@ DECOMP_UNAVAILABLE = -32020
 COMMAND_FAILED = -32022
 REPORT_LANGUAGE = "de"
 FORWARD_NOTE = "Hinweis: läuft über den MCP-Server"  # Decomp CLI's stderr line when it forwards to the server
+NEEDS_BUILD = ("equivalence", "behavior")  # operations that read the object file of Decomp's last build
 
 
 class _Shadow:
@@ -44,6 +45,7 @@ class _Shadow:
         self.active = 0
         self.dirty = False
         self.idle = threading.Condition()
+        self.build = threading.Lock()  # one `nachbau bauen` at a time: parallel runs build a file once
 
 
 def _check_decomp() -> None:
@@ -167,14 +169,11 @@ def build_plugin() -> Plugin:
             finally:
                 finish_run(sh)
 
-    def execute(run: Run, sh: _Shadow, ctx: Context, began: float, started_wall: float, shadow_info: dict) -> dict:
-        run_dir = run.shadow_dir / "cache" / "legacy-runs" / f"{time.strftime('%Y%m%d-%H%M%S')}-{ctx.id}"
-        json_path = None
-        if run.operation == "registers":
-            run_dir.mkdir(parents=True, exist_ok=True)
-            json_path = run_dir / "registers.json"
+    def wait_for(run: Run, sh: _Shadow, ctx: Context, began: float, args: list[str], label: str) -> tuple[bytes, int]:
+        """Run one Decomp CLI command on the shadow with heartbeats, cancellation and the run's timeout (counted from
+        `began`); returns (stdout, 0) or raises."""
         log_from = sh.server.log_size()
-        call = CliCall(run.shadow_dir, run.command(json_path))
+        call = CliCall(run.shadow_dir, args)
         last_beat = time.monotonic()
         while call.proc.poll() is None:
             if ctx.wait_cancelled(0.25):
@@ -186,19 +185,48 @@ def build_plugin() -> Plugin:
             elapsed = time.monotonic() - began
             if run.timeout_s is not None and elapsed > run.timeout_s:
                 kill_tree(call.proc)
-                _, err = call.finish()
+                call.finish()
                 with sh.idle:
                     sh.dirty = True
                 raise RpcError(COMMAND_FAILED, f"Decomp command timed out after {run.timeout_s:g} s",
                                {"exit_code": None, "stderr_tail": call.stderr_tail(), "timed_out": True})
             if time.monotonic() - last_beat >= HEARTBEAT_S:
-                ctx.progress(int(elapsed), message=_progress_message(call, sh, log_from, run.operation))
+                ctx.progress(int(elapsed), message=_progress_message(call, sh, log_from, label))
                 last_beat = time.monotonic()
         stdout, _ = call.finish()
         code = call.proc.returncode
         if code != 0:
             raise RpcError(COMMAND_FAILED, f"Decomp command failed with exit code {code}: "
                            f"{(call.last_line or '').strip()}", {"exit_code": code, "stderr_tail": call.stderr_tail()})
+        return stdout, code
+
+    def build_first(run: Run, sh: _Shadow, ctx: Context, began: float) -> None:
+        """`equivalence` and `behavior` read the object file of Decomp's last build: build the function's source file
+        on the shadow first, unless it was built from the same sources before (state `built`)."""
+        datei = S.function_file(run.shadow_dir, run.function)
+        if datei is None:
+            return  # Decomp names the missing build itself
+        with sh.build:
+            mark = S.build_fingerprint(run.shadow_dir)
+            with setup_lock:
+                if S.load_state(run.shadow_dir).get("built", {}).get(datei) == mark:
+                    return
+            ctx.progress(int(time.monotonic() - began), message=f"Decomp build: {datei}")
+            wait_for(run, sh, ctx, began, ["nachbau", "bauen", datei], f"build {datei}")
+            with setup_lock:
+                state = S.load_state(run.shadow_dir)
+                state.setdefault("built", {})[datei] = mark
+                S.save_state(run.shadow_dir, state)
+
+    def execute(run: Run, sh: _Shadow, ctx: Context, began: float, started_wall: float, shadow_info: dict) -> dict:
+        run_dir = run.shadow_dir / "cache" / "legacy-runs" / f"{time.strftime('%Y%m%d-%H%M%S')}-{ctx.id}"
+        json_path = None
+        if run.operation == "registers":
+            run_dir.mkdir(parents=True, exist_ok=True)
+            json_path = run_dir / "registers.json"
+        if run.operation in NEEDS_BUILD:
+            build_first(run, sh, ctx, began)
+        stdout, code = wait_for(run, sh, ctx, began, run.command(json_path), run.operation)
         name = N.result_name(run.shadow_dir / "wissen", run.function)
         mapped = collect(run.operation, run.shadow_dir, name, stdout, started_wall, json_path)
         return {

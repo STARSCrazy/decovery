@@ -118,6 +118,9 @@ def nachbau(bereich, args):
             print(f"Runde {i}", file=sys.stderr, flush=True)
             i += 1
             time.sleep(0.3)
+    if befehl == "bauen":  # `nachbau bauen <datei>`: nothing to build here
+        print(json.dumps({"dateien": [funktion]}))
+        return 0
     name = name_von(bereich, funktion)
     bericht = f"Bericht {befehl} {name}"
     if befehl in ORDNER:
