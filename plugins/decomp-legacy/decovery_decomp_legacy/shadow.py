@@ -169,6 +169,24 @@ def _load_state(shadow: Path) -> dict:
     return {"schema": STATE_SCHEMA}
 
 
+def input_mark(source: Path, sources: Path, symbols_key: str) -> str:
+    """Hash of everything `refresh` and the names step take from outside the shadow: the source workspace's
+    `decomp.toml`, `wissen/` and unpacked program (by size and mtime), decovery's source files (by content) and the
+    wanted names (`symbols_key`). Equal marks: the shadow is already up to date."""
+    digest = hashlib.sha256(symbols_key.encode("utf-8") + b"\0")
+    for path in [source / "decomp.toml", source / "cache" / "entpackt.exe"]:
+        try:
+            digest.update(f"{path.name}:{_signature(path)}\0".encode())
+        except OSError:
+            digest.update(f"{path.name}:-\0".encode())
+    for rel, path in sorted(_files(source / "wissen").items()):
+        digest.update(f"wissen/{rel}:{_signature(path)}\0".encode())
+    for rel, path in sorted(_files(sources, SOURCE_EXTENSIONS).items()):
+        data = path.read_bytes()
+        digest.update(f"src/{rel}:{len(data)}\0".encode() + data)
+    return digest.hexdigest()
+
+
 def load_state(shadow: Path) -> dict:
     return _load_state(shadow)
 

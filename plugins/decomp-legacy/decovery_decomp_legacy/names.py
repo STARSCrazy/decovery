@@ -21,6 +21,11 @@ from pathlib import Path
 from .params import KINDS, Symbol, default_name
 
 
+def symbols_key(symbols: list[Symbol]) -> str:
+    """The wanted names as a stable text."""
+    return json.dumps([[s.address, s.kind, s.name] for s in symbols])
+
+
 def fingerprint(symbols: list[Symbol], wissen_dir: Path) -> str:
     """Changes when the wanted names or the shadow's knowledge files change."""
     h = hashlib.sha256(json.dumps([[s.address, s.kind, s.name] for s in symbols]).encode("utf-8"))

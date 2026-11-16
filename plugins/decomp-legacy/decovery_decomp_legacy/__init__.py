@@ -106,23 +106,27 @@ def build_plugin() -> Plugin:
     def prepare(run: Run, sh: _Shadow, ctx: Context) -> dict:
         """Refresh the shadow and start its server; called under `setup_lock`."""
         copy = S.ghidra_needs_copy(run.decomp_workspace, run.shadow_dir)
-        if copy:
-            # the server holds the shadow's Ghidra project: wait for the other runs, then stop it
+        inputs = S.input_mark(run.decomp_workspace, run.sources_dir, N.symbols_key(run.symbols))
+        result = S.RefreshResult()
+        if copy or S.load_state(run.shadow_dir).get("input") != inputs:
+            # Copying the Ghidra project (the server holds it) or changing sources and names under a running
+            # command (it would build or search on other files than it started with): wait for the other runs.
             with sh.idle:
                 while sh.active > 0:
                     sh.idle.wait(HEARTBEAT_S)
-                    ctx.progress(0, message="waiting for other runs before copying the Ghidra project")
+                    ctx.progress(0, message="waiting for other runs before updating the shadow workspace")
                     ctx.check_cancelled()
-            sh.server.stop()
-        result, state = _in_thread(ctx, "refreshing the shadow workspace (copying the Ghidra project)" if copy
-                                   else "refreshing the shadow workspace",
-                                   lambda: S.refresh(run.decomp_workspace, run.shadow_dir, run.sources_dir, copy))
-        wissen = run.shadow_dir / "wissen"
-        mark = N.fingerprint(run.symbols, wissen)
-        if state.get("names") != mark:
-            result.changed += N.write_names(wissen, run.symbols)
-            state["names"] = N.fingerprint(run.symbols, wissen)
-        S.save_state(run.shadow_dir, state)
+            if copy:
+                sh.server.stop()
+            result, state = _in_thread(ctx, "refreshing the shadow workspace (copying the Ghidra project)" if copy
+                                       else "refreshing the shadow workspace",
+                                       lambda: S.refresh(run.decomp_workspace, run.shadow_dir, run.sources_dir, copy))
+            wissen = run.shadow_dir / "wissen"
+            if state.get("names") != N.fingerprint(run.symbols, wissen):
+                result.changed += N.write_names(wissen, run.symbols)
+                state["names"] = N.fingerprint(run.symbols, wissen)
+            state["input"] = inputs
+            S.save_state(run.shadow_dir, state)
         ctx.check_cancelled()
         kill_if_dirty(sh)
         try:

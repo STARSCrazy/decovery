@@ -557,6 +557,41 @@ plugin, [request(i + 1, "legacy/run", ws.params(op)) for i, op in enumerate(ops)
         starts = (self.ws.shadow / "cache" / "fake-server-starts.txt").read_text().split()
         self.assertEqual(len(starts), 2)  # the cancelled command ran inside the first server: replaced
 
+    def test_changed_sources_wait_for_the_running_command(self):
+        """A second run with changed sources must not swap the files under a command that is still running."""
+        os.environ["FAKE_DECOMP_MODE"] = "sleep"
+        sleeping = self.ws.shadow / "cache" / "fake-sleeping.txt"
+        mirrored = self.ws.shadow / "nachbau" / "ai.c"
+        seen = {}
+
+        def wait_running(wait_answer):
+            deadline = time.monotonic() + 30
+            while not sleeping.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            (self.ws.sources / "ai.c").write_text("void ai_find_next_order(void) { /* new */ }\n", encoding="utf-8")
+            os.environ["FAKE_DECOMP_MODE"] = "ok"
+
+        def while_first_runs(wait_answer):
+            time.sleep(1.0)
+            seen["during"] = mirrored.read_text(encoding="utf-8")
+
+        with mock.patch("decovery_decomp_legacy.HEARTBEAT_S", 0.3):
+            answers, progress = serve(build_plugin(), [
+                request(1, "legacy/run", self.ws.params(timeout_s=4)), wait_running,
+                request(2, "legacy/run", self.ws.params("structure")), while_first_runs])
+        self.assertTrue(answers[1]["error"]["data"]["timed_out"])
+        self.assertEqual(answers[2]["result"]["exit_code"], 0)
+        self.assertNotIn("new", seen["during"])  # unchanged while the first command ran
+        self.assertIn("new", mirrored.read_text(encoding="utf-8"))
+        self.assertTrue(any("waiting for other runs" in p.get("message", "") for p in progress))
+
+    def test_unchanged_inputs_skip_the_refresh(self):
+        answers, _ = self.run_ops(self.ws.params())
+        self.assertTrue(answers[1]["result"]["shadow"]["refreshed"])
+        with mock.patch("decovery_decomp_legacy.shadow.refresh", side_effect=AssertionError("refreshed")):
+            answers, _ = self.run_ops(self.ws.params())
+        self.assertEqual(answers[1]["result"]["exit_code"], 0)
+
     def test_parallel_runs(self):
         answers, _ = self.run_ops(self.ws.params(), self.ws.params("structure"), self.ws.params("slots"))
         self.assertTrue(all("result" in answers[i] for i in (1, 2, 3)))
