@@ -85,6 +85,11 @@ constant data (`data-layout`). Linking the rebuilt modules would not reproduce t
 `differs` is right, for the same reason as the phase-2 deviation (Decomp does not check unnamed data references).
 The fix is on the source side (the missing literals belong to the module).
 
+Follow-up the same day: the source fix in Decomp (`0681790b`: the three functions whose literals were missing are
+now C in their module, and the file name literal of the error report is corrected) makes the 14 functions of the
+first module identical in decovery too. Against that commit: 618 Decomp identical, 617 confirmed, 1 listed
+deviation (the second module: a literal that the original keeps in a constant section of its own), link identical.
+
 **Link.** With WLINK 10.6, the original's linker, run in DOSBox through `dosbox-lab`, the first target links
 **identical** (603 functions inserted, 158 492 bytes; `link_local` now requires it). The order of the fixup records
 matches. The preload flag (0x40) of the four objects is set by WLINK 10.6 only when the response file names a
