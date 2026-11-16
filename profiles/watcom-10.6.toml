@@ -13,6 +13,11 @@ prologue = []
 padding = false
 fingerprint = ["BINW/WCC386.EXE"]
 
+# string literals go to CONST (other constant data to CONST2), each at a multiple of 4 behind uninitialised fill
+[literals]
+sections = ["CONST"]
+align = 4
+
 [decoration]
 function = "{name}_"
 data = "_{name}"
@@ -21,6 +26,8 @@ data = "_{name}"
 command = "WLINK @{response}"
 library_dir = 'D:\LIB386'
 output = "{name}.EXE"
+# WLINK 10.6 marks the LE objects preload only for a system of its WLSYSTEM.LNK, not for the spelled-out format
+le_system = "dos4g"
 
 [assembler]
 command = "WASM -zq -fo={output} {input}"

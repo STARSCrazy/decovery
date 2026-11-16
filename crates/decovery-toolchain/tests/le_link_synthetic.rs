@@ -232,11 +232,17 @@ fn insert_reasons_name_the_problem() {
 #[test]
 fn response_file_lines() {
     assert_eq!(
-        response_file("GAME", true),
+        response_file("GAME", true, None),
         "format os2 le\r\noption osname='DOS/4G'\r\noption stub=STUB.EXE\r\noption nodefaultlibs\r\n\
          option start=_cstart_\r\noption map\r\nname GAME.exe\r\nfile NB\r\n"
     );
-    assert!(!response_file("GAME", false).contains("option start"));
+    assert!(!response_file("GAME", false, None).contains("option start"));
+    // a system of the linker's system file replaces the spelled-out format
+    assert_eq!(
+        response_file("GAME", true, Some("dos4g")),
+        "system dos4g\r\noption stub=STUB.EXE\r\noption nodefaultlibs\r\n\
+         option start=_cstart_\r\noption map\r\nname GAME.exe\r\nfile NB\r\n"
+    );
     assert_eq!(module_name("GAME"), "GAME");
     assert_eq!(module_name("main_1"), "main_1");
     assert_eq!(module_name("TOO_LONG_NAME"), "REBUILD");

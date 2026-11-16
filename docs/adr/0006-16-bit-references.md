@@ -151,6 +151,38 @@ functions it compares (`compare_module`: first pass collects, second pass checks
     original carries a relocation to check it against); adding every `DAT_` name to the knowledge base on
     migration (knowledge would hold names that say nothing beyond the address).
 
+    Amendment 2026-11-16 (phase-2 refresh): `data_` and eight hex digits, the name Decomp's assembler listings
+    give unnamed data (`dd data_0005bcfa`), resolves like `DAT_`.
+
+12. **Alignment fill between string literals** (amendment 2026-11-16, phase-2 refresh). Watcom puts string
+    literals into `CONST`, each at a multiple of 4, and leaves the bytes between a literal's NUL and the next
+    literal as they were in its buffer: the original holds leftovers of other text there, the rebuild other
+    leftovers. A compiler profile names such sections (`[literals]`, `sections` and `align`). For a module the
+    profile's compiler wrote (not an assembler source), the referenced item of such a section, when its end is
+    aligned, ends at the first NUL among its last `align` bytes: the bytes behind it are fill and are not
+    compared.
+
+    Why it is sound: only bytes after a literal's terminating NUL and before the next aligned position are left
+    out; every character of the literal and its NUL are still compared, and the literal's offset still has to
+    agree with the section anchor. No C text produces the fill, so comparing it would only measure the
+    compiler's memory. The link is unaffected: on an LE target it inserts code only.
+
+    Rejected: comparing literals by content at any position (would accept a moved literal, a `data-layout`
+    difference); ignoring all zero bytes of the section (would hide a literal that is missing or shorter).
+
+13. **Assembler sources** (amendment 2026-11-16, phase-2 refresh). Rules for what byte listings produce: a code
+    section that consists only of relocated fields (a jump table in a segment of its own) has no instructions,
+    each entry is judged as a relocated field; a fixup to an unnamed position inside another code section (`dd
+    stub+1ah`) resolves through the section's symbol before it plus the distance, like a named reference; when
+    the analysis split a function (a label that is the target of a table elsewhere starts a function of its
+    own), the instruction comparison extends over the rebuild's code beyond the analysis end as long as the
+    original's bytes there equal the rebuild's, relocated fields aside. Every relocated field is still checked
+    against the original's relocation. A decoded indexed `jmp` whose table address is relocated marks a jump
+    table behind it only when a relocated entry follows; otherwise the table lies elsewhere and the bytes behind
+    are code. Assembler files whose first line says `decovery: build only` (or `decomp: build only`) hold data,
+    library and stand-in code for a standalone build; `build` neither compiles nor compares them. Sources may
+    lie in direct subdirectories of `src/`; a file name may occur only once.
+
 ## Consequences
 
 - A single function compared alone (`compare`) anchors only on its own fields; one reference to one variable

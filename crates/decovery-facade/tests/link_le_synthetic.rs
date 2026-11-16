@@ -203,7 +203,7 @@ fn le_link_inserts_identical_function() {
     let linked = f.served.path().join("linked");
     assert_eq!(
         std::fs::read_to_string(linked.join("NB.LNK")).unwrap(),
-        response_file("REBUILD", false)
+        response_file("REBUILD", false, None)
     );
     assert_eq!(
         std::fs::read(linked.join("STUB.EXE")).unwrap(),

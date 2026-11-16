@@ -678,7 +678,7 @@ fn file_inserts(
 
 /// Port of `_verweis_adresse`: where a public name of an object lies in the original. The C name first, then the
 /// raw name (the prefix belongs to the name: Watcom `-4s`, `_dos_setvect`), then a default name (`fun_`, and on a
-/// flat target `FUN_` and `DAT_` with eight hex digits) at any address, as Decomp's link took them: the link inserts
+/// flat target `FUN_`, `DAT_` and `data_` with eight hex digits) at any address, as Decomp's link took them: the link inserts
 /// only functions the build found identical, and compares the linked pages afterwards.
 fn reference_address(
     knowledge: &KnowledgeView<'_>,

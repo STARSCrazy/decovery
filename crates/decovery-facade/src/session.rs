@@ -96,7 +96,8 @@ impl Session {
 /// name has its default name (`fun_0001A2B0`, `fun_1234_0010`); static segment addresses have none. A default name
 /// resolves to its address; with an analysis that has functions, only when a function starts there. On a flat
 /// target (LE, flat32) the default names of disassemblers for flat addresses resolve too, as the link resolves them:
-/// `DAT_00041230` (data, any address) and `FUN_0001A2B0` (a function, under the same rule as `fun_`).
+/// `DAT_00041230` and `data_00041230` (data, any address) and `FUN_0001A2B0` (a function, under the same rule as
+/// `fun_`).
 pub struct KnowledgeView<'a> {
     by_address: BTreeMap<Address, &'a str>,
     by_name: BTreeMap<&'a str, Address>,
@@ -104,9 +105,13 @@ pub struct KnowledgeView<'a> {
     flat: bool,
 }
 
-/// `DAT_` or `FUN_` and eight hex digits: the flat address and whether the name is a function's.
+/// `DAT_`, `data_` or `FUN_` and eight hex digits: the flat address and whether the name is a function's.
+/// `data_` is the name Decomp's assembler listings give unnamed data (`dd data_0005bcfa`).
 pub(crate) fn parse_flat_default_name(name: &str) -> Option<(Address, bool)> {
-    let (hex, function) = match name.strip_prefix("DAT_") {
+    let (hex, function) = match name
+        .strip_prefix("DAT_")
+        .or_else(|| name.strip_prefix("data_"))
+    {
         Some(hex) => (hex, false),
         None => (name.strip_prefix("FUN_")?, true),
     };

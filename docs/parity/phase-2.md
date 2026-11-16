@@ -57,6 +57,47 @@ On the second target the test runs `decovery link` before `build`, as an agent w
 the addresses of library publics (`__streams`, `__ctype`) from the TLINK map (`source = link`). Without them three
 functions reference data decovery cannot place, and ADR 0006 rule 5 keeps those fields unchecked (`differs`).
 
+## Refresh 2026-11-16
+
+Rerun against Decomp commit `a4e61e8cdb0028844b41a549d26ce16a07c3a965`. Decomp's first-target rebuild has grown
+from 34 to 49 sources (new C modules and assembler sources, one of them in a subdirectory, some marked build-only).
+
+| Target | Decomp identical | decovery identical too | not built | mismatches |
+|---|---|---|---|---|
+| first (LE, Watcom 9.5) | 618 | 603 | 0 | 15 (listed deviations) |
+| second (MZ, Turbo C 2.0) | 14 | 14 | 0 | 0 |
+
+First target, whole build: `50 files: 650 functions, 603 identical, 47 differ`; no function Decomp records as
+differing became identical. Before the refresh decovery confirmed 506: 61 functions differed and 51 were not built.
+The causes, each fixed in general with a synthetic test:
+
+- string-literal fill (ADR 0006 item 12): alignment bytes between Watcom's literals were compared;
+- assembler sources (item 13): jump tables in a segment of their own, label offsets inside another code segment,
+  functions the analysis split at a table target, a relocated table address with the table elsewhere;
+- `data_` default names of Decomp's listings (item 11 amendment);
+- sources in subdirectories of `src/` and build-only assembler files (not compiled, not compared).
+
+**Deviations.** 15 functions of two C modules: their bytes and instructions equal the original's, but string
+literal references do not. In one module the original's constant data holds two literals that the rebuild lacks;
+every literal behind them lies at a lower offset in the rebuild (`wrong-absolute-ref`, or `data-layout` where an
+equal literal lies at the proposed position). In the other a literal lies at another offset of the module's
+constant data (`data-layout`). Linking the rebuilt modules would not reproduce the original's data: decovery's
+`differs` is right, for the same reason as the phase-2 deviation (Decomp does not check unnamed data references).
+The fix is on the source side (the missing literals belong to the module).
+
+Follow-up the same day: the source fix in Decomp (`0681790b`: the three functions whose literals were missing are
+now C in their module, and the file name literal of the error report is corrected) makes the 14 functions of the
+first module identical in decovery too. Against that commit: 618 Decomp identical, 617 confirmed, 1 listed
+deviation (the second module: a literal that the original keeps in a constant section of its own), link identical.
+
+**Link.** With WLINK 10.6, the original's linker, run in DOSBox through `dosbox-lab`, the first target links
+**identical** (603 functions inserted, 158 492 bytes; `link_local` now requires it). The order of the fixup records
+matches. The preload flag (0x40) of the four objects is set by WLINK 10.6 only when the response file names a
+system of its `WLSYSTEM.LNK` (`system dos4g`, or `system at_dos4g`); the same directives spelled out, also inside a
+system block of the response file, leave it clear. Measured on Decomp's link module with eight response files;
+the cause inside WLINK is not known (its source is not available here). The profile option `[linker] le_system`
+names that system; WLINK 9.5 has no system file and keeps the spelled-out form.
+
 ## Deviation list
 
 One function of the first target: its bytes equal the original's; one string literal reference is a `data-layout`

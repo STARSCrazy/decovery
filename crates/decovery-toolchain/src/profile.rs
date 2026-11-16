@@ -47,6 +47,11 @@ pub struct LinkerSpec {
     /// the entry point then goes into the module end record).
     #[serde(default = "accepts_start_option")]
     pub start_option: bool,
+    /// System of the linker's own system file (`WLSYSTEM.LNK`) named by the LE response file (`system dos4g`)
+    /// instead of spelling the DOS/4G format out; `None`: spelled out (WLINK 9.5 has no system file). WLINK 10.6
+    /// marks the objects preload (flag 0x40) only for a system from its system file.
+    #[serde(default)]
+    pub le_system: Option<String>,
     /// Startup object (name without extension, in `library_dir`) linked when `[rebuild.link] startup` is not
     /// set; `None` when the toolchain has no separate startup object.
     #[serde(default)]
@@ -138,6 +143,16 @@ pub struct AssemblerSpec {
     pub command: Option<String>,
 }
 
+/// The sections a compiler puts only string literals in (ADR 0006 item 12): each literal starts at a multiple of
+/// `align` in the section, and the fill between two literals is not initialised by the compiler.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct LiteralSpec {
+    pub sections: Vec<String>,
+    pub align: u32,
+}
+
 /// One compiler: how to run it and what its objects look like.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -164,6 +179,7 @@ pub struct Profile {
     pub fingerprint: Vec<String>,
     pub linker: Option<LinkerSpec>,
     pub assembler: Option<AssemblerSpec>,
+    pub literals: Option<LiteralSpec>,
 }
 
 #[derive(Deserialize)]
@@ -199,6 +215,8 @@ struct RawProfile {
     linker: Option<LinkerSpec>,
     #[serde(default)]
     assembler: Option<AssemblerSpec>,
+    #[serde(default)]
+    literals: Option<LiteralSpec>,
 }
 
 fn parse(text: &str) -> Result<Profile, ToolchainError> {
@@ -227,6 +245,7 @@ fn parse(text: &str) -> Result<Profile, ToolchainError> {
         fingerprint: raw.fingerprint,
         linker: raw.linker,
         assembler: raw.assembler,
+        literals: raw.literals,
     })
 }
 

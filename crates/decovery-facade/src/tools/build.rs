@@ -117,6 +117,24 @@ pub(super) fn startup_frames(
     }
 }
 
+/// The profile's string-literal sections (ADR 0006 item 12) for the modules of `compiled`, the objects its
+/// compiler wrote (assembler sources are compared in full).
+pub(super) fn literal_sections(
+    profile: &Profile,
+    compiled: &[&ObjectFile],
+) -> Option<decovery_diff::LiteralSections> {
+    let spec = profile.literals.as_ref()?;
+    let modules = compiled
+        .iter()
+        .flat_map(|o| o.modules.iter().map(|m| m.name.clone()))
+        .collect();
+    Some(decovery_diff::LiteralSections::new(
+        spec.sections.iter().cloned().collect(),
+        spec.align,
+        modules,
+    ))
+}
+
 pub(super) fn toolchain(e: decovery_toolchain::ToolchainError) -> FacadeError {
     FacadeError::Invalid(e.to_string())
 }
@@ -412,9 +430,17 @@ pub fn build(
     } else {
         let program = crate::program::load(&ws)?;
         // the diagnosis reads the instruction pairs of the comparison: no second decode
-        let options = ModuleOptions::new(profile.padding, rebuild.frames.clone())
+        let compiled: Vec<&ObjectFile> = objects
+            .iter()
+            .filter(|(i, _)| sources[*i].compiler == profile.id && is_c(&sources[*i].name))
+            .map(|(_, object)| object)
+            .collect();
+        let mut options = ModuleOptions::new(profile.padding, rebuild.frames.clone())
             .with_startup_frames(startup_frames(&ws, &profile, &program, &mut warnings))
             .with_diagnosis(profile.family.clone());
+        if let Some(literals) = literal_sections(&profile, &compiled) {
+            options = options.with_literals(literals);
+        }
         let module = decovery_diff::compare_module(
             &placements,
             &program,
