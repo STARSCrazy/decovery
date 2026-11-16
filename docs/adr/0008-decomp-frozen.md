@@ -19,10 +19,14 @@ through the `decomp-legacy` bridge. Keeping two tools growing side by side doubl
 3. **Order of work:**
    1. close the phase-2 parity gap (618 of 618);
    2. phase 3 (agent loop, `bench`) as planned, so that later changes are measured;
-   3. port by use: the bridge's most-called Decomp tools first (register/slot models, search chain, equivalence),
+   3. everything the Aztec C86 / overlay target needs (amended 2026-11-16, owner): the Aztec C86 profile and object
+      reader, overlay loading and addresses, its prologue search, building and comparing its overlay modules
+      including data, relocations and BSS, and whatever else its migration needs; done when decovery's verdicts on
+      that target equal Decomp's (or differ only in listed deviations where decovery is right);
+   4. port by use: the bridge's most-called Decomp tools first (register/slot models, search chain, equivalence),
       each replacing the bridge backend behind the unchanged tool surface;
-   4. port what decovery still lacks, written more generally than in Decomp: Aztec C86 and overlays, GCC 1.40/EMX
-      with a.out, unpacking, signatures, runtime import, understanding and structure recovery.
+   5. port what decovery still lacks, written more generally than in Decomp: GCC 1.40/EMX with a.out, unpacking,
+      signatures, runtime import, understanding and structure recovery.
 4. **Retirement.** A Decomp feature is retired when decovery's port reaches parity on the targets that use it.
    Decomp is archived when no target needs it any more (bridge unused, all targets migrated).
 
