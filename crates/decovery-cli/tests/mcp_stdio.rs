@@ -191,7 +191,7 @@ fn envelope(result: &Value) -> Value {
 }
 
 #[test]
-fn lists_nine_tools() {
+fn lists_eleven_tools() {
     let dir = workspace();
     let mut server = Server::start(&dir);
     let response = server.request(2, "tools/list", json!({}));
@@ -201,7 +201,8 @@ fn lists_nine_tools() {
     assert_eq!(
         names,
         [
-            "analyze", "annotate", "build", "detail", "diagnose", "find", "link", "show", "status"
+            "analyze", "annotate", "build", "detail", "diagnose", "find", "link", "search", "show",
+            "status", "verify"
         ]
     );
     for tool in tools {

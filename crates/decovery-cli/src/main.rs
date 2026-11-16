@@ -14,7 +14,8 @@ mod setup;
 use decovery_core::{ClaimSource, Confidence};
 use decovery_facade::{
     AnalyzeOptions, AnnotateAction, Annotation, Budget, BuildRequest, DEFAULT_LIMIT, FacadeError,
-    FindQuery, FindWhat, FunctionFilter, FunctionSort, Progress, Response, Session, Variant,
+    FindQuery, FindWhat, FunctionFilter, FunctionSort, LegacyCall, LegacyOperation, Progress,
+    Response, Session, Variant,
 };
 
 /// Recover source code from old executables.
@@ -67,9 +68,63 @@ enum Command {
     },
     /// Why a rebuilt function differs from the original and what to try: findings of the diagnosis rules, the
     /// kind of deviation and the instructions side by side. Reads the object of the last `build`.
+    /// With `--deep`: Decomp's model of the function as well, through the `decomp-legacy` plugin (ADR 0007;
+    /// its report is German). Progress goes to stderr.
     Diagnose {
         /// Function name or address.
         target: String,
+        /// Decomp's deeper analysis: context package, structure comparison, Watcom register allocation, stack
+        /// slots, or both together.
+        #[arg(long, value_enum)]
+        deep: Option<Deep>,
+        /// A candidate source of the function to analyze instead of the current one (`structure`, `registers`,
+        /// `slots`, `joint`).
+        #[arg(long, value_name = "FILE", requires = "deep")]
+        source: Option<PathBuf>,
+        /// The full register report (`registers`).
+        #[arg(long, requires = "deep")]
+        all: bool,
+        /// Time budget in minutes (`slots`).
+        #[arg(long, requires = "deep")]
+        minutes: Option<f64>,
+    },
+    /// Search a better source for one function with Decomp's search (through the `decomp-legacy` plugin,
+    /// ADR 0007). A candidate is built by decovery itself and reported with decovery's verdict next to the
+    /// current source's; `--apply` writes it into `src/` only when that verdict is better. Progress goes to stderr.
+    Search {
+        /// Function name or address.
+        target: String,
+        /// Decomp's search: the search chain, the permuter, beam search or the form catalogue.
+        #[arg(long, value_enum)]
+        strategy: Strategy,
+        /// Time budget in minutes.
+        #[arg(long)]
+        minutes: Option<f64>,
+        /// Search rounds.
+        #[arg(long)]
+        rounds: Option<u32>,
+        /// Start from this candidate source of the function (`permute`).
+        #[arg(long, value_name = "FILE")]
+        source: Option<PathBuf>,
+        /// Write the candidate's function into its file in `src/` when decovery's verdict is better (identical, or
+        /// fewer differing instructions), then record it with a normal build.
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Check the behaviour of a rebuilt function with Decomp (through the `decomp-legacy` plugin, ADR 0007).
+    /// Decomp's result is evidence, never a decovery verdict; nothing is recorded. Progress goes to stderr.
+    Verify {
+        /// Function name or address.
+        target: String,
+        /// Static and dynamic equivalence evidence, or behaviour on recorded and generated cases.
+        #[arg(long, value_enum)]
+        check: Check,
+        /// Recorded runtime run to take cases from (`behavior`).
+        #[arg(long, value_name = "NAME")]
+        run: Option<String>,
+        /// Time budget in minutes (`equivalence`).
+        #[arg(long)]
+        minutes: Option<f64>,
     },
     /// Counts of named and rebuilt functions and the next thing to do.
     Status,
@@ -241,6 +296,16 @@ enum SetupCommand {
         #[arg(long, value_name = "DIR")]
         plugins_dir: Option<PathBuf>,
     },
+    /// Register the `decomp-legacy` bridge plugin (`[plugins.decomp-legacy]` in the user config): it runs under
+    /// the Python of a Decomp checkout's venv and needs no install.
+    DecompLegacy {
+        /// The Decomp checkout (holds `.venv/` and `src/decomp/`).
+        #[arg(long, value_name = "DIR")]
+        decomp: PathBuf,
+        /// Directory with `decovery-plugin-sdk` and `decomp-legacy`; default: `plugins/` of the repository.
+        #[arg(long, value_name = "DIR")]
+        plugins_dir: Option<PathBuf>,
+    },
     /// Register the directory of a compiler (`[toolchains]` in the user config).
     Toolchain {
         /// Compiler profile id, e.g. `watcom-9.5`.
@@ -248,6 +313,29 @@ enum SetupCommand {
         /// Directory that holds the compiler.
         dir: PathBuf,
     },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Deep {
+    Context,
+    Structure,
+    Registers,
+    Slots,
+    Joint,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Strategy {
+    Chain,
+    Permute,
+    Beam,
+    Forms,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Check {
+    Equivalence,
+    Behavior,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -329,7 +417,65 @@ fn main() -> ExitCode {
             }
         }
         Command::Show { target } => finish(show(&cli.workspace, &target, cli.json)),
-        Command::Diagnose { target } => finish(diagnose(&cli.workspace, &target, cli.json)),
+        Command::Diagnose {
+            target, deep: None, ..
+        } => finish(diagnose(&cli.workspace, &target, cli.json)),
+        Command::Diagnose {
+            target,
+            deep: Some(deep),
+            source,
+            all,
+            minutes,
+        } => {
+            let operation = match deep {
+                Deep::Context => LegacyOperation::Context,
+                Deep::Structure => LegacyOperation::Structure,
+                Deep::Registers => LegacyOperation::Registers,
+                Deep::Slots => LegacyOperation::Slots,
+                Deep::Joint => LegacyOperation::Joint,
+            };
+            let mut call = LegacyCall::new(target, operation);
+            call.options.source = source;
+            call.options.all = all;
+            call.options.minutes = minutes;
+            finish(legacy(&cli.workspace, &call, cli.json))
+        }
+        Command::Search {
+            target,
+            strategy,
+            minutes,
+            rounds,
+            source,
+            apply,
+        } => {
+            let operation = match strategy {
+                Strategy::Chain => LegacyOperation::Chain,
+                Strategy::Permute => LegacyOperation::Permute,
+                Strategy::Beam => LegacyOperation::Beam,
+                Strategy::Forms => LegacyOperation::Forms,
+            };
+            let mut call = LegacyCall::new(target, operation);
+            call.options.minutes = minutes;
+            call.options.rounds = rounds;
+            call.options.source = source;
+            call.apply = apply;
+            finish(legacy(&cli.workspace, &call, cli.json))
+        }
+        Command::Verify {
+            target,
+            check,
+            run,
+            minutes,
+        } => {
+            let operation = match check {
+                Check::Equivalence => LegacyOperation::Equivalence,
+                Check::Behavior => LegacyOperation::Behavior,
+            };
+            let mut call = LegacyCall::new(target, operation);
+            call.options.run = run;
+            call.options.minutes = minutes;
+            finish(legacy(&cli.workspace, &call, cli.json))
+        }
         Command::Status => finish(status(&cli.workspace, cli.json)),
         Command::Find {
             what,
@@ -501,6 +647,13 @@ fn main() -> ExitCode {
             plugins_dir,
             cli.json,
         )),
+        Command::Setup {
+            what:
+                SetupCommand::DecompLegacy {
+                    decomp,
+                    plugins_dir,
+                },
+        } => finish(setup_decomp_legacy(&decomp, plugins_dir, cli.json)),
         Command::Setup {
             what: SetupCommand::Toolchain { profile, dir },
         } => finish(setup_toolchain(&profile, &dir, cli.json)),
@@ -720,6 +873,45 @@ fn setup_dosbox_lab(
     print_summary(&response, json)
 }
 
+fn setup_decomp_legacy(
+    decomp: &Path,
+    plugins_dir: Option<PathBuf>,
+    json: bool,
+) -> Result<(), FacadeError> {
+    let invalid = |e: String| FacadeError::Invalid(e);
+    let platform = setup::Platform::current().map_err(invalid)?;
+    let config_path = decovery_facade::plugins::user_config_path().ok_or_else(|| {
+        invalid("cannot locate the user config dir (APPDATA / HOME unset)".into())
+    })?;
+    let cwd = std::env::current_dir().map_err(|e| invalid(e.to_string()))?;
+    let plugins_dir = match plugins_dir {
+        Some(dir) => dir,
+        None => setup::find_plugins_dir(&cwd).map_err(invalid)?,
+    };
+    let absolute = |p: &Path| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+    let options = setup::DecompLegacyOptions {
+        decomp_dir: absolute(decomp),
+        plugins_dir: absolute(&plugins_dir),
+        config_path,
+        platform,
+    };
+    let report = setup::run_decomp_legacy_setup(&options, &mut |line| eprintln!("{line}"))
+        .map_err(|e| invalid(e.to_string()))?;
+    let response = Response::new(
+        format!(
+            "Plugin `decomp-legacy` registered in {} (Python {})",
+            report.config_path.display(),
+            report.python.display()
+        ),
+        serde_json::json!({
+            "python": report.python.display().to_string(),
+            "pythonpath": report.pythonpath,
+            "config": report.config_path.display().to_string(),
+        }),
+    );
+    print_summary(&response, json)
+}
+
 fn setup_toolchain(profile: &str, dir: &Path, json: bool) -> Result<(), FacadeError> {
     let invalid = |e: String| FacadeError::Invalid(e);
     decovery_toolchain::profile(profile).map_err(|e| invalid(e.to_string()))?;
@@ -791,6 +983,78 @@ fn diagnose(workspace: &Path, target: &str, json: bool) -> Result<(), FacadeErro
     if let Some(text) = d["pairs_text"].as_str() {
         println!();
         print!("{text}");
+    }
+    Ok(())
+}
+
+/// Runs a legacy bridge call (`diagnose --deep`, `search`, `verify`) and prints its result: the summary, Decomp's
+/// report and what decovery adds.
+fn legacy(workspace: &Path, call: &LegacyCall, json: bool) -> Result<(), FacadeError> {
+    let progress = |p: Progress| {
+        if let Some(message) = p.message.filter(|m| !m.trim().is_empty()) {
+            eprintln!("{message}");
+        }
+    };
+    let mut call = call.clone();
+    if !json {
+        call.budget = Budget { chars: usize::MAX };
+    }
+    let response = match call.operation {
+        LegacyOperation::Chain
+        | LegacyOperation::Permute
+        | LegacyOperation::Beam
+        | LegacyOperation::Forms => decovery_facade::search(workspace, &call, &progress)?,
+        LegacyOperation::Equivalence | LegacyOperation::Behavior => {
+            decovery_facade::verify(workspace, &call, &progress)?
+        }
+        _ => decovery_facade::diagnose_deep(workspace, &call, &progress)?,
+    };
+    if json {
+        return print_json(&response);
+    }
+    let d = &response.data;
+    println!("{}", response.summary);
+    if let Some(report) = d["report"].as_str().filter(|r| !r.is_empty()) {
+        println!();
+        println!(
+            "--- Decomp report ({}) ---",
+            d["report_language"].as_str().unwrap_or("de")
+        );
+        print!("{report}");
+        if !report.ends_with('\n') {
+            println!();
+        }
+    }
+    let own = &d["decovery"];
+    if !own.is_null() {
+        println!();
+        println!("--- decovery diagnosis ---");
+        match own["error"].as_str() {
+            Some(error) => println!("{error}"),
+            None => {
+                println!("{}", own["summary"].as_str().unwrap_or(""));
+                for f in own["data"]["findings"].as_array().into_iter().flatten() {
+                    println!(
+                        "  [{}] {} → {}",
+                        f["rule"].as_str().unwrap_or(""),
+                        f["text"].as_str().unwrap_or(""),
+                        f["suggestion"].as_str().unwrap_or("")
+                    );
+                }
+            }
+        }
+    }
+    let candidate = &d["candidate"];
+    if !candidate.is_null() {
+        println!();
+        println!(
+            "candidate: {} ({}, judged as a {} attempt on {})",
+            candidate["path"].as_str().unwrap_or(""),
+            candidate["kind"].as_str().unwrap_or(""),
+            candidate["evaluated_as"].as_str().unwrap_or(""),
+            candidate["file"].as_str().unwrap_or("")
+        );
+        println!("{}", candidate["note"].as_str().unwrap_or(""));
     }
     Ok(())
 }

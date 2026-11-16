@@ -412,6 +412,7 @@ mod tests {
             runtime: None,
             unpacked: None,
             detected: Vec::new(),
+            legacy: None,
             plugins: Default::default(),
         };
         std::fs::write(dir.join(CONFIG_FILE), toml::to_string(&config).unwrap()).unwrap();

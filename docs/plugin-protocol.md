@@ -163,6 +163,13 @@ functions.
 On `shutdown` or end of input the plugin closes the decompiler, the program and the Ghidra project (releasing its
 lock).
 
+## Capability `legacy` v1
+
+Served by the `decomp-legacy` plugin (`plugins/decomp-legacy`), the bridge to Decomp. Method `legacy/run`, its
+params, options, result and error codes are specified in `docs/adr/0007-decomp-legacy-bridge.md` (section
+"Protocol"). The host checks the options per operation before calling, sends decovery addresses
+(`flat:0001A2B0`, `seg:SSSS:OOOO`) and absolute paths, and waits `timeout_s` plus 60 s.
+
 ## Capability `runner` v1
 
 Served by plugins that run the original DOS compilers: `unicorn-dos` (emulator) and `dosbox-lab`. The built-in

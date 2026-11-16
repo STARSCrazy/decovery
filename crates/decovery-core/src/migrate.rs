@@ -31,9 +31,9 @@ use crate::knowledge::{
     SymbolsFile,
 };
 use crate::workspace::{
-    AnalysisConfig, CONFIG_FILE, DetectedFact, LinkConfig, OutputConfig, RebuildConfig,
-    RuntimeBase, RuntimeConfig, SCHEMA, SYMBOLS_FILE, SegmentConfig, TargetConfig, TargetFormat,
-    UnpackedConfig, WorkspaceConfig,
+    AnalysisConfig, CONFIG_FILE, DetectedFact, LegacyConfig, LinkConfig, OutputConfig,
+    RebuildConfig, RuntimeBase, RuntimeConfig, SCHEMA, SYMBOLS_FILE, SegmentConfig, TargetConfig,
+    TargetFormat, UnpackedConfig, WorkspaceConfig,
 };
 
 /// Result of a migration.
@@ -382,6 +382,9 @@ pub fn migrate_decomp(from: &Path, to: &Path) -> Result<MigrationReport, Migrate
 
     let mut copies = layout::Copies::default();
     let mut config = config;
+    // the legacy bridge (ADR 0007) runs Decomp's tools on a shadow of this workspace
+    let source = std::path::absolute(from).map_err(|e| io(from, e))?;
+    config.legacy = Some(LegacyConfig::new(source.to_string_lossy()));
     layout::plan_target(&mut config.target.file, from, &mut copies, &mut cx);
 
     let knowledge_dir = from.join(dirs::KNOWLEDGE);
@@ -762,6 +765,7 @@ fn convert_config(table: toml::Table, cx: &mut Ctx) -> Result<WorkspaceConfig, M
         runtime,
         unpacked,
         detected,
+        legacy: None,
         plugins: Default::default(),
     })
 }
@@ -968,6 +972,12 @@ stapel = 8192
         assert!(written.contains("schema = 1"));
         assert!(to.path().join("knowledge/types.h").is_file());
         assert!(to.path().join("knowledge/notes.md").is_file());
+        let legacy = c.legacy.as_ref().expect("[legacy] written");
+        let expected = std::path::absolute(from.path()).unwrap();
+        assert_eq!(
+            legacy.decomp_workspace.as_deref(),
+            Some(expected.to_string_lossy().as_ref())
+        );
     }
 
     #[test]
