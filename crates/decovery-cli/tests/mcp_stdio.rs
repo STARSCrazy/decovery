@@ -191,7 +191,7 @@ fn envelope(result: &Value) -> Value {
 }
 
 #[test]
-fn lists_eleven_tools() {
+fn lists_twelve_tools() {
     let dir = workspace();
     let mut server = Server::start(&dir);
     let response = server.request(2, "tools/list", json!({}));
@@ -201,8 +201,8 @@ fn lists_eleven_tools() {
     assert_eq!(
         names,
         [
-            "analyze", "annotate", "build", "detail", "diagnose", "find", "link", "search", "show",
-            "status", "verify"
+            "analyze", "annotate", "build", "detail", "diagnose", "find", "history", "link",
+            "search", "show", "status", "verify"
         ]
     );
     for tool in tools {
@@ -280,6 +280,80 @@ fn lists_eleven_tools() {
             .as_array()
             .is_none_or(Vec::is_empty)
     );
+}
+
+/// The lines of the workspace's tool-call log, oldest first.
+fn call_log(root: &Path) -> Vec<Value> {
+    let dir = root.join("cache/calls");
+    let mut lines = Vec::new();
+    let mut files: Vec<_> = std::fs::read_dir(&dir)
+        .map(|d| d.flatten().map(|e| e.path()).collect())
+        .unwrap_or_default();
+    files.sort();
+    for file in files
+        .iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
+    {
+        for line in std::fs::read_to_string(file).unwrap().lines() {
+            lines.push(serde_json::from_str(line).unwrap());
+        }
+    }
+    lines
+}
+
+#[test]
+fn every_mcp_call_is_logged() {
+    let dir = workspace();
+    let mut server = Server::start(&dir);
+    assert_eq!(server.call(2, "status", json!({}))["isError"], false);
+    assert_eq!(
+        server.call(3, "show", json!({"target": "nosuch"}))["isError"],
+        true
+    );
+    let history = server.call(4, "history", json!({"target": "alpha"}));
+    assert_eq!(history["isError"], false, "{history}");
+    assert_eq!(
+        envelope(&history)["summary"],
+        "alpha: 0 attempts, best none compared, not parked"
+    );
+    // refused by the parameter check, and by the tool's own check (the marker does not leak)
+    let response = server.request(
+        5,
+        "tools/call",
+        json!({"name": "show", "arguments": {"target": "alpha", "bogus": 1}}),
+    );
+    assert_eq!(response["result"]["isError"], true, "{response}");
+    let bad = server.call(
+        6,
+        "build",
+        json!({"function": "alpha", "variants": [{"label": "none"}]}),
+    );
+    assert_eq!(bad["isError"], true);
+    assert!(bad.get("_meta").is_none(), "{bad}");
+
+    let log = call_log(dir.path());
+    let seen: Vec<(&str, &str)> = log
+        .iter()
+        .map(|r| (r["tool"].as_str().unwrap(), r["outcome"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            ("status", "ok"),
+            ("show", "error"),
+            ("history", "ok"),
+            ("show", "refused"),
+            ("build", "refused"),
+        ]
+    );
+    for r in &log {
+        assert_eq!(r["schema"], 1);
+        assert_eq!(r["actor"], "mcp");
+        assert!(r["seconds"].as_f64().is_some());
+        assert!(r["time"].as_str().unwrap().ends_with('Z'));
+    }
+    assert_eq!(log[1]["target"], "nosuch");
+    assert_eq!(log[4]["builds"], 0, "a refused build runs nothing");
 }
 
 #[test]

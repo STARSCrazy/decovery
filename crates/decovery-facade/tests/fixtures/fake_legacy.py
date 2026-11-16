@@ -6,7 +6,8 @@ Every `legacy/run` appends its params as one JSON line to `<shadow_dir>/requests
 - `{"error": {"code": C, "message": M, "data": D}}` answers with that JSON-RPC error;
 - `{"candidate": {"text": T, "kind": K}}` writes T to `<shadow_dir>/cache/nachbau/kette/<f>/beste.c` and returns it
   as the candidate of kind K;
-- `{"json": J}` returns J as `json`.
+- `{"json": J}` returns J as `json`;
+- `{"artifacts": [P, ...]}` returns those paths as `artifacts`.
 
 Without it the answer is a report naming the operation and the function, with `json = null` and no candidate.
 """
@@ -51,7 +52,7 @@ def run(params, ctx):
         "report_language": "de",
         "json": answer.get("json"),
         "candidate": candidate,
-        "artifacts": [],
+        "artifacts": answer.get("artifacts", []),
         "shadow": {"refreshed": True, "ghidra_copied": False},
         "seconds": 1.5,
     }

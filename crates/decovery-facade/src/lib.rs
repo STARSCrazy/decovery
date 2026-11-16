@@ -19,8 +19,9 @@ pub use resolve::{Resolved, resolve};
 pub use response::{Budget, Handle, Response, store_handle};
 pub use session::{DisplayName, KnowledgeView, Session};
 pub use tools::{
-    AnalyzeOptions, AnnotateAction, Annotation, BuildRequest, DEFAULT_LIMIT, FindQuery, FindWhat,
-    FunctionFilter, FunctionSort, LegacyCall, LegacyOperation, LegacyOptions, Variant, analyze,
-    analyze_with_user_plugins, annotate, build, detail, diagnose, diagnose_deep, find,
-    keep_legacy_plugin, link, program_description, search, show, status, verify,
+    ACTOR_ENV, AnalyzeOptions, AnnotateAction, Annotation, BuildRequest, DEFAULT_HISTORY_LIMIT,
+    DEFAULT_LIMIT, FindQuery, FindWhat, FunctionFilter, FunctionSort, LegacyCall, LegacyOperation,
+    LegacyOptions, Variant, actor, analyze, analyze_with_user_plugins, annotate, build, detail,
+    diagnose, diagnose_deep, find, history, history_archive, keep_legacy_plugin, link,
+    program_description, search, set_actor, show, status, verify,
 };

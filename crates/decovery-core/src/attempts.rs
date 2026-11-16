@@ -122,6 +122,17 @@ impl AttemptRecord {
         }
     }
 
+    /// Whether `other` is the same attempt: the same function, body, context, profile, flags and original bytes
+    /// (Decomp's `Versuch.schluessel`). A build of an unchanged source repeats its last attempt and is not appended.
+    pub fn same_attempt(&self, other: &AttemptRecord) -> bool {
+        self.address == other.address
+            && self.body_hash == other.body_hash
+            && self.context_hash == other.context_hash
+            && self.profile == other.profile
+            && self.flags == other.flags
+            && self.original_hash == other.original_hash
+    }
+
     /// Whether this attempt is one of the agent's own and counts toward the budget: origin `build` or `function`,
     /// and `variant` only when a caller (`cli`, `mcp`) supplied it; `search`, `bench` and `migrate` never count,
     /// nor does anything made by the bench harness itself.
@@ -150,6 +161,32 @@ fn shard_path(root: &Path, address: Address) -> PathBuf {
         .join(format!("{}.jsonl", address_key(address)))
 }
 
+/// Takes the append lock `<dir>/.lock` (an OS file lock, waits up to 10 s); it is held until the file is dropped.
+/// `dir` must exist.
+pub(crate) fn lock_dir(dir: &Path) -> Result<std::fs::File, WorkspaceError> {
+    let lock_path = dir.join(LOCK_NAME);
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|e| io_error(&lock_path, e))?;
+    let start = Instant::now();
+    loop {
+        match lock.try_lock() {
+            Ok(()) => return Ok(lock),
+            Err(TryLockError::WouldBlock) => {
+                if start.elapsed() >= LOCK_WAIT {
+                    return Err(WorkspaceError::Locked { pid: 0 });
+                }
+                std::thread::sleep(POLL);
+            }
+            Err(TryLockError::Error(e)) => return Err(io_error(&lock_path, e)),
+        }
+    }
+}
+
 /// Appends `records` to the shards of their functions. Takes the lock `cache/attempts/.lock` (waits up to 10 s)
 /// and writes each shard's new lines with one `write_all`.
 pub fn append_attempts(root: &Path, records: &[AttemptRecord]) -> Result<(), WorkspaceError> {
@@ -168,27 +205,7 @@ pub fn append_attempts(root: &Path, records: &[AttemptRecord]) -> Result<(), Wor
         buffer.extend_from_slice(line.as_bytes());
         buffer.push(b'\n');
     }
-    let lock_path = dir.join(LOCK_NAME);
-    let lock = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)
-        .map_err(|e| io_error(&lock_path, e))?;
-    let start = Instant::now();
-    loop {
-        match lock.try_lock() {
-            Ok(()) => break,
-            Err(TryLockError::WouldBlock) => {
-                if start.elapsed() >= LOCK_WAIT {
-                    return Err(WorkspaceError::Locked { pid: 0 });
-                }
-                std::thread::sleep(POLL);
-            }
-            Err(TryLockError::Error(e)) => return Err(io_error(&lock_path, e)),
-        }
-    }
+    let _lock = lock_dir(&dir)?;
     for (address, mut bytes) in shards {
         let path = shard_path(root, address);
         let mut file = OpenOptions::new()

@@ -21,6 +21,9 @@ use decovery_toolchain::{
 };
 use serde_json::{Value, json};
 
+use super::history::{
+    AttemptSource, RecordAs, Tried, fingerprint_of, mark_archived, record_attempts,
+};
 use super::variants::{Variant, build_variants};
 use crate::{
     Budget, Change, FacadeError, KnowledgeView, Response, Session, store_handle, write_affected,
@@ -41,7 +44,7 @@ static BUILD_COUNTER: AtomicU32 = AtomicU32::new(0);
 /// What to build: `files` (names in `src/`; empty = all sources), optionally reported for one `function` only
 /// (a name or an address; without `files` its file is the one its rebuild record names, else the only source that
 /// defines it). With `variants` the request compiles those candidates (whole files or definitions of `function`)
-/// for `function` and ranks them instead; nothing is recorded then.
+/// for `function` and ranks them instead; only their attempts are recorded then (`history`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct BuildRequest {
@@ -50,6 +53,8 @@ pub struct BuildRequest {
     pub variants: Vec<Variant>,
     /// Characters of the function list returned inline (default [`Budget::default`]); the rest is a handle.
     pub budget: Option<usize>,
+    /// How the attempts of this build are recorded when the caller is not the agent (the bridge's `search`).
+    pub(crate) record: RecordAs,
 }
 
 /// The build directory; removed when dropped.
@@ -153,7 +158,7 @@ struct Source {
     /// What builds the source, as recorded in `compiler`: the profile, [`BUILTIN_ASSEMBLER`] or the profile that
     /// runs the assembler.
     compiler: String,
-    /// Source text with LF line ends, for the inline-assembly check.
+    /// Source text with LF line ends, for the inline-assembly check (C) and the attempt records.
     text: String,
     compiled: Option<CompiledFile>,
     /// Why the source has no object.
@@ -271,7 +276,7 @@ pub fn build(
 
     // stage; the built-in assembler builds what it can right here
     let run_dir = new_run_dir(root)?;
-    stage_headers(&set, &run_dir.0)?;
+    let headers = stage_headers(&set, &run_dir.0)?;
     let mut sources: Vec<Source> = Vec::new();
     let mut assembler: Option<Option<(Workspace, Profile)>> = None;
     let mut assembler_jobs: Vec<usize> = Vec::new();
@@ -297,6 +302,7 @@ pub fn build(
                 Err(e) => source.error = Some(e.to_string()),
                 Ok((text, hash)) => {
                     source.flags = String::new();
+                    source.text = text.replace("\r\n", "\n");
                     match assemble_listing(&source.dos_name, &text) {
                         Ok(object) => {
                             source.compiler = BUILTIN_ASSEMBLER.to_string();
@@ -420,6 +426,7 @@ pub fn build(
         &mut hints,
     );
     drop(refs);
+    let mut originals: HashMap<Address, String> = HashMap::new();
     progress(Progress::new(
         0,
         Some(placements.len() as u64),
@@ -429,6 +436,14 @@ pub fn build(
         Vec::new()
     } else {
         let program = crate::program::load(&ws)?;
+        for p in &placements {
+            if let Some(bytes) = p
+                .original_len
+                .and_then(|len| program.read(p.at, len as usize))
+            {
+                originals.insert(p.at, super::history::hex(bytes));
+            }
+        }
         // the diagnosis reads the instruction pairs of the comparison: no second decode
         let compiled: Vec<&ObjectFile> = objects
             .iter()
@@ -509,6 +524,8 @@ pub fn build(
         new_records.push(r);
     }
 
+    let fingerprint = fingerprint_of(&ws, &profile);
+
     // record under the lock
     let record_started = Instant::now();
     let lock = ws.lock(LOCK_WAIT)?;
@@ -578,6 +595,17 @@ pub fn build(
     }
     drop(lock);
     let record_ms = ms(record_started.elapsed());
+
+    // attempts, outside the workspace lock
+    let tried = attempts_of(
+        &sources,
+        &new_records,
+        &headers,
+        &fingerprint,
+        &originals,
+        &request.record,
+    );
+    warnings.extend(record_attempts(root, tried));
 
     let timing = json!({
         "compile_ms": compile_ms,
@@ -923,6 +951,81 @@ fn record(built: &Built, c: &Comparison, source: &Source, date: &str) -> Rebuild
     r.code_hash = Some(built.code_hash.clone());
     r.date = Some(date.to_string());
     r
+}
+
+/// The attempts of a full or file build: one per recorded function (compared, or failed with its file), with
+/// origin `build`; identical ones and the compared others are archived (one attempt per function and call).
+fn attempts_of(
+    sources: &[Source],
+    records: &[RebuildRecord],
+    headers: &BTreeMap<String, String>,
+    fingerprint: &str,
+    originals: &HashMap<Address, String>,
+    record_as: &RecordAs,
+) -> Vec<Tried> {
+    let attempt_sources: Vec<AttemptSource> = sources
+        .iter()
+        .map(|s| {
+            AttemptSource::new(
+                &s.name,
+                &s.text,
+                &s.compiler,
+                &s.flags,
+                headers,
+                fingerprint,
+            )
+        })
+        .collect();
+    let mut tried = Vec::new();
+    for r in records {
+        let Some(i) = sources
+            .iter()
+            .position(|s| r.file.as_deref() == Some(s.name.as_str()))
+        else {
+            continue;
+        };
+        let (source, attempt_source) = (&sources[i], &attempt_sources[i]);
+        let original = originals.get(&r.address).map_or("", String::as_str);
+        let mut a = attempt_source.attempt(
+            r.address,
+            &r.name,
+            decovery_core::AttemptOrigin::Build,
+            r.result,
+            original,
+        );
+        a.verdict = r.verdict;
+        if r.result != RebuildResult::Error {
+            a.instructions_differing = Some(r.instructions_differing);
+            a.bytes_differing = Some(r.differing);
+        }
+        a.blockers = r.blockers.iter().map(|b| b.kind.clone()).collect();
+        a.diagnosis = r.diagnoses.clone();
+        if let Some(message) = &r.message {
+            a.extra.insert("message".into(), json!(message));
+        }
+        record_as.apply(&mut a);
+        let compiled = source.compiled.as_ref();
+        let object = compiled
+            .and_then(|c| c.object.as_deref())
+            .filter(|_| source.error.is_none())
+            .map(|bytes| (object_name(&source.dos_name), bytes));
+        let message = compiled.map(|c| c.message.as_str());
+        let files =
+            attempt_source.files(&a, object.as_ref().map(|(n, b)| (n.as_str(), *b)), message);
+        tried.push(Tried {
+            record: a,
+            files,
+            archive: false,
+        });
+    }
+    mark_archived(&mut tried);
+    tried
+}
+
+/// `A.OBJ` for the staged source `A.C`.
+pub(super) fn object_name(dos_name: &str) -> String {
+    let stem = dos_name.rsplit_once('.').map_or(dos_name, |(s, _)| s);
+    format!("{stem}.OBJ")
 }
 
 /// Copies each object built in this run to `cache/rebuild/obj/<stem>.obj` with `<stem>.json` (inputs, identical

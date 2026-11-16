@@ -1,5 +1,6 @@
 //! `build` with variants: compile up to [`MAX_VARIANTS`] candidate sources for one function in one runner request,
-//! compare the function of each and rank them. Nothing is recorded, kept or written to `output/`.
+//! compare the function of each and rank them. Each variant is recorded as an attempt (`history`); no rebuild record,
+//! kept object or `output/` file is written.
 //!
 //! Each distinct variant text is staged under the file's own name in a directory of its own (`V001/TICK.C`) next to
 //! copies of the headers, and compiled there: `__FILE__`, compiler messages, the compile line and so the object
@@ -14,9 +15,10 @@ use std::path::Path;
 use std::time::Instant;
 
 use decovery_core::{
-    Analysis, BlockerRecord, Program, VerdictId, Workspace, read_rebuild, write_atomic,
+    Address, Analysis, AttemptOrigin, BlockerRecord, Program, RebuildResult, VerdictId, Workspace,
+    read_rebuild, write_atomic,
 };
-use decovery_diff::{Blocker, ModuleOptions, SharedFunctions, same_code};
+use decovery_diff::{Blocker, ModuleOptions, SharedFunctions, SymbolView, same_code};
 use decovery_objects::{FunctionView, ObjectFile, functions, read_omf};
 use decovery_plugin::Progress;
 use decovery_toolchain::{
@@ -29,9 +31,10 @@ use serde_json::{Value, json};
 use super::build::{
     BuildRequest, Compiled, OBJECT_FORMAT, OBJECTS_DIR, SOURCE_DIR, blocker_json, blocker_record,
     compile_jobs, failure_text, file_flags, file_name, file_of_function, is_c, literal_sections,
-    ms, new_run_dir, place_objects, read_text, stage_headers, startup_frames, symbol_sizes,
-    toolchain, verdict_id,
+    ms, new_run_dir, object_name, original_len, place_objects, read_text, stage_headers,
+    startup_frames, symbol_sizes, toolchain, verdict_id,
 };
+use super::history::{AttemptSource, Tried, fingerprint_of, hex, mark_archived, record_attempts};
 use crate::{FacadeError, KnowledgeView, Response};
 
 /// Most variants one `build` call compiles.
@@ -543,7 +546,8 @@ impl Compare<'_> {
 
 /// `build` with variants: compiles the candidates of `request.variants` for `request.function` (all cache misses in
 /// one runner request), compares the function of each variant's object with the original and ranks the variants.
-/// Records, kept objects and output files stay untouched.
+/// Each variant is recorded as an attempt (outside the workspace lock; `request.record` says how); rebuild records,
+/// kept objects and output files stay untouched.
 ///
 /// A function variant is spliced into the current file. When the file can be shrunk, the shrunk file is compiled;
 /// whether it gives the function the same code as the full file is checked once per file version (key: the file
@@ -615,14 +619,19 @@ pub(super) fn build_variants(
     let mut errors: Vec<Option<String>> = vec![None; count];
     let mut attempts: Vec<Option<Attempt>> = Vec::with_capacity(count);
     let function_variants = request.variants.iter().any(|v| v.function_source.is_some());
-    let (file_text, c_name) = if function_variants {
-        (
-            read_text(own_path)?.replace("\r\n", "\n"),
-            c_name_of(root, function)?,
-        )
+    let c_name = c_name_of(root, function)?;
+    let file_text = if function_variants {
+        read_text(own_path)?.replace("\r\n", "\n")
     } else {
-        (String::new(), String::new())
+        String::new()
     };
+    // the function's original, for the attempt records
+    let address: Option<Address> = read_rebuild(root)?
+        .into_iter()
+        .find(|r| r.name == function || r.address.to_string() == function)
+        .map(|r| r.address)
+        .or_else(|| KnowledgeView::new(&ws, analysis.as_ref()).address_of(&c_name));
+    let mut original_hash = String::new();
     let mut shrink_state: Vec<Option<(bool, String)>> = vec![None; count];
     let mut dropped_of: HashMap<String, usize> = HashMap::new();
     for (i, variant) in request.variants.iter().enumerate() {
@@ -826,6 +835,11 @@ pub(super) fn build_variants(
         let index = analysis.as_ref().map(Analysis::index);
         let sizes = symbol_sizes(&ws);
         let program = crate::program::load(&ws)?;
+        if let Some(bytes) =
+            address.and_then(|a| program.read(a, original_len(index.as_ref(), &sizes, a)? as usize))
+        {
+            original_hash = hex(bytes);
+        }
         let mut options = ModuleOptions::new(profile.padding, rebuild.frames.clone())
             .with_startup_frames(startup_frames(&ws, &profile, &program, &mut warnings));
         // the variants and the kept C objects are the compiler's
@@ -961,6 +975,76 @@ pub(super) fn build_variants(
         result.shrunk = shrink_state[i].clone();
         result.confirmed_on_full = confirmed[i].is_some();
         results.push(result);
+    }
+
+    // one attempt per variant, outside the workspace lock
+    if let Some(address) = address {
+        let fingerprint = fingerprint_of(&ws, &profile);
+        let mut tried = Vec::new();
+        for (i, (variant, result)) in request.variants.iter().zip(&results).enumerate() {
+            if !request.record.records(variant.label.as_deref()) {
+                continue;
+            }
+            let raw;
+            let text = match &attempts[i] {
+                Some(attempt) => attempt.full.as_str(),
+                None => {
+                    raw = variant
+                        .source
+                        .as_deref()
+                        .or(variant.function_source.as_deref())
+                        .unwrap_or_default()
+                        .replace("\r\n", "\n");
+                    raw.as_str()
+                }
+            };
+            let source =
+                AttemptSource::new(&file, text, &profile.id, &flags, &headers, &fingerprint);
+            let origin = if variant.function_source.is_some() {
+                AttemptOrigin::Function
+            } else {
+                AttemptOrigin::Variant
+            };
+            let outcome = if !result.checked {
+                RebuildResult::Error
+            } else if result.verdict == "identical" {
+                RebuildResult::Identical
+            } else {
+                RebuildResult::Differs
+            };
+            let mut a = source.attempt(address, &c_name, origin, outcome, &original_hash);
+            a.label = variant.label.clone();
+            a.verdict =
+                Some(serde_json::from_value(json!(result.verdict)).unwrap_or(VerdictId::Unchecked));
+            if result.checked {
+                a.instructions_differing = Some(result.instructions_differing);
+                a.bytes_differing = Some(result.differing);
+            }
+            a.blockers = result.blockers.iter().map(|b| b.kind.clone()).collect();
+            if let Some(message) = result.message.as_ref().filter(|_| !result.checked) {
+                a.extra.insert("message".into(), json!(message));
+            }
+            request.record.apply(&mut a);
+            let compiled_file = errors[i]
+                .is_none()
+                .then(|| compiled.get(confirmed[i].unwrap_or(ranked[i])))
+                .flatten();
+            let object = compiled_file
+                .and_then(|c| c.object.as_deref())
+                .map(|bytes| (object_name(&dos_name), bytes));
+            let files = source.files(
+                &a,
+                object.as_ref().map(|(n, b)| (n.as_str(), *b)),
+                compiled_file.map(|c| c.message.as_str()),
+            );
+            tried.push(Tried {
+                record: a,
+                files,
+                archive: false,
+            });
+        }
+        mark_archived(&mut tried);
+        warnings.extend(record_attempts(root, tried));
     }
     results.sort_by_key(VariantResult::rank);
     // the confirmation compile ran inside the compare phase; it counts as compile time

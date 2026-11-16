@@ -3,7 +3,10 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-use decovery_core::{AccessKind, Address, AnalysisIndex, Confidence, RebuildResult};
+use decovery_core::{
+    AccessKind, Address, AnalysisIndex, Confidence, DEFAULT_ATTEMPT_BUDGET, RebuildResult,
+    attempt_budget, read_attempts,
+};
 use serde_json::{Value, json};
 
 use crate::output::{FUNCTIONS_DIR, OUTPUT_DIR};
@@ -37,6 +40,8 @@ pub enum FunctionFilter {
     NotTried,
     Identical,
     Differs,
+    /// The function's attempt budget is spent without reaching identical (`[rebuild] attempt_budget`, default 30).
+    Parked,
 }
 
 /// Order of the function list.
@@ -185,6 +190,22 @@ fn finish(
     Ok(response)
 }
 
+/// Whether the function at `start` has attempts and their budget is spent without reaching identical; an
+/// unreadable shard counts as no attempts.
+fn is_parked(session: &Session, start: Address) -> bool {
+    let limit = session
+        .workspace
+        .config
+        .rebuild
+        .as_ref()
+        .and_then(|r| r.attempt_budget)
+        .unwrap_or(DEFAULT_ATTEMPT_BUDGET);
+    match read_attempts(&session.workspace.root, start) {
+        Ok((records, _)) => !records.is_empty() && attempt_budget(&records, limit).parked(),
+        Err(_) => false,
+    }
+}
+
 fn kebab_confidence(c: Confidence) -> &'static str {
     match c {
         Confidence::Confirmed => "confirmed",
@@ -232,6 +253,7 @@ fn functions(session: &Session, query: &FindQuery, pattern: Option<Pattern>) -> 
             FunctionFilter::NotTried => rebuild == "not-tried",
             FunctionFilter::Identical => rebuild == "identical",
             FunctionFilter::Differs => rebuild == "differs",
+            FunctionFilter::Parked => is_parked(session, f.start),
         });
         if !keep {
             continue;

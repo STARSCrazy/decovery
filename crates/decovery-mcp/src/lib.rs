@@ -1,5 +1,5 @@
-//! MCP server of decovery: the eleven facade tools (`status`, `find`, `show`, `annotate`, `analyze`, `build`,
-//! `link`, `diagnose`, `search`, `verify`, `detail`) over stdio.
+//! MCP server of decovery: the twelve facade tools (`status`, `find`, `show`, `annotate`, `analyze`, `build`,
+//! `link`, `diagnose`, `search`, `verify`, `history`, `detail`) over stdio.
 //!
 //! `diagnose` with `deep`, `search` and `verify` run Decomp's tools through the `decomp-legacy` plugin (ADR 0007);
 //! the server keeps that plugin running between calls, so its Decomp server and Ghidra project stay open.
@@ -7,33 +7,50 @@
 //! The server is a thin adapter. Every call re-opens the session from disk, so knowledge changed by another
 //! writer between calls is seen. Results are the facade envelope as JSON text; facade errors become tool
 //! results with `isError` and the facade message. stdout carries only MCP frames.
+//!
+//! Every tool call, also a refused or failed one, appends one line to the tool-call log (`cache/calls/`, actor
+//! `mcp` or `DECOVERY_ACTOR`); no tool reads it.
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
-use decovery_core::{ClaimSource, Confidence};
+use decovery_core::{CallRecord, ClaimSource, Confidence, append_call};
 use decovery_facade::{
-    AnalyzeOptions, AnnotateAction, Annotation, Budget, BuildRequest, DEFAULT_LIMIT, FacadeError,
-    FindQuery, FindWhat, FunctionFilter, FunctionSort, LegacyCall, LegacyOperation, Progress,
-    Response, Session, Variant,
+    AnalyzeOptions, AnnotateAction, Annotation, Budget, BuildRequest, DEFAULT_HISTORY_LIMIT,
+    DEFAULT_LIMIT, FacadeError, FindQuery, FindWhat, FunctionFilter, FunctionSort, LegacyCall,
+    LegacyOperation, Progress, Response, Session, Variant,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
+use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CallToolResult, ContentBlock, Implementation, ProgressNotificationParam, RequestMetaObject,
-    ServerCapabilities, ServerConfig,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
+    JsonObject, MetaObject, ProgressNotificationParam, RequestMetaObject, ServerCapabilities,
+    ServerConfig,
 };
 use rmcp::schemars::JsonSchema;
-use rmcp::{Peer, RoleServer, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
+use rmcp::service::RequestContext;
+use rmcp::{
+    ErrorData, Peer, RoleServer, ServerHandler, ServiceExt, tool, tool_handler, tool_router,
+};
 use serde::Deserialize;
 
-const INSTRUCTIONS: &str = "Eleven tools over one decovery workspace (a reverse-engineered executable). Rebuild \
+const INSTRUCTIONS: &str = "Twelve tools over one decovery workspace (a reverse-engineered executable). Rebuild \
 verdicts (`build`, `link`) are tool findings; names, types and comments are claims with a source and confidence. \
 `diagnose` with `deep`, `search` and `verify` use Decomp through the decomp-legacy bridge: its reports are German \
-(`report_language`), its findings are evidence, and only decovery's own build sets verdicts.";
+(`report_language`), its findings are evidence, and only decovery's own build sets verdicts. `history` lists what \
+was tried on a function.";
 
-/// Serves the eleven tools for the workspace at `root` on stdin/stdout until the client disconnects.
+/// The marker a handler puts into a tool error's `_meta` when it refused the call (bad parameters) instead of
+/// running it; the call log records `refused` and the marker is removed before the answer goes out.
+const REFUSED: &str = "decovery/refused";
+/// How rmcp starts the tool error for arguments that do not deserialize into the tool's parameters.
+const ARGUMENTS_REJECTED: &str = "failed to deserialize parameters:";
+
+/// Serves the twelve tools for the workspace at `root` on stdin/stdout until the client disconnects.
 pub fn serve_stdio(root: PathBuf) -> Result<(), FacadeError> {
     decovery_facade::keep_legacy_plugin(true);
+    decovery_facade::set_actor("mcp");
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -92,6 +109,7 @@ enum Filter {
     NotTried,
     Identical,
     Differs,
+    Parked,
 }
 
 #[derive(Clone, Copy, Deserialize, JsonSchema)]
@@ -111,7 +129,8 @@ struct FindParams {
     what: What,
     /// Case-insensitive text, `*` matches any run; for `xrefs` the target (name or address).
     pattern: Option<String>,
-    /// Restrict the function list (all must hold); `functions` only.
+    /// Restrict the function list (all must hold); `functions` only. `parked`: the attempt budget is spent
+    /// without reaching identical (see `history`).
     filter: Option<Vec<Filter>>,
     /// Order of the function list (default `address`); `functions` only.
     sort: Option<Sort>,
@@ -303,6 +322,18 @@ struct VerifyParams {
 #[derive(Deserialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 #[serde(deny_unknown_fields)]
+struct HistoryParams {
+    /// Function: name or address.
+    target: String,
+    /// Most attempts listed, newest first (default 20); all of them are in a handle when there are more.
+    limit: Option<usize>,
+    /// Id of an archived attempt (`archive` of an attempt): returns its `function.c` and `comparison.txt` instead.
+    archive: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(deny_unknown_fields)]
 struct DetailParams {
     /// Handle id (`h_` plus 12 hex characters) from another tool's `handles`.
     handle: String,
@@ -354,6 +385,7 @@ impl Server {
                     Filter::NotTried => FunctionFilter::NotTried,
                     Filter::Identical => FunctionFilter::Identical,
                     Filter::Differs => FunctionFilter::Differs,
+                    Filter::Parked => FunctionFilter::Parked,
                 })
                 .collect(),
             sort: match p.sort.unwrap_or(Sort::Address) {
@@ -383,7 +415,7 @@ impl Server {
     async fn annotate(&self, Parameters(p): Parameters<AnnotateParams>) -> CallToolResult {
         let request = match annotation(p) {
             Ok(request) => request,
-            Err(message) => return CallToolResult::error(vec![ContentBlock::text(message)]),
+            Err(message) => return refused(message),
         };
         self.blocking(move |root| decovery_facade::annotate(root, &request))
             .await
@@ -426,9 +458,7 @@ impl Server {
                 (Some(source), None) => Variant::new(source),
                 (None, Some(source)) => Variant::function(source),
                 _ => {
-                    return CallToolResult::error(vec![ContentBlock::text(
-                        "each variant needs exactly one of source and function_source",
-                    )]);
+                    return refused("each variant needs exactly one of source and function_source");
                 }
             };
             request.variants.push(match v.label {
@@ -464,9 +494,7 @@ impl Server {
         let budget = budget(p.budget);
         let Some(deep) = p.deep else {
             if p.source.is_some() || p.all.is_some() || p.minutes.is_some() {
-                return CallToolResult::error(vec![ContentBlock::text(
-                    "source, all and minutes need deep",
-                )]);
+                return refused("source, all and minutes need deep");
             }
             return self
                 .blocking(move |root| {
@@ -542,6 +570,22 @@ impl Server {
         .await
     }
 
+    #[tool(
+        description = "What was tried on one function: every recorded attempt (builds, variants, search candidates) newest first with decovery's verdict, the best one, the attempt budget (`parked` when it is spent without reaching identical; `find` filter `parked`) and the failures grouped by message. With `archive` (the id an attempt names) the archived definition (`function_c`) and comparison of that attempt."
+    )]
+    async fn history(&self, Parameters(p): Parameters<HistoryParams>) -> CallToolResult {
+        self.blocking(move |root| match &p.archive {
+            Some(id) => decovery_facade::history_archive(root, &p.target, id, Budget::default()),
+            None => decovery_facade::history(
+                root,
+                &p.target,
+                p.limit.unwrap_or(DEFAULT_HISTORY_LIMIT),
+                Budget::default(),
+            ),
+        })
+        .await
+    }
+
     #[tool(description = "Page the stored content of a handle returned by another tool.")]
     async fn detail(&self, Parameters(p): Parameters<DetailParams>) -> CallToolResult {
         self.blocking(move |root| {
@@ -558,6 +602,51 @@ impl Server {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for Server {
+    /// Routes the call and logs it (also a refused or failed one) before the answer goes out.
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        let started = Instant::now();
+        let mut record = call_record(&request.name, request.arguments.as_ref());
+        let tcc = ToolCallContext::new(self, request, context);
+        let mut result = self.tool_router.call(tcc).await;
+        record.seconds = started.elapsed().as_secs_f64();
+        record.outcome = match &mut result {
+            Err(_) => "refused".into(),
+            Ok(CallToolResponse::Complete(r)) => {
+                let marked = r
+                    .meta
+                    .as_mut()
+                    .is_some_and(|m| m.0.remove(REFUSED).is_some());
+                if r.meta.as_ref().is_some_and(|m| m.0.is_empty()) {
+                    r.meta = None;
+                }
+                // rmcp answers arguments that do not fit the tool's parameters as a tool error with this prefix
+                let bad_arguments = r
+                    .content
+                    .first()
+                    .and_then(|c| c.as_text())
+                    .is_some_and(|t| t.text.starts_with(ARGUMENTS_REJECTED));
+                match (marked || bad_arguments, r.is_error == Some(true)) {
+                    (true, _) => "refused".into(),
+                    (false, true) => "error".into(),
+                    (false, false) => "ok".into(),
+                }
+            }
+            Ok(_) => "ok".into(),
+        };
+        if record.outcome == "refused" {
+            record.builds = 0;
+            record.searches = 0;
+        }
+        if let Err(e) = append_call(&self.root, &record) {
+            eprintln!("decovery mcp: the call was not logged: {e}");
+        }
+        result
+    }
+
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("decovery", env!("CARGO_PKG_VERSION")))
@@ -621,6 +710,44 @@ fn budget(chars: Option<usize>) -> Budget {
     Budget {
         chars: chars.unwrap_or(DEFAULT_BUDGET),
     }
+}
+
+/// A tool error for a call that was not run (bad parameters); the call log records it as `refused`.
+fn refused(message: impl Into<String>) -> CallToolResult {
+    let mut result = CallToolResult::error(vec![ContentBlock::text(message.into())]);
+    let mut meta = MetaObject::new();
+    meta.0.insert(REFUSED.into(), serde_json::Value::Bool(true));
+    result.meta = Some(meta);
+    result
+}
+
+/// The log record of a call to `tool` with `arguments`: its target, operation and how many builds and searches it
+/// asks for (counted unless it is refused).
+fn call_record(tool: &str, arguments: Option<&JsonObject>) -> CallRecord {
+    let mut record = CallRecord::new(tool);
+    record.actor = Some(decovery_facade::actor());
+    let text = |key: &str| {
+        arguments
+            .and_then(|a| a.get(key))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    };
+    record.target = text("target").or_else(|| text("function"));
+    record.operation = text("deep")
+        .or_else(|| text("strategy"))
+        .or_else(|| text("check"));
+    match tool {
+        "build" => {
+            let variants = arguments
+                .and_then(|a| a.get("variants"))
+                .and_then(serde_json::Value::as_array)
+                .map_or(0, Vec::len);
+            record.builds = u32::try_from(variants.max(1)).unwrap_or(u32::MAX);
+        }
+        "search" => record.searches = 1,
+        _ => {}
+    }
+    record
 }
 
 /// The envelope as pretty JSON text, or the facade message as a tool error.

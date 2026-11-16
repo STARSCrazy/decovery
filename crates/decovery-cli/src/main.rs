@@ -11,11 +11,11 @@ const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 mod compare;
 mod setup;
 
-use decovery_core::{ClaimSource, Confidence};
+use decovery_core::{CallRecord, ClaimSource, Confidence, append_call};
 use decovery_facade::{
-    AnalyzeOptions, AnnotateAction, Annotation, Budget, BuildRequest, DEFAULT_LIMIT, FacadeError,
-    FindQuery, FindWhat, FunctionFilter, FunctionSort, LegacyCall, LegacyOperation, Progress,
-    Response, Session, Variant,
+    AnalyzeOptions, AnnotateAction, Annotation, Budget, BuildRequest, DEFAULT_HISTORY_LIMIT,
+    DEFAULT_LIMIT, FacadeError, FindQuery, FindWhat, FunctionFilter, FunctionSort, LegacyCall,
+    LegacyOperation, Progress, Response, Session, Variant,
 };
 
 /// Recover source code from old executables.
@@ -228,6 +228,19 @@ enum Command {
     /// base lacks are recorded from the linker map (`source = link`). Exit code 0 when identical, 1 when
     /// it differs, 2 when the link failed or on errors. Progress goes to stderr.
     Link,
+    /// What was tried on a function: its recorded attempts (builds, variants, search candidates) newest first with
+    /// decovery's verdict, the best one, the attempt budget (parked when it is spent without reaching identical) and
+    /// the failures grouped by message. With `--archive`: the archived definition and comparison of one attempt.
+    History {
+        /// Function name or address.
+        function: String,
+        /// Most attempts listed; all of them go into a handle when there are more.
+        #[arg(long, default_value_t = DEFAULT_HISTORY_LIMIT)]
+        limit: usize,
+        /// Id of an archived attempt (the `archive` an attempt names).
+        #[arg(long, value_name = "ID")]
+        archive: Option<String>,
+    },
     /// Page the content of a handle returned by another command.
     Detail {
         /// Handle id (`h_` plus 12 hex characters).
@@ -368,6 +381,8 @@ enum Filter {
     NotTried,
     Identical,
     Differs,
+    /// The attempt budget is spent without reaching identical.
+    Parked,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -382,6 +397,107 @@ fn main() -> ExitCode {
     if let Some(jobs) = cli.jobs {
         decovery_toolchain::set_global_jobs(jobs);
     }
+    decovery_facade::set_actor("cli");
+    let started = std::time::Instant::now();
+    let record = call_record(&cli.command);
+    let workspace = cli.workspace.clone();
+    let code = run(cli);
+    if let Some(mut record) = record {
+        log_call(&workspace, &mut record, started, code);
+    }
+    code
+}
+
+/// The call-log record of a workspace command (`None` for `migrate`, `mcp` and `setup`, which log nothing or
+/// log themselves): the command, its target and operation, and the builds and searches it runs.
+fn call_record(command: &Command) -> Option<CallRecord> {
+    let (tool, target, operation): (&str, Option<&str>, Option<&str>) = match command {
+        Command::Migrate { .. } | Command::Mcp | Command::Setup { .. } => return None,
+        Command::Compare { function, .. } => ("compare", Some(function), None),
+        Command::Show { target } => ("show", Some(target), None),
+        Command::Diagnose { target, deep, .. } => (
+            "diagnose",
+            Some(target),
+            deep.map(|d| match d {
+                Deep::Context => "context",
+                Deep::Structure => "structure",
+                Deep::Registers => "registers",
+                Deep::Slots => "slots",
+                Deep::Joint => "joint",
+            }),
+        ),
+        Command::Search {
+            target, strategy, ..
+        } => (
+            "search",
+            Some(target),
+            Some(match strategy {
+                Strategy::Chain => "chain",
+                Strategy::Permute => "permute",
+                Strategy::Beam => "beam",
+                Strategy::Forms => "forms",
+            }),
+        ),
+        Command::Verify { target, check, .. } => (
+            "verify",
+            Some(target),
+            Some(match check {
+                Check::Equivalence => "equivalence",
+                Check::Behavior => "behavior",
+            }),
+        ),
+        Command::Status => ("status", None, None),
+        Command::Find { pattern, .. } => ("find", pattern.as_deref(), None),
+        Command::Annotate { target, .. } => ("annotate", target.as_deref(), None),
+        Command::Analyze { .. } => ("analyze", None, None),
+        Command::Build { function, .. } => ("build", function.as_deref(), None),
+        Command::Link => ("link", None, None),
+        Command::History { function, .. } => ("history", Some(function), None),
+        Command::Detail { handle, .. } => ("detail", Some(handle), None),
+    };
+    let mut record = CallRecord::new(tool);
+    record.actor = Some(decovery_facade::actor());
+    record.target = target.map(str::to_string);
+    record.operation = operation.map(str::to_string);
+    match command {
+        Command::Build {
+            variant,
+            function_source,
+            ..
+        } => {
+            let variants = variant.len() + function_source.len();
+            record.builds = u32::try_from(variants.max(1)).unwrap_or(u32::MAX);
+        }
+        Command::Search { .. } => record.searches = 1,
+        _ => {}
+    }
+    Some(record)
+}
+
+/// Appends `record` to the workspace's call log (exit code 2 = `error`); a directory that is no workspace gets no
+/// log, and a log that cannot be written is only a warning.
+fn log_call(
+    workspace: &Path,
+    record: &mut CallRecord,
+    started: std::time::Instant,
+    code: ExitCode,
+) {
+    if !workspace
+        .join(decovery_core::workspace::CONFIG_FILE)
+        .is_file()
+    {
+        return;
+    }
+    record.seconds = started.elapsed().as_secs_f64();
+    if code == ExitCode::from(2) {
+        record.outcome = "error".into();
+    }
+    if let Err(e) = append_call(workspace, record) {
+        eprintln!("warning: the call was not logged: {e}");
+    }
+}
+
+fn run(cli: Cli) -> ExitCode {
     match cli.command {
         Command::Migrate { from, to } => finish(migrate(&from, &to, cli.json)),
         Command::Compare {
@@ -503,6 +619,7 @@ fn main() -> ExitCode {
                         Filter::NotTried => FunctionFilter::NotTried,
                         Filter::Identical => FunctionFilter::Identical,
                         Filter::Differs => FunctionFilter::Differs,
+                        Filter::Parked => FunctionFilter::Parked,
                     })
                     .collect(),
                 sort: match sort {
@@ -603,6 +720,17 @@ fn main() -> ExitCode {
                 ExitCode::from(e.exit_code())
             }
         },
+        Command::History {
+            function,
+            limit,
+            archive,
+        } => finish(history(
+            &cli.workspace,
+            &function,
+            limit,
+            archive.as_deref(),
+            cli.json,
+        )),
         Command::Detail {
             handle,
             offset,
@@ -1263,6 +1391,63 @@ fn print_summary(response: &Response, json: bool) -> Result<(), FacadeError> {
         if let Some(text) = warning.as_str() {
             eprintln!("warning: {text}");
         }
+    }
+    Ok(())
+}
+
+fn history(
+    workspace: &Path,
+    function: &str,
+    limit: usize,
+    archive: Option<&str>,
+    json: bool,
+) -> Result<(), FacadeError> {
+    let budget = if json {
+        Budget::default()
+    } else {
+        Budget { chars: usize::MAX }
+    };
+    let response = match archive {
+        Some(id) => decovery_facade::history_archive(workspace, function, id, budget)?,
+        None => decovery_facade::history(workspace, function, limit, budget)?,
+    };
+    if json {
+        return print_json(&response);
+    }
+    let d = &response.data;
+    println!("{}", response.summary);
+    if archive.is_some() {
+        for key in ["function_c", "comparison"] {
+            if let Some(text) = d[key].as_str() {
+                println!();
+                print!("{text}");
+            }
+        }
+        return Ok(());
+    }
+    for a in d["attempts"].as_array().into_iter().flatten() {
+        println!(
+            "{}",
+            cells(
+                a,
+                &[
+                    "time",
+                    "origin",
+                    "label",
+                    "actor",
+                    "verdict",
+                    "instructions_differing",
+                    "archive"
+                ]
+            )
+        );
+    }
+    for f in d["failures"].as_array().into_iter().flatten() {
+        println!(
+            "failed {}x: {}",
+            f["count"],
+            f["message"].as_str().unwrap_or("")
+        );
     }
     Ok(())
 }

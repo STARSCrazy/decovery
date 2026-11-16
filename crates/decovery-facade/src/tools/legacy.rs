@@ -14,7 +14,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use decovery_core::{
-    Address, Confidence, RebuildResult, SymbolKind, VerdictId, Workspace, distance_of, write_atomic,
+    Address, AttemptOrigin, Confidence, RebuildResult, SymbolKind, VerdictId, Workspace,
+    distance_of, write_atomic,
 };
 use decovery_plugin::{CallOptions, PluginError, PluginHost, Progress};
 use decovery_toolchain::{definitions, from_cp437, splice_function};
@@ -22,6 +23,7 @@ use serde_json::{Map, Value, json};
 
 use super::build::{BuildRequest, SOURCE_DIR, build, file_of_function, read_text};
 use super::diagnose::diagnose_tool;
+use super::history::RecordAs;
 use super::variants::Variant;
 use crate::plugins::{PluginConfig, plugin_config, read_user_plugins};
 use crate::{Budget, FacadeError, Handle, Response, Session, resolve, store_handle};
@@ -340,12 +342,12 @@ fn bridge_error(e: PluginError) -> FacadeError {
 
 /// The function a call is about: a rebuild record's name or address first, then a function symbol's, else what
 /// [`resolve`] resolves to.
-struct Function {
-    address: Address,
-    name: String,
+pub(super) struct Function {
+    pub(super) address: Address,
+    pub(super) name: String,
 }
 
-fn function_of(session: &Session, target: &str) -> Result<Function, FacadeError> {
+pub(super) fn function_of(session: &Session, target: &str) -> Result<Function, FacadeError> {
     let trimmed = target.trim();
     if let Some(r) = session
         .rebuild
@@ -761,7 +763,17 @@ pub fn search(
         response.handles = handles;
         return Ok(response);
     };
-    let judged = judge_candidate(&root, &function, path, kind, call.apply, progress)?;
+    let mut extra = Map::new();
+    if let Some(report) = report_artifact(&answer.artifacts) {
+        extra.insert("decomp_report".into(), json!(report));
+    }
+    let record = RecordAs {
+        origin: Some(AttemptOrigin::Search),
+        label: Some(format!("search:{}", call.operation.id())),
+        skip_labels: vec!["current".to_string()],
+        extra,
+    };
+    let judged = judge_candidate(&root, &function, path, kind, call.apply, record, progress)?;
     let summary = format!("{decomp_part}: {}", judged.summary);
     data.insert("candidate".into(), judged.data);
     let mut response = Response::new(summary, Value::Object(data));
@@ -772,6 +784,15 @@ pub fn search(
 struct Judged {
     summary: String,
     data: Value,
+}
+
+/// The artifact that holds Decomp's report (`ergebnis.txt`), else the first artifact.
+fn report_artifact(artifacts: &[String]) -> Option<&str> {
+    artifacts
+        .iter()
+        .find(|a| a.replace('\\', "/").ends_with("/ergebnis.txt"))
+        .or(artifacts.first())
+        .map(String::as_str)
 }
 
 /// A text file as UTF-8, else code page 437 (what Decomp's rebuild sources may be), with LF line ends.
@@ -828,13 +849,16 @@ fn verdict_text(v: &Value) -> String {
     )
 }
 
-/// Builds the candidate next to the current source and, with `apply`, writes it when it is better.
+/// Builds the candidate next to the current source and, with `apply`, writes it when it is better. Only the
+/// candidate is recorded as an attempt (`record`); the follow-up build of an applied candidate repeats that attempt
+/// and appends nothing.
 fn judge_candidate(
     root: &Path,
     function: &Function,
     path: &Path,
     kind: &str,
     apply: bool,
+    record: RecordAs,
     progress: &dyn Fn(Progress),
 ) -> Result<Judged, FacadeError> {
     let name = function.name.as_str();
@@ -871,6 +895,7 @@ fn judge_candidate(
         function: Some(name.to_string()),
         files: vec![file.clone()],
         variants,
+        record,
         ..BuildRequest::default()
     };
     progress(Progress::new(
