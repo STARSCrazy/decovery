@@ -83,7 +83,7 @@ function took 37 s with `DECOMP_WATCOM_EMU=1`.
 Params:
 
 ```json
-{"decomp_workspace": "D:/.../syndicate-1993", "shadow_dir": "<ws>/cache/legacy/decomp",
+{"decomp_workspace": "<decomp workspace>", "shadow_dir": "<ws>/cache/legacy/decomp",
  "sources_dir": "<ws>/src", "symbols": [{"address": "flat:0001A2B0", "kind": "function", "name": "ai_tick"}],
  "operation": "registers", "function": "flat:00016E40", "options": {"minutes": 10}, "timeout_s": 900}
 ```
