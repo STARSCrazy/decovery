@@ -607,6 +607,83 @@ pub fn run_dosbox_lab_setup(
     })
 }
 
+pub struct DecompLegacyOptions {
+    /// The Decomp checkout (holds `.venv/` and `src/decomp/`).
+    pub decomp_dir: PathBuf,
+    /// Directory holding `decovery-plugin-sdk` and `decomp-legacy`.
+    pub plugins_dir: PathBuf,
+    pub config_path: PathBuf,
+    pub platform: Platform,
+}
+
+#[derive(Debug)]
+pub struct DecompLegacyReport {
+    /// The checkout's venv Python the plugin runs under.
+    pub python: PathBuf,
+    /// The `PYTHONPATH` the plugin gets.
+    pub pythonpath: String,
+    pub config_path: PathBuf,
+}
+
+/// Registers `[plugins.decomp-legacy]` (ADR 0007): the Decomp checkout's venv Python runs
+/// `decovery_decomp_legacy`, which is imported from `plugins/decomp-legacy` (with the SDK beside it) through
+/// `PYTHONPATH`, so nothing is installed into the checkout's venv. The checkout's `src/` comes first on
+/// `PYTHONPATH`, so `import decomp` is this checkout even when its venv was installed from another one.
+pub fn run_decomp_legacy_setup(
+    opts: &DecompLegacyOptions,
+    log: &mut dyn FnMut(&str),
+) -> Result<DecompLegacyReport, SetupError> {
+    let decomp_src = opts.decomp_dir.join("src");
+    if !decomp_src.join("decomp").is_dir() {
+        return fail(format!(
+            "{} is not a Decomp checkout (no src/decomp); pass the checkout with --decomp",
+            opts.decomp_dir.display()
+        ));
+    }
+    let python = venv_python(&opts.decomp_dir.join(".venv"), opts.platform);
+    if !python.is_file() {
+        return fail(format!(
+            "the Decomp checkout has no venv Python at {}; create the checkout's venv first",
+            python.display()
+        ));
+    }
+    let plugin = opts.plugins_dir.join("decomp-legacy");
+    let sdk = opts.plugins_dir.join("decovery-plugin-sdk");
+    for dir in [&plugin, &sdk] {
+        if !dir.is_dir() {
+            return fail(format!(
+                "plugin directory {} not found; pass --plugins-dir <dir> (holding decovery-plugin-sdk and decomp-legacy)",
+                dir.display()
+            ));
+        }
+    }
+    let separator = match opts.platform {
+        Platform::WindowsX64 => ";",
+        Platform::LinuxX64 => ":",
+    };
+    let pythonpath = [&decomp_src, &plugin, &sdk]
+        .iter()
+        .map(|p| path_str(p))
+        .collect::<Result<Vec<_>, _>>()?
+        .join(separator);
+    log(&format!(
+        "step: writing [plugins.decomp-legacy] to {}",
+        opts.config_path.display()
+    ));
+    let command = vec![
+        path_str(&python)?,
+        "-m".to_string(),
+        "decovery_decomp_legacy".to_string(),
+    ];
+    let env = BTreeMap::from([("PYTHONPATH".to_string(), pythonpath.clone())]);
+    write_plugin_entry(&opts.config_path, "decomp-legacy", &command, &env)?;
+    Ok(DecompLegacyReport {
+        python,
+        pythonpath,
+        config_path: opts.config_path.clone(),
+    })
+}
+
 fn run(runner: &dyn Runner, program: &OsStr, args: &[OsString]) -> Result<(), SetupError> {
     runner.run(program, args).map_err(SetupError::Message)
 }
@@ -1367,6 +1444,78 @@ mod tests {
         assert_eq!(entry.command[0], report.venv_python.to_string_lossy());
         assert_eq!(entry.command[1..], ["-m", "decovery_unicorn_dos"]);
         assert!(entry.env.is_empty());
+    }
+
+    fn decomp_legacy_options(root: &Path) -> DecompLegacyOptions {
+        let platform = Platform::current().unwrap();
+        let decomp = root.join("decomp");
+        std::fs::create_dir_all(decomp.join("src/decomp")).unwrap();
+        let python = venv_python(&decomp.join(".venv"), platform);
+        std::fs::create_dir_all(python.parent().unwrap()).unwrap();
+        std::fs::write(&python, b"").unwrap();
+        let plugins = root.join("plugins");
+        for name in ["decovery-plugin-sdk", "decomp-legacy"] {
+            std::fs::create_dir_all(plugins.join(name)).unwrap();
+        }
+        DecompLegacyOptions {
+            decomp_dir: decomp,
+            plugins_dir: plugins,
+            config_path: root.join("cfg/decovery/config.toml"),
+            platform,
+        }
+    }
+
+    #[test]
+    fn user_config_gets_decomp_legacy_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let opts = decomp_legacy_options(dir.path());
+        std::fs::create_dir_all(opts.config_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &opts.config_path,
+            "schema = 1\n\n[plugins.other]\ncommand = [\"o\"]\n",
+        )
+        .unwrap();
+        let report = run_decomp_legacy_setup(&opts, &mut |_| {}).unwrap();
+        let plugins = read_plugins_file(&opts.config_path).unwrap();
+        assert_eq!(plugins["other"].command, ["o"]);
+        let entry = &plugins["decomp-legacy"];
+        assert_eq!(entry.command[0], report.python.to_string_lossy());
+        assert!(report.python.starts_with(&opts.decomp_dir));
+        assert_eq!(entry.command[1..], ["-m", "decovery_decomp_legacy"]);
+        let separator = if cfg!(windows) { ';' } else { ':' };
+        let parts: Vec<&str> = entry.env["PYTHONPATH"].split(separator).collect();
+        assert_eq!(
+            parts,
+            [
+                opts.decomp_dir.join("src").to_str().unwrap(),
+                opts.plugins_dir.join("decomp-legacy").to_str().unwrap(),
+                opts.plugins_dir
+                    .join("decovery-plugin-sdk")
+                    .to_str()
+                    .unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn decomp_legacy_setup_checks_the_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let opts = decomp_legacy_options(dir.path());
+        let python = venv_python(&opts.decomp_dir.join(".venv"), opts.platform);
+        std::fs::remove_file(&python).unwrap();
+        let error = run_decomp_legacy_setup(&opts, &mut |_| {}).unwrap_err();
+        assert!(error.to_string().contains("no venv Python"), "{error}");
+        std::fs::remove_dir_all(opts.decomp_dir.join("src")).unwrap();
+        let error = run_decomp_legacy_setup(&opts, &mut |_| {}).unwrap_err();
+        assert!(
+            error.to_string().contains("not a Decomp checkout"),
+            "{error}"
+        );
+        let opts = decomp_legacy_options(dir.path());
+        std::fs::remove_dir_all(opts.plugins_dir.join("decomp-legacy")).unwrap();
+        let error = run_decomp_legacy_setup(&opts, &mut |_| {}).unwrap_err();
+        assert!(error.to_string().contains("--plugins-dir"), "{error}");
+        assert!(!opts.config_path.exists(), "nothing written on failure");
     }
 
     fn dosbox_options(root: &Path) -> DosboxLabOptions {

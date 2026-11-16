@@ -418,7 +418,7 @@ impl PluginRunner {
                 },
             )
             .map_err(|e| match e {
-                PluginError::Remote { code, message } if code == RUNNER_UNSUPPORTED => {
+                PluginError::Remote { code, message, .. } if code == RUNNER_UNSUPPORTED => {
                     RunnerError::Unsupported(format!("{}: {message}", self.name))
                 }
                 PluginError::Cancelled => RunnerError::Failed(format!("{}: cancelled", self.name)),

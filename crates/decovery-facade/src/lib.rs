@@ -20,6 +20,7 @@ pub use response::{Budget, Handle, Response, store_handle};
 pub use session::{DisplayName, KnowledgeView, Session};
 pub use tools::{
     AnalyzeOptions, AnnotateAction, Annotation, BuildRequest, DEFAULT_LIMIT, FindQuery, FindWhat,
-    FunctionFilter, FunctionSort, Variant, analyze, analyze_with_user_plugins, annotate, build,
-    detail, diagnose, find, link, program_description, show, status,
+    FunctionFilter, FunctionSort, LegacyCall, LegacyOperation, LegacyOptions, Variant, analyze,
+    analyze_with_user_plugins, annotate, build, detail, diagnose, diagnose_deep, find,
+    keep_legacy_plugin, link, program_description, search, show, status, verify,
 };

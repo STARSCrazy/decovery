@@ -38,6 +38,10 @@ decovery build --function <name> --variant a.c --variant b.c
 decovery build --function <name> --function-source f.c
                                                    # candidate definition of the function alone
 decovery diagnose <name|address>                   # why a rebuilt function differs and what to try
+decovery diagnose <name> --deep registers          # plus Decomp's model: context, structure, registers, slots, joint
+decovery search <name> --strategy chain --minutes 20
+                                                   # Decomp's search; decovery builds the candidate (--apply writes it)
+decovery verify <name> --check equivalence         # Decomp's evidence (equivalence, behavior --run <name>)
 decovery link                                      # link the whole program and compare it with the original
 decovery mcp                                       # the same commands as MCP tools over stdio
 ```
@@ -53,8 +57,8 @@ rebuild sources; LE programs get their identical rebuilt functions inserted into
 linked as one module. After an identical MZ link, the public symbols the knowledge base lacks are recorded from the
 linker map (`source = link`).
 
-The MCP server offers the same tools: `build` (with `files`, `function`, `variants`), `link` and `diagnose`, next
-to `status`, `find`, `show`, `annotate`, `analyze` and `detail`.
+The MCP server offers the same tools: `build` (with `files`, `function`, `variants`), `link`, `diagnose` (with
+`deep`), `search` and `verify`, next to `status`, `find`, `show`, `annotate`, `analyze` and `detail`.
 
 The rebuild is configured in the workspace's `decovery.toml`:
 
@@ -112,6 +116,25 @@ The compilers run in an emulator plugin:
   instances. The DOSBox executable is not installed.
 
 A profile lists its runners in order; `[rebuild] runners` in a workspace overrides the list.
+
+## Decomp legacy bridge
+
+Until decovery has its own Watcom register and stack-slot models, search chain and behavioural checks, `diagnose
+--deep`, `search` and `verify` run them in [Decomp](docs/adr/0007-decomp-legacy-bridge.md) through the
+`decomp-legacy` plugin, on a shadow of the workspace in `cache/legacy/decomp/` (the Decomp workspace itself is never
+written). It needs two things:
+
+```sh
+decovery migrate <decomp-workspace> <dir>          # writes [legacy] decomp_workspace into decovery.toml
+decovery setup decomp-legacy --decomp <Decomp checkout>
+                                                   # registers [plugins.decomp-legacy] with the checkout's venv Python
+```
+
+Decomp's reports pass through unchanged and are German (`report`, `report_language = "de"`). Verdicts stay
+decovery's: a candidate from `search` is built by decovery as a function-level attempt next to the current source,
+and `--apply` writes it into `src/` only when decovery's verdict is better (identical, or fewer differing
+instructions). `verify` reports Decomp's result as evidence (`source = "decomp"`) and records nothing. The MCP
+server keeps the plugin, and with it Decomp's server and Ghidra project, running between calls.
 
 ## No proprietary material
 

@@ -5,6 +5,18 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- Decomp legacy bridge (ADR 0007), Rust side: `diagnose --deep <context|structure|registers|slots|joint>`, the new
+  tools `search` (`chain`, `permute`, `beam`, `forms`; `--apply`) and `verify` (`equivalence`, `behavior`) in the CLI
+  and the MCP server, run through the `decomp-legacy` plugin (capability `legacy` v1). Decomp's reports pass through
+  as `report` with `report_language = "de"`; a search candidate is built by decovery next to the current source and
+  written into `src/` only with `--apply` and a better verdict; Decomp's equivalence result is evidence with
+  `source = "decomp"`, never a verdict. The MCP server keeps the plugin running between calls.
+- `[legacy] decomp_workspace` in `decovery.toml`; `migrate` writes it.
+- `decovery setup decomp-legacy --decomp <checkout>` registers `[plugins.decomp-legacy]` with the checkout's venv
+  Python and a `PYTHONPATH` of the checkout's `src/`, `plugins/decomp-legacy` and the SDK.
+- Plugin errors carry `error.data` to the host (`PluginError::Remote { data }`).
+
 ## [0.2.0] - 2026-11-09
 
 Phases 1 and 2: knowledge, analysis and the facade tools; toolchain, `build`, `link` and the second target.
