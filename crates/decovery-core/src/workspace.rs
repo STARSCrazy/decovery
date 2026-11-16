@@ -114,9 +114,30 @@ pub struct WorkspaceConfig {
     pub unpacked: Option<UnpackedConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub detected: Vec<DetectedFact>,
+    /// `[legacy]`: the Decomp workspace the legacy bridge works from (ADR 0007).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy: Option<LegacyConfig>,
     /// `[plugins.<name>]`: how to start a plugin; overrides the user config entry of the same name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub plugins: BTreeMap<String, PluginConfig>,
+}
+
+/// `[legacy]`: settings of the Decomp legacy bridge (ADR 0007).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct LegacyConfig {
+    /// The Decomp workspace this workspace was migrated from (holds `decomp.toml`); relative to the workspace root
+    /// unless absolute. `migrate` writes the absolute path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decomp_workspace: Option<String>,
+}
+
+impl LegacyConfig {
+    pub fn new(decomp_workspace: impl Into<String>) -> Self {
+        LegacyConfig {
+            decomp_workspace: Some(decomp_workspace.into()),
+        }
+    }
 }
 
 /// How to start a plugin (`[plugins.<name>]` in `decovery.toml` or the user config).
@@ -328,6 +349,23 @@ processor = \"x86\"
         let config: WorkspaceConfig = toml::from_str(BASE).unwrap();
         assert!(config.plugins.is_empty());
         assert!(!toml::to_string(&config).unwrap().contains("plugins"));
+    }
+
+    #[test]
+    fn legacy_round_trips() {
+        let config: WorkspaceConfig = toml::from_str(BASE).unwrap();
+        assert!(config.legacy.is_none());
+        let text = format!(
+            "{BASE}
+[legacy]
+decomp_workspace = \"D:/decomp/ws\"
+"
+        );
+        let config: WorkspaceConfig = toml::from_str(&text).unwrap();
+        let legacy = config.legacy.as_ref().unwrap();
+        assert_eq!(legacy.decomp_workspace.as_deref(), Some("D:/decomp/ws"));
+        let again: WorkspaceConfig = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(again, config);
     }
 
     #[test]

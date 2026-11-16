@@ -6,6 +6,7 @@ mod build;
 mod detail;
 mod diagnose;
 mod find;
+mod legacy;
 mod link;
 mod link_symbols;
 mod show;
@@ -18,6 +19,10 @@ pub use build::{BuildRequest, OBJECT_FORMAT, OBJECTS_DIR, RUNS_DIR, SOURCE_DIR, 
 pub use detail::detail;
 pub use diagnose::diagnose_tool as diagnose;
 pub use find::{DEFAULT_LIMIT, FindQuery, FindWhat, FunctionFilter, FunctionSort, find};
+pub use legacy::{
+    LEGACY_PLUGIN, LegacyCall, LegacyOperation, LegacyOptions, SHADOW_DIR, diagnose_deep,
+    keep_legacy_plugin, search, verify,
+};
 pub use link::link;
 pub use show::show;
 pub use status::status;

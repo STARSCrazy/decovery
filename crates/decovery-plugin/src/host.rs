@@ -39,6 +39,8 @@ pub enum PluginError {
         code: i64,
         /// Error message.
         message: String,
+        /// `error.data`, when the plugin sent one.
+        data: Option<Value>,
     },
     /// The plugin process ended or its pipes closed.
     #[error("plugin process exited")]
@@ -391,6 +393,7 @@ fn route(message: &Value, shared: &Shared) {
                     PluginError::Remote {
                         code,
                         message: text,
+                        data: error.get("data").filter(|d| !d.is_null()).cloned(),
                     }
                 })
             } else {

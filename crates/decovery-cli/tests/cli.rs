@@ -651,3 +651,35 @@ fn build_variant_file_may_be_code_page_437() {
     assert_eq!(value["data"]["variants"][0]["verdict"], "identical");
     text.clear();
 }
+
+#[test]
+fn legacy_flags_are_checked_and_missing_setup_is_named() {
+    let python = python_or_skip!();
+    let f = build_fixture::fixture(&python, "");
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_decovery"))
+            .args(args)
+            .arg("--workspace")
+            .arg(f.root())
+            .output()
+            .expect("run decovery")
+    };
+    // the bridge options need `--deep`
+    let out = run(&["diagnose", "sub", "--all"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--deep"));
+    // without [legacy] the step that writes it is named
+    for args in [
+        &["diagnose", "sub", "--deep", "registers"][..],
+        &["search", "sub", "--strategy", "chain", "--minutes", "1"],
+        &["verify", "sub", "--check", "equivalence"],
+    ] {
+        let out = run(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("[legacy] decomp_workspace"),
+            "{args:?}: {stderr}"
+        );
+    }
+}

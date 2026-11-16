@@ -767,7 +767,7 @@ fn check_plugin_name(name: &str) -> Result<(), FacadeError> {
 
 fn plugin_error(name: &str, e: PluginError) -> FacadeError {
     match e {
-        PluginError::Remote { code, message } => {
+        PluginError::Remote { code, message, .. } => {
             FacadeError::Plugin(format!("{name}: {message} (error {code})"))
         }
         other => FacadeError::Plugin(format!("{name}: {other}")),
@@ -837,6 +837,7 @@ mod tests {
             PluginError::Remote {
                 code: -32010,
                 message: "Ghidra unavailable".into(),
+                data: None,
             },
         );
         assert_eq!(

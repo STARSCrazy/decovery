@@ -1,5 +1,8 @@
-//! MCP server of decovery: the nine facade tools (`status`, `find`, `show`, `annotate`, `analyze`, `build`,
-//! `link`, `diagnose`, `detail`) over stdio.
+//! MCP server of decovery: the eleven facade tools (`status`, `find`, `show`, `annotate`, `analyze`, `build`,
+//! `link`, `diagnose`, `search`, `verify`, `detail`) over stdio.
+//!
+//! `diagnose` with `deep`, `search` and `verify` run Decomp's tools through the `decomp-legacy` plugin (ADR 0007);
+//! the server keeps that plugin running between calls, so its Decomp server and Ghidra project stay open.
 //!
 //! The server is a thin adapter. Every call re-opens the session from disk, so knowledge changed by another
 //! writer between calls is seen. Results are the facade envelope as JSON text; facade errors become tool
@@ -10,7 +13,8 @@ use std::path::{Path, PathBuf};
 use decovery_core::{ClaimSource, Confidence};
 use decovery_facade::{
     AnalyzeOptions, AnnotateAction, Annotation, Budget, BuildRequest, DEFAULT_LIMIT, FacadeError,
-    FindQuery, FindWhat, FunctionFilter, FunctionSort, Progress, Response, Session, Variant,
+    FindQuery, FindWhat, FunctionFilter, FunctionSort, LegacyCall, LegacyOperation, Progress,
+    Response, Session, Variant,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -22,11 +26,14 @@ use rmcp::schemars::JsonSchema;
 use rmcp::{Peer, RoleServer, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use serde::Deserialize;
 
-const INSTRUCTIONS: &str = "Nine tools over one decovery workspace (a reverse-engineered executable). Rebuild \
-verdicts (`build`, `link`) are tool findings; names, types and comments are claims with a source and confidence.";
+const INSTRUCTIONS: &str = "Eleven tools over one decovery workspace (a reverse-engineered executable). Rebuild \
+verdicts (`build`, `link`) are tool findings; names, types and comments are claims with a source and confidence. \
+`diagnose` with `deep`, `search` and `verify` use Decomp through the decomp-legacy bridge: its reports are German \
+(`report_language`), its findings are evidence, and only decovery's own build sets verdicts.";
 
-/// Serves the nine tools for the workspace at `root` on stdin/stdout until the client disconnects.
+/// Serves the eleven tools for the workspace at `root` on stdin/stdout until the client disconnects.
 pub fn serve_stdio(root: PathBuf) -> Result<(), FacadeError> {
+    decovery_facade::keep_legacy_plugin(true);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -206,13 +213,90 @@ struct BuildParams {
     budget: Option<usize>,
 }
 
+#[derive(Clone, Copy, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(rename_all = "kebab-case")]
+enum Deep {
+    Context,
+    Structure,
+    Registers,
+    Slots,
+    Joint,
+}
+
+#[derive(Clone, Copy, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(rename_all = "kebab-case")]
+enum Strategy {
+    Chain,
+    Permute,
+    Beam,
+    Forms,
+}
+
+#[derive(Clone, Copy, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(rename_all = "kebab-case")]
+enum Check {
+    Equivalence,
+    Behavior,
+}
+
 #[derive(Deserialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 #[serde(deny_unknown_fields)]
 struct DiagnoseParams {
     /// Rebuilt function: name or address.
     target: String,
-    /// Characters of the instruction pairs returned inline (default 8000); the rest is stored as a handle.
+    /// Characters of the instruction pairs (and of Decomp's report with `deep`) returned inline (default 8000);
+    /// the rest is stored as a handle.
+    budget: Option<usize>,
+    /// Decomp's deeper analysis next to decovery's: `context` (context package), `structure` (structure comparison),
+    /// `registers` (Watcom register allocation), `slots` (stack slots), `joint` (both together). Slow; German report.
+    deep: Option<Deep>,
+    /// With `deep` (`structure`, `registers`, `slots`, `joint`): path of a candidate source of the function to
+    /// analyze instead of the current one.
+    source: Option<String>,
+    /// With `deep = registers`: the full report.
+    all: Option<bool>,
+    /// With `deep = slots`: time budget in minutes.
+    minutes: Option<f64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(deny_unknown_fields)]
+struct SearchParams {
+    /// Function: name or address.
+    target: String,
+    /// Decomp's search: `chain` (search chain), `permute` (permuter), `beam` (beam search), `forms` (form catalogue).
+    strategy: Strategy,
+    /// Time budget in minutes.
+    minutes: Option<f64>,
+    /// Search rounds.
+    rounds: Option<u32>,
+    /// With `strategy = permute`: path of a candidate source of the function to start from.
+    source: Option<String>,
+    /// Write the candidate's function into `src/` when decovery's verdict on it is better (identical, or fewer
+    /// differing instructions), then record it with a normal build. Default false: nothing in `src/` changes.
+    apply: Option<bool>,
+    /// Characters of Decomp's report returned inline (default 8000); the rest is stored as a handle.
+    budget: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(deny_unknown_fields)]
+struct VerifyParams {
+    /// Function: name or address.
+    target: String,
+    /// `equivalence` (static and dynamic equivalence evidence) or `behavior` (recorded and generated cases).
+    check: Check,
+    /// With `check = behavior`: the recorded runtime run to take cases from.
+    run: Option<String>,
+    /// With `check = equivalence`: time budget in minutes.
+    minutes: Option<f64>,
+    /// Characters of Decomp's report returned inline (default 8000); the rest is stored as a handle.
     budget: Option<usize>,
 }
 
@@ -369,12 +453,91 @@ impl Server {
     }
 
     #[tool(
-        description = "Explain why a rebuilt function differs from the original: findings with a suggestion each, the kind of deviation and the instruction pairs side by side. Reads the object of the last `build` of its file; run `build` first."
+        description = "Explain why a rebuilt function differs from the original: findings with a suggestion each, the kind of deviation and the instruction pairs side by side. Reads the object of the last `build` of its file; run `build` first. With `deep`, Decomp's register, stack-slot or structure model of the function comes too (`data.report`, German, `report_language: \"de\"`; decovery's own diagnosis under `data.decovery`); slow, reports progress, needs `decovery setup decomp-legacy`."
     )]
-    async fn diagnose(&self, Parameters(p): Parameters<DiagnoseParams>) -> CallToolResult {
+    async fn diagnose(
+        &self,
+        Parameters(p): Parameters<DiagnoseParams>,
+        meta: RequestMetaObject,
+        peer: Peer<RoleServer>,
+    ) -> CallToolResult {
         let budget = budget(p.budget);
-        self.blocking(move |root| {
-            decovery_facade::diagnose(&Session::open(root)?, &p.target, budget)
+        let Some(deep) = p.deep else {
+            if p.source.is_some() || p.all.is_some() || p.minutes.is_some() {
+                return CallToolResult::error(vec![ContentBlock::text(
+                    "source, all and minutes need deep",
+                )]);
+            }
+            return self
+                .blocking(move |root| {
+                    decovery_facade::diagnose(&Session::open(root)?, &p.target, budget)
+                })
+                .await;
+        };
+        let operation = match deep {
+            Deep::Context => LegacyOperation::Context,
+            Deep::Structure => LegacyOperation::Structure,
+            Deep::Registers => LegacyOperation::Registers,
+            Deep::Slots => LegacyOperation::Slots,
+            Deep::Joint => LegacyOperation::Joint,
+        };
+        let mut call = LegacyCall::new(p.target, operation);
+        call.budget = budget;
+        call.options.source = p.source.map(PathBuf::from);
+        call.options.all = p.all.unwrap_or(false);
+        call.options.minutes = p.minutes;
+        self.with_progress(meta, peer, move |root, progress| {
+            decovery_facade::diagnose_deep(root, &call, progress)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Search a better source for one function with Decomp's search (`chain`, `permute`, `beam`, `forms`; minutes to hours). A candidate it finds is built by decovery as a function-level attempt next to the current source; `data.candidate` has decovery's verdict on both and `improved`. With `apply`, an improved candidate is written into `src/` and recorded; otherwise nothing changes. Decomp's report is German (`report_language`). Reports progress; needs `decovery setup decomp-legacy`."
+    )]
+    async fn search(
+        &self,
+        Parameters(p): Parameters<SearchParams>,
+        meta: RequestMetaObject,
+        peer: Peer<RoleServer>,
+    ) -> CallToolResult {
+        let operation = match p.strategy {
+            Strategy::Chain => LegacyOperation::Chain,
+            Strategy::Permute => LegacyOperation::Permute,
+            Strategy::Beam => LegacyOperation::Beam,
+            Strategy::Forms => LegacyOperation::Forms,
+        };
+        let mut call = LegacyCall::new(p.target, operation);
+        call.budget = budget(p.budget);
+        call.options.minutes = p.minutes;
+        call.options.rounds = p.rounds;
+        call.options.source = p.source.map(PathBuf::from);
+        call.apply = p.apply.unwrap_or(false);
+        self.with_progress(meta, peer, move |root, progress| {
+            decovery_facade::search(root, &call, progress)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Check a rebuilt function's behaviour with Decomp: `equivalence` (static and dynamic evidence) or `behavior` (recorded runtime cases with `run`, and generated ones). The result is evidence with `source: \"decomp\"` (`data.evidence`), never a decovery verdict; nothing is recorded. German report. Slow; reports progress; needs `decovery setup decomp-legacy`."
+    )]
+    async fn verify(
+        &self,
+        Parameters(p): Parameters<VerifyParams>,
+        meta: RequestMetaObject,
+        peer: Peer<RoleServer>,
+    ) -> CallToolResult {
+        let operation = match p.check {
+            Check::Equivalence => LegacyOperation::Equivalence,
+            Check::Behavior => LegacyOperation::Behavior,
+        };
+        let mut call = LegacyCall::new(p.target, operation);
+        call.budget = budget(p.budget);
+        call.options.run = p.run;
+        call.options.minutes = p.minutes;
+        self.with_progress(meta, peer, move |root, progress| {
+            decovery_facade::verify(root, &call, progress)
         })
         .await
     }
