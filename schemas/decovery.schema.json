@@ -60,6 +60,7 @@
         "runners": { "type": "array", "items": { "type": "string" } },
         "tool_dir": { "type": "string" },
         "timeout_s": { "type": "integer", "minimum": 0 },
+        "attempt_budget": { "type": "integer", "minimum": 0 },
         "file_flags": { "type": "object", "additionalProperties": { "type": "string" } },
         "frames": { "type": "object", "additionalProperties": { "type": "string" } }
       }

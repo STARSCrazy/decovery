@@ -2,6 +2,7 @@
 
 pub mod address;
 pub mod analysis;
+pub mod attempts;
 pub mod knowledge;
 pub mod migrate;
 pub mod program;
@@ -10,10 +11,14 @@ pub mod store;
 pub mod user_config;
 pub mod workspace;
 
-pub use address::{Address, AddressError, AddressInput};
+pub use address::{Address, AddressError, AddressInput, address_key};
 pub use analysis::{
     ANALYSIS_DIR, AccessKind, Analysis, AnalysisIndex, AnalyzedFunction, CallEdge, DataAccess,
-    Provider, StringItem, knowledge_hash, today,
+    Provider, StringItem, knowledge_hash, now_utc, today,
+};
+pub use attempts::{
+    ATTEMPTS_DIR, AttemptBudget, AttemptOrigin, AttemptRecord, DEFAULT_ATTEMPT_BUDGET,
+    append_attempts, attempt_budget, attempt_distance, distance_of, read_attempts,
 };
 pub use knowledge::{
     ClaimSource, Confidence, LineComment, LocalVariable, RefutedClaim, Symbol, SymbolKind,

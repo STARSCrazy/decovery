@@ -13,7 +13,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use decovery_core::{Address, Confidence, SymbolKind, Workspace, write_atomic};
+use decovery_core::{
+    Address, Confidence, RebuildResult, SymbolKind, VerdictId, Workspace, distance_of, write_atomic,
+};
 use decovery_plugin::{CallOptions, PluginError, PluginHost, Progress};
 use decovery_toolchain::{definitions, from_cp437, splice_function};
 use serde_json::{Map, Value, json};
@@ -797,34 +799,25 @@ fn definition_of(text: &str, name: &str) -> Option<String> {
 }
 
 /// `true` when `candidate` is better than `current` (variant JSON of `build`): it was compared, has no inline
-/// assembly, and is identical while the current one is not, or differs in fewer instructions.
+/// assembly, and is closer to identical by the one distance of the core (`decovery_core::distance_of`).
 fn better(candidate: &Value, current: &Value) -> bool {
-    let checked = |v: &Value| {
-        matches!(
-            v["verdict"].as_str(),
-            Some("identical" | "equivalent" | "differs")
-        )
+    let distance = |v: &Value| {
+        let verdict = serde_json::from_value::<VerdictId>(v["verdict"].clone()).ok();
+        let differing = v["instructions_differing"]
+            .as_u64()
+            .and_then(|n| u32::try_from(n).ok());
+        // The variant JSON has no Decomp result; only the verdict says whether it was compared.
+        distance_of(RebuildResult::Error, verdict, differing)
     };
     let cheat = candidate["blockers"]
         .as_array()
         .into_iter()
         .flatten()
         .any(|b| b["kind"] == "inline-assembly");
-    if !checked(candidate) || cheat {
+    let Some(candidate) = distance(candidate).filter(|_| !cheat) else {
         return false;
-    }
-    if !checked(current) {
-        return true;
-    }
-    let identical = |v: &Value| v["verdict"] == "identical";
-    if identical(current) {
-        return false;
-    }
-    if identical(candidate) {
-        return true;
-    }
-    let n = |v: &Value| v["instructions_differing"].as_u64().unwrap_or(u64::MAX);
-    n(candidate) < n(current)
+    };
+    distance(current).is_none_or(|current| candidate < current)
 }
 
 fn verdict_text(v: &Value) -> String {
