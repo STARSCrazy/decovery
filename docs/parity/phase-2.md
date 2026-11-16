@@ -90,6 +90,10 @@ now C in their module, and the file name literal of the error report is correcte
 first module identical in decovery too. Against that commit: 618 Decomp identical, 617 confirmed, 1 listed
 deviation (the second module: a literal that the original keeps in a constant section of its own), link identical.
 
+Second follow-up: in Decomp (branch `paritaet-literal`, `ba469d1d`) the module that owns that literal is built
+as a module of its own, as in the original, instead of being included by another source. Against that commit:
+618 Decomp identical, **618 confirmed**, no listed deviation; link identical (618 functions inserted).
+
 **Link.** With WLINK 10.6, the original's linker, run in DOSBox through `dosbox-lab`, the first target links
 **identical** (603 functions inserted, 158 492 bytes; `link_local` now requires it). The order of the fixup records
 matches. The preload flag (0x40) of the four objects is set by WLINK 10.6 only when the response file names a
@@ -99,6 +103,8 @@ the cause inside WLINK is not known (its source is not available here). The prof
 names that system; WLINK 9.5 has no system file and keeps the spelled-out form.
 
 ## Deviation list
+
+None since the second follow-up of the 2026-11-16 refresh (618 of 618 confirmed). The last one, as it stood:
 
 One function of the first target: its bytes equal the original's; one string literal reference is a `data-layout`
 blocker. In the rebuild the literal is an item of the module's constant data, right after the module's other
