@@ -9,11 +9,13 @@
 //!
 //! The workspaces are migrated into temporary directories (the Decomp workspaces are never touched).
 //!
-//! First target: links with WLINK 9.5 (`[rebuild.link] profile = "watcom-9.5"`) after a full `decovery build`
-//! (which keeps the objects the inserts come from, those of the assembler sources included), and checks that every inserted rebuild reproduces the original's
-//! pages: no page and no fixup content may differ. WLINK 9.5 differs from the original's linker in the order of the
-//! fixup records (and possibly object flags), so `differs` is accepted. When WLINK does not run at all, its message
-//! goes to the parity document instead of failing.
+//! First target: links after a full `decovery build` (which keeps the objects the inserts come from, those of the
+//! assembler sources included) with the linker profile `DECOVERY_LINK_PROFILE` (default `watcom-10.6`, the
+//! original's linker, in DOSBox through `dosbox-lab`), and checks that every inserted rebuild reproduces the
+//! original's pages: no page and no fixup content may differ. With `watcom-10.6` the program must be identical.
+//! `watcom-9.5` differs from the original's linker in the order of the fixup records and the objects' preload flag,
+//! so `differs` is accepted there. When WLINK does not run at all, its message goes to the parity document instead
+//! of failing.
 //!
 //! Second target: compiles and links all rebuild sources with TCC/TLINK; `REBUILD.EXE` must equal the original byte
 //! for byte.
@@ -32,10 +34,12 @@ fn first_target_le_link() {
     let to = tempfile::tempdir().unwrap();
     let ws = to.path().join("ws");
     migrate(&from, &ws);
+    let profile =
+        std::env::var("DECOVERY_LINK_PROFILE").unwrap_or_else(|_| "watcom-10.6".to_string());
     edit_config(&ws, |config| {
         set_tool_dir(config, "DECOVERY_TOOLCHAIN_WATCOM95");
         table(table(config, "rebuild"), "link")
-            .insert("profile".into(), toml::Value::String("watcom-9.5".into()));
+            .insert("profile".into(), toml::Value::String(profile.clone()));
     });
 
     let (out, build_ms) = decovery(&["build", "--json"], &ws);
@@ -71,7 +75,7 @@ fn first_target_le_link() {
 
     let result = d["result"].as_str().unwrap_or("");
     let mut body = format!(
-        "WLINK 9.5 (`[rebuild.link] profile = \"watcom-9.5\"`): {result}; inserted {functions} functions, \
+        "`[rebuild.link] profile = \"{profile}\"`: {result}; inserted {functions} functions, \
          {bytes} bytes; link {link_ms} ms wall, timing {}\n",
         d["timing"]
     );
@@ -79,8 +83,13 @@ fn first_target_le_link() {
         body.push_str(&format!("- {line}\n"));
     }
     record_parity("link: first target (LE)", &body);
+    let accepted: &[&str] = if profile == "watcom-10.6" {
+        &["identical"]
+    } else {
+        &["differs", "identical"]
+    };
     assert!(
-        result == "differs" || result == "identical",
+        accepted.contains(&result),
         "link result {result}: {}",
         d["message"].as_str().unwrap_or("")
     );

@@ -650,16 +650,20 @@ pub fn module_name(resident: &str) -> String {
     }
 }
 
-/// The WLINK response file (CRLF lines) linking [`LE_OBJECT_FILE`] into `<name>.exe` with the original's stub. The
-/// 9.5 tree has no `WLSYSTEM.LNK`, so the DOS/4G system is spelled out. `start_option` false: the linker refuses
-/// `option start` (WLINK 9.5 for DOS/4G); the entry point then comes from the module end.
-pub fn response_file(name: &str, start_option: bool) -> String {
-    let mut lines = vec![
-        "format os2 le".to_string(),
-        "option osname='DOS/4G'".to_string(),
-        format!("option stub={LE_STUB_FILE}"),
-        "option nodefaultlibs".to_string(),
-    ];
+/// The WLINK response file (CRLF lines) linking [`LE_OBJECT_FILE`] into `<name>.exe` with the original's stub.
+/// `system`: a system of the linker's system file (`system dos4g`, WLINK 10.6, which marks the objects preload
+/// only then); `None`: the DOS/4G format spelled out (the 9.5 tree has no `WLSYSTEM.LNK`). `start_option` false:
+/// the linker refuses `option start` (WLINK 9.5 for DOS/4G); the entry point then comes from the module end.
+pub fn response_file(name: &str, start_option: bool, system: Option<&str>) -> String {
+    let mut lines = match system {
+        Some(system) => vec![format!("system {system}")],
+        None => vec![
+            "format os2 le".to_string(),
+            "option osname='DOS/4G'".to_string(),
+        ],
+    };
+    lines.push(format!("option stub={LE_STUB_FILE}"));
+    lines.push("option nodefaultlibs".to_string());
     if start_option {
         lines.push(format!("option start={LE_START_SYMBOL}"));
     }
@@ -689,7 +693,7 @@ pub fn link_le(
         path: build_dir.to_path_buf(),
         source,
     })?;
-    let response = response_file(name, linker.start_option);
+    let response = response_file(name, linker.start_option, linker.le_system.as_deref());
     let files: [(String, &[u8]); 3] = [
         (LE_OBJECT_FILE.to_string(), module),
         (LE_STUB_FILE.to_string(), stub),

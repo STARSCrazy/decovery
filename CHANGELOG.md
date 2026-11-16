@@ -19,6 +19,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Compiler profiles name their string-literal sections (`[literals]`); the fill between Watcom's literals is not
   compared (ADR 0006 item 12).
 - Sources in direct subdirectories of `src/`; assembler files marked `decovery: build only` are left out.
+- `[linker] le_system`: the LE response file names a system of the linker's system file (`system dos4g`); the
+  `watcom-10.6` profile uses it, so its LE links carry the preload flag like the original. The first target now links
+  identical with WLINK 10.6 in DOSBox (`dosbox-lab`).
 
 ### Fixed
 - Assembler sources: jump tables in a segment of their own, label offsets in another code segment and functions

@@ -47,6 +47,11 @@ pub struct LinkerSpec {
     /// the entry point then goes into the module end record).
     #[serde(default = "accepts_start_option")]
     pub start_option: bool,
+    /// System of the linker's own system file (`WLSYSTEM.LNK`) named by the LE response file (`system dos4g`)
+    /// instead of spelling the DOS/4G format out; `None`: spelled out (WLINK 9.5 has no system file). WLINK 10.6
+    /// marks the objects preload (flag 0x40) only for a system from its system file.
+    #[serde(default)]
+    pub le_system: Option<String>,
     /// Startup object (name without extension, in `library_dir`) linked when `[rebuild.link] startup` is not
     /// set; `None` when the toolchain has no separate startup object.
     #[serde(default)]

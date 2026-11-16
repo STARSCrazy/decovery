@@ -42,6 +42,8 @@
         },
         "library_dir": { "type": "string" },
         "output": { "type": "string" },
+        "start_option": { "type": "boolean", "description": "Whether the linker accepts option start= for an LE program." },
+        "le_system": { "type": "string", "description": "System of the linker's system file named by the LE response file (system dos4g)." },
         "startup": {
           "type": "string",
           "description": "Startup object in library_dir (name without extension) when [rebuild.link] startup is not set."

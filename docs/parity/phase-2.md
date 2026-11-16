@@ -85,6 +85,14 @@ constant data (`data-layout`). Linking the rebuilt modules would not reproduce t
 `differs` is right, for the same reason as the phase-2 deviation (Decomp does not check unnamed data references).
 The fix is on the source side (the missing literals belong to the module).
 
+**Link.** With WLINK 10.6, the original's linker, run in DOSBox through `dosbox-lab`, the first target links
+**identical** (603 functions inserted, 158 492 bytes; `link_local` now requires it). The order of the fixup records
+matches. The preload flag (0x40) of the four objects is set by WLINK 10.6 only when the response file names a
+system of its `WLSYSTEM.LNK` (`system dos4g`, or `system at_dos4g`); the same directives spelled out, also inside a
+system block of the response file, leave it clear. Measured on Decomp's link module with eight response files;
+the cause inside WLINK is not known (its source is not available here). The profile option `[linker] le_system`
+names that system; WLINK 9.5 has no system file and keeps the spelled-out form.
+
 ## Deviation list
 
 One function of the first target: its bytes equal the original's; one string literal reference is a `data-layout`
