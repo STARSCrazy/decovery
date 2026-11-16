@@ -2,6 +2,7 @@
 
 pub mod address;
 pub mod analysis;
+pub mod archive;
 pub mod attempts;
 pub mod knowledge;
 pub mod migrate;
@@ -15,6 +16,10 @@ pub use address::{Address, AddressError, AddressInput, address_key};
 pub use analysis::{
     ANALYSIS_DIR, AccessKind, Analysis, AnalysisIndex, AnalyzedFunction, CallEdge, DataAccess,
     Provider, StringItem, knowledge_hash, now_utc, today,
+};
+pub use archive::{
+    ARCHIVE_DIR, ARCHIVE_FORMAT, ArchiveEntry, archive_ids_for, archive_load, archive_remove,
+    archive_save,
 };
 pub use attempts::{
     ATTEMPTS_DIR, AttemptBudget, AttemptOrigin, AttemptRecord, DEFAULT_ATTEMPT_BUDGET,
