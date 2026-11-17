@@ -115,6 +115,7 @@ fn idle_driver_is_unsolved_with_start_distance() {
     assert_eq!(run.tasks[0].start_distance, Some(1));
     assert_eq!(run.tasks[0].best_distance, Some(1));
     assert_eq!(run.tasks[0].builds, 0);
+    assert_eq!(run.tasks[0].exit, "ok");
 }
 #[test]
 fn hanging_driver_is_killed_and_evaluated() {
@@ -155,6 +156,7 @@ fn tool_calls_beyond_limit_are_refused() {
         run.tasks[0].tool_calls, 2,
         "refused calls are still logged and counted"
     );
+    assert_eq!(run.tasks[0].exit, "call-limit");
 }
 #[test]
 fn variants_count_as_builds() {
@@ -169,6 +171,7 @@ fn variants_count_as_builds() {
     let run = execute(&c);
     assert_eq!(run.tasks[0].builds, 2);
     assert!(driver_answers(&run).contains("2 of 2 builds used"));
+    assert_eq!(run.tasks[0].exit, "call-limit");
 }
 #[test]
 fn core_tool_set_refuses_bridge_tools() {
@@ -275,4 +278,78 @@ fn run_record_matches_schema() {
     }
     required(&schema, &serde_json::to_value(&run).unwrap());
     assert_eq!(serde_json::to_value(run).unwrap()["schema"], 1);
+}
+
+#[test]
+fn cli_bench_run_uses_the_configured_driver() {
+    let python = python_or_skip!();
+    let c = case(&python, "solve", 1);
+    let appdata = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(appdata.path().join("decovery")).unwrap();
+    let command: Vec<String> = c
+        .driver
+        .command
+        .iter()
+        .map(|a| toml::Value::String(a.clone()).to_string())
+        .collect();
+    let env: Vec<String> = c
+        .driver
+        .env
+        .iter()
+        .map(|(k, v)| format!("{k} = {}", toml::Value::String(v.clone())))
+        .collect();
+    let config = format!(
+        "schema = 1
+[bench]
+copies_dir = {}
+[bench.drivers.fake]
+command = [{}]
+env = {{ {} }}
+",
+        quote(c.options.copies_dir.as_ref().unwrap()),
+        command.join(", "),
+        env.join(", ")
+    );
+    for dir in [
+        appdata.path().join("decovery"),
+        appdata.path().join(".config/decovery"),
+    ] {
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.toml"), &config).unwrap();
+    }
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_decovery"))
+        .env("APPDATA", appdata.path())
+        .env("XDG_CONFIG_HOME", appdata.path().join(".config"))
+        .args(["--json", "bench", "run"])
+        .arg(c.dir.path().join("suite.toml"))
+        .args(["--driver", "fake", "--seed", "5"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let run: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(run["state"], "done");
+    assert_eq!(run["seed"], 5);
+    assert_eq!(run["tasks"][0]["solved"], true);
+    let id = run["id"].as_str().unwrap();
+    assert!(
+        c.dir
+            .path()
+            .join("bench")
+            .join(format!("{id}.json"))
+            .is_file()
+    );
+    let unknown = std::process::Command::new(env!("CARGO_BIN_EXE_decovery"))
+        .env("APPDATA", appdata.path())
+        .env("XDG_CONFIG_HOME", appdata.path().join(".config"))
+        .args(["bench", "run"])
+        .arg(c.dir.path().join("suite.toml"))
+        .args(["--driver", "missing"])
+        .output()
+        .unwrap();
+    assert_eq!(unknown.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&unknown.stderr).contains("missing"));
 }

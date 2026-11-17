@@ -4,7 +4,8 @@ For a job whose last command line ends with `X.C` (any extension) it copies `X.O
 FAKE_OMF_DIR into the C mount (after a `CD D` line: `D.OBJ` into the directory D of the C mount, as `X.OBJ`) and exits 0; without that file it prints an error and exits 1. Every compiled job
 appends its source name to `calls.log` and its `SET TMP=` directory (and whether it exists) to `tmp.log`, every
 call appends its job count to `requests.log` (all in FAKE_OMF_DIR). The staged source of every job is copied to
-`sources/<D>/<X.C>` (`sources/<X.C>` without a `CD` line) in FAKE_OMF_DIR.
+`sources/<D>/<X.C>` (`sources/<X.C>` without a `CD` line) in FAKE_OMF_DIR. With FAKE_OMF_REQUIRED_TEXT set, a
+staged source holding that text is served `X.OBJ` (also in a variant directory) and any other `FALLBACK.OBJ`.
 
 A job whose last command runs TLINK is a link job: its command line is appended to `link.log`, it fails when an
 object of the line is missing in the C mount, else copies `REBUILD.EXE` from FAKE_OMF_DIR into the C mount (exit 0),
@@ -92,8 +93,9 @@ def run_job(job, c_root):
     obj = os.path.join(OBJECTS, (cd or stem) + ".OBJ")
     if os.environ.get("FAKE_OMF_REQUIRED_TEXT") and os.path.isfile(staged):
         with open(staged, encoding="utf-8") as f:
-            if os.environ["FAKE_OMF_REQUIRED_TEXT"] not in f.read():
-                obj = os.path.join(OBJECTS, "FALLBACK.OBJ")
+            # the stem's object when the source holds the text (variants too), else FALLBACK.OBJ
+            found = os.environ["FAKE_OMF_REQUIRED_TEXT"] in f.read()
+            obj = os.path.join(OBJECTS, (stem if found else "FALLBACK") + ".OBJ")
     if not os.path.isfile(obj):
         return {"status": "done", "exit_code": 1, "stdout": f"{source}(1): Error: no object\r\n"}
     shutil.copyfile(obj, os.path.join(c_root, cd or "", stem + ".OBJ"))

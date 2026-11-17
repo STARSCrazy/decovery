@@ -1,7 +1,6 @@
 //! Persistent benchmark records and bounded scheduling of isolated task evaluations.
 use super::{
-    BenchError, DriverConfig, Suite, SuiteTask, ToolSet, canonical, copies_dir, io,
-    prepare_copy,
+    BenchError, DriverConfig, Suite, SuiteTask, ToolSet, canonical, copies_dir, io, prepare_copy,
 };
 use decovery_core::{
     BenchUsage, VerdictId, archive_load, attempt_distance, distance_of, now_utc, read_attempts,
@@ -418,7 +417,7 @@ pub fn run_suite(
                         );
                         let _ = tx.send(result);
                     })
-                    .map_err(|e| io(&logs, e))?;
+                    .map_err(|e| io(logs, e))?;
                 active += 1;
             }
             if active == 0 {
@@ -645,19 +644,21 @@ fn evaluate(
                 if let Ok(entry) = archive_load(&copy.root, id)
                     && entry.meta["address"] == json!(copy.address)
                     && let Some(body) = entry.files.get("function.c")
+                    && let Ok(body) = std::str::from_utf8(body)
                 {
-                    if let Ok(body) = std::str::from_utf8(body) {
-                        let path = copy.root.join("src").join(&copy.file);
-                        let source = std::fs::read_to_string(&path).map_err(|e| io(&path, e))?;
-                        let replacement =
-                            decovery_toolchain::splice_function(&source, &copy.name, body)
-                                .map_err(|e| BenchError::Driver {
-                                    task: task.id.clone(),
-                                    reason: e.to_string(),
-                                })?;
+                    let path = copy.root.join("src").join(&copy.file);
+                    let source = std::fs::read_to_string(&path).map_err(|e| io(&path, e))?;
+                    let replacement = decovery_toolchain::splice_function(
+                        &source, &copy.name, body,
+                    )
+                    .map_err(|e| BenchError::Driver {
+                        task: task.id.clone(),
+                        reason: e.to_string(),
+                    })?;
+                    if replacement != source {
                         super::copy::write(&path, replacement.as_bytes())?;
-                        break;
                     }
+                    break;
                 }
             }
             let (verdict, distance) = build(
@@ -672,6 +673,9 @@ fn evaluate(
             result.best_distance = result.best_distance.into_iter().chain(distance).min();
         }
         let usage = BenchUsage::load(&copy.root)?;
+        if result.exit == "ok" && limit_spent(&copy.root, &usage, suite)? {
+            result.exit = "call-limit".into();
+        }
         result.builds = usage.builds;
         result.searches = usage.searches;
         result.tool_calls = usage.tool_calls;
@@ -713,6 +717,21 @@ fn evaluate(
     }
     result.wall_s = began.elapsed().as_secs_f64();
     result
+}
+
+/// The agent ended after the endpoint refused a call while one of its limits was spent.
+fn limit_spent(root: &Path, usage: &BenchUsage, suite: &Suite) -> Result<bool, BenchError> {
+    let d = &suite.defaults;
+    let spent = usage.tool_calls >= d.max_tool_calls
+        || usage.builds >= d.max_builds
+        || (d.max_searches > 0 && usage.searches >= d.max_searches);
+    if !spent {
+        return Ok(false);
+    }
+    let (calls, _) = decovery_core::calls::read_calls(root)?;
+    Ok(calls
+        .iter()
+        .any(|c| c.outcome == "refused" && c.actor.as_deref() != Some("bench-harness")))
 }
 
 fn build(

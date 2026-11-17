@@ -269,6 +269,49 @@ enum Command {
         #[command(subcommand)]
         what: SetupCommand,
     },
+    /// Agent benchmarks over solution-free copies of solved functions (ADR 0009).
+    Bench {
+        #[command(subcommand)]
+        what: BenchCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum BenchCommand {
+    /// Run a suite with a driver from the user config (`[bench.drivers.<name>]`); writes the run record to
+    /// `<suite dir>/bench/<run-id>.json`. Exit code 0 when the run is done, 1 when it is paused or stopped at
+    /// a limit, 2 on errors. Progress goes to stderr.
+    Run {
+        /// Suite file (`suite.toml`).
+        suite: PathBuf,
+        /// Driver name in the user config.
+        #[arg(long)]
+        driver: String,
+        /// Tasks run at a time.
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
+        parallel: u32,
+        /// Seed passed to the driver.
+        #[arg(long, default_value_t = 0)]
+        seed: u64,
+        /// Runs of every task.
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
+        repeat: u32,
+        /// Run only these task ids.
+        #[arg(long, num_args = 1..)]
+        only: Vec<String>,
+        /// Start no further task once the finished tasks used this many tokens.
+        #[arg(long)]
+        max_total_tokens: Option<u64>,
+        /// Start no further task once the finished tasks cost this many US dollars.
+        #[arg(long)]
+        max_total_cost_usd: Option<f64>,
+        /// Continue a paused or stopped run with this id.
+        #[arg(long, value_name = "RUN")]
+        resume: Option<String>,
+        /// Keep the task copies.
+        #[arg(long)]
+        keep: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -425,7 +468,8 @@ fn call_record(command: &Command) -> Option<CallRecord> {
         Command::Migrate { .. }
         | Command::MigrateAttempts { .. }
         | Command::Mcp { .. }
-        | Command::Setup { .. } => return None,
+        | Command::Setup { .. }
+        | Command::Bench { .. } => return None,
         Command::Compare { function, .. } => ("compare", Some(function), None),
         Command::Show { target } => ("show", Some(target), None),
         Command::Diagnose { target, deep, .. } => (
@@ -752,6 +796,38 @@ fn run(cli: Cli) -> ExitCode {
             offset,
             limit,
         } => finish(detail(&cli.workspace, &handle, offset, limit, cli.json)),
+        Command::Bench {
+            what:
+                BenchCommand::Run {
+                    suite,
+                    driver,
+                    parallel,
+                    seed,
+                    repeat,
+                    only,
+                    max_total_tokens,
+                    max_total_cost_usd,
+                    resume,
+                    keep,
+                },
+        } => {
+            let mut options = match std::env::current_exe() {
+                Ok(exe) => decovery_bench::RunOptions::new(driver, exe),
+                Err(e) => {
+                    eprintln!("error: cannot locate the decovery executable: {e}");
+                    return ExitCode::from(2);
+                }
+            };
+            options.parallel = parallel as usize;
+            options.seed = seed;
+            options.repeat = repeat;
+            options.only = only;
+            options.max_total_tokens = max_total_tokens;
+            options.max_total_cost_usd = max_total_cost_usd;
+            options.resume = resume;
+            options.keep = keep;
+            bench_run(&suite, &options, cli.json)
+        }
         Command::Mcp { limits } => {
             finish(decovery_mcp::serve_stdio_with_limits(cli.workspace, limits))
         }
@@ -803,6 +879,64 @@ fn run(cli: Cli) -> ExitCode {
         Command::Setup {
             what: SetupCommand::Toolchain { profile, dir },
         } => finish(setup_toolchain(&profile, &dir, cli.json)),
+    }
+}
+
+/// `bench run`: the record as JSON or one line per task, exit 0 only for a finished run.
+fn bench_run(suite: &Path, options: &decovery_bench::RunOptions, json: bool) -> ExitCode {
+    let result = (|| -> Result<decovery_bench::RunRecord, String> {
+        let suite = decovery_bench::read_suite(suite).map_err(|e| e.to_string())?;
+        let user = decovery_core::read_user_config().map_err(|e| e.to_string())?;
+        let driver = user.bench.drivers.get(&options.driver).ok_or_else(|| {
+            format!(
+                "unknown driver `{}`: add [bench.drivers.{}] to the user config",
+                options.driver, options.driver
+            )
+        })?;
+        decovery_bench::run_suite(&suite, driver, options, &|p: Progress| {
+            if let Some(message) = &p.message {
+                eprintln!("{} of {}: {message}", p.done, p.total.unwrap_or(0));
+            }
+        })
+        .map_err(|e| e.to_string())
+    })();
+    let run = match result {
+        Ok(run) => run,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    if json {
+        match serde_json::to_string_pretty(&run) {
+            Ok(text) => println!("{text}"),
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    } else {
+        for t in &run.tasks {
+            println!(
+                "{} #{}: {} ({}), builds {}, calls {}, best distance {}",
+                t.id,
+                t.repeat,
+                if t.solved { "solved" } else { "unsolved" },
+                t.exit,
+                t.builds,
+                t.tool_calls,
+                t.best_distance.map_or("-".into(), |d| d.to_string())
+            );
+        }
+        println!(
+            "run {}: {}, {} of {} solved",
+            run.id, run.state, run.totals.solved, run.totals.tasks
+        );
+    }
+    if run.state == "done" {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
     }
 }
 
