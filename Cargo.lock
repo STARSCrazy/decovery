@@ -333,6 +333,7 @@ dependencies = [
 name = "decovery-diff"
 version = "0.2.0"
 dependencies = [
+ "blake3",
  "decovery-core",
  "decovery-loaders",
  "decovery-objects",
