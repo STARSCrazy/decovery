@@ -38,4 +38,4 @@ Task 3: dispatched (BASE 505dd60, implementer a619979cd1ea153b6, opus)
 - Owner 2026-11-16 evening: stop after running subagents finish; start nothing new. Resume point: Task 3 review (BASE 505dd60) once implementer reported.
 Task 3: implemented e1ae436 (DONE_WITH_CONCERNS: per-function archiving on first full build; --apply single record via key skip; default actor `library` -> Task 6 must set bench actor and budget rule check; refused detection via rmcp error prefix; last-line lookup reads whole shard; no CallRecord schema). NOT YET REVIEWED.
 STOPPED here on owner's request. Resume: generate review package 505dd60..e1ae436, dispatch Task 3 reviewer, then Task 4.
-2026-11-17: branch pushed to GitHub (origin/phase-3-build) with this SDD folder force-added, to continue on another machine. Owner direction: favour Tasks 1-4 and 12-13 for Wizardry 7 speed/cost, bench probe later (not yet decided in an ADR).
+2026-11-17: branch pushed to GitHub (origin/phase-3-build) with this SDD folder force-added, to continue on another machine. Proposal (not decided by owner): favour Tasks 1-4 and 12-13 for Wizardry 7 speed/cost, bench probe later.
