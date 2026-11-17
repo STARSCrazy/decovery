@@ -1,0 +1,951 @@
+# Review package: 521291b..HEAD
+
+## Commits
+006d8d2 feat(core): attempt records with a budget rule
+
+## Files changed
+ crates/decovery-core/src/address.rs        |  42 ++++
+ crates/decovery-core/src/analysis.rs       |  33 ++-
+ crates/decovery-core/src/attempts.rs       | 322 +++++++++++++++++++++++++++++
+ crates/decovery-core/src/lib.rs            |   9 +-
+ crates/decovery-core/src/workspace.rs      |   3 +
+ crates/decovery-core/tests/attempts.rs     | 222 ++++++++++++++++++++
+ crates/decovery-facade/src/tools/legacy.rs |  35 ++--
+ schemas/attempt.schema.json                |  32 +++
+ schemas/decovery.schema.json               |   1 +
+ 9 files changed, 670 insertions(+), 29 deletions(-)
+
+## Diff
+diff --git a/crates/decovery-core/src/address.rs b/crates/decovery-core/src/address.rs
+index 18dba2c..c792165 100644
+--- a/crates/decovery-core/src/address.rs
++++ b/crates/decovery-core/src/address.rs
+@@ -74,20 +74,36 @@ impl Address {
+ impl fmt::Display for Address {
+     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+         match *self {
+             Address::Flat(a) => write!(f, "flat:{a:08X}"),
+             Address::Seg { seg, off } => write!(f, "seg:{seg:04X}:{off:04X}"),
+             Address::Sel { segment, off } => write!(f, "sel:{segment:04X}:{off:08X}"),
+         }
+     }
+ }
+ 
++/// A file-name-safe key of any address kind: the canonical text with every character outside `[A-Za-z0-9_-]`
++/// replaced by `_` (`flat_00012340`, `seg_0000_01FA`).
++pub fn address_key(address: Address) -> String {
++    address
++        .to_string()
++        .chars()
++        .map(|c| {
++            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
++                c
++            } else {
++                '_'
++            }
++        })
++        .collect()
++}
++
+ fn hex<T: TryFrom<u64>>(text: &str, max_digits: usize, whole: &str) -> Result<T, AddressError> {
+     let syntax = || AddressError::Syntax(whole.to_string());
+     if text.is_empty() || text.len() > max_digits || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+         return Err(syntax());
+     }
+     let value = u64::from_str_radix(text, 16).map_err(|_| syntax())?;
+     T::try_from(value).map_err(|_| syntax())
+ }
+ 
+ impl FromStr for Address {
+@@ -146,20 +162,46 @@ impl Serialize for Address {
+ 
+ impl<'de> Deserialize<'de> for Address {
+     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+         let text = String::deserialize(deserializer)?;
+         text.parse().map_err(serde::de::Error::custom)
+     }
+ }
+ 
+ #[cfg(test)]
+ mod tests {
++    #[test]
++    fn address_key_covers_every_address_kind() {
++        // An exhaustive match: a new address kind fails to compile here until it gets a sample and a key.
++        let sample = |kind: &Address| match kind {
++            Address::Flat(_) => Address::Flat(0x12340),
++            Address::Seg { .. } => Address::Seg { seg: 0, off: 0x1FA },
++            Address::Sel { .. } => Address::Sel {
++                segment: 7,
++                off: 0x1234,
++            },
++        };
++        let kinds = [
++            Address::Flat(0),
++            Address::Seg { seg: 0, off: 0 },
++            Address::Sel { segment: 0, off: 0 },
++        ];
++        let keys: Vec<String> = kinds
++            .iter()
++            .map(|k| super::address_key(sample(k)))
++            .collect();
++        assert_eq!(
++            keys,
++            ["flat_00012340", "seg_0000_01FA", "sel_0007_00001234"]
++        );
++    }
++
+     use super::*;
+ 
+     #[test]
+     fn round_trips_all_forms() {
+         for text in ["flat:0001A2B0", "seg:1234:0010", "sel:0007:00001234"] {
+             let address: Address = text.parse().unwrap();
+             assert_eq!(address.to_string(), text);
+         }
+     }
+ 
+diff --git a/crates/decovery-core/src/analysis.rs b/crates/decovery-core/src/analysis.rs
+index e809e4a..aa262a1 100644
+--- a/crates/decovery-core/src/analysis.rs
++++ b/crates/decovery-core/src/analysis.rs
+@@ -331,38 +331,59 @@ impl<'a> AnalysisIndex<'a> {
+     pub fn strings_used_by(&self, f: Address) -> Vec<&'a StringItem> {
+         self.strings.get(&f).cloned().unwrap_or_default()
+     }
+ 
+     /// Data accesses of `f`, in stored order.
+     pub fn accesses_of(&self, f: Address) -> &[&'a DataAccess] {
+         self.accesses.get(&f).map_or(&[], Vec::as_slice)
+     }
+ }
+ 
+-/// Today's date (UTC) as `YYYY-MM-DD`; the `created` date of an analysis and the date of history entries.
+-pub fn today() -> String {
+-    let days = SystemTime::now()
+-        .duration_since(UNIX_EPOCH)
+-        .map_or(0, |d| d.as_secs() / 86_400) as i64;
+-    // Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm).
++/// Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm).
++fn civil_from_days(days: i64) -> (i64, i64, i64) {
+     let z = days + 719_468;
+     let era = z.div_euclid(146_097);
+     let doe = z.rem_euclid(146_097);
+     let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+     let mp = (5 * doy + 2) / 153;
+     let day = doy - (153 * mp + 2) / 5 + 1;
+     let month = if mp < 10 { mp + 3 } else { mp - 9 };
+     let year = yoe + era * 400 + i64::from(month <= 2);
++    (year, month, day)
++}
++
++fn unix_seconds() -> u64 {
++    SystemTime::now()
++        .duration_since(UNIX_EPOCH)
++        .map_or(0, |d| d.as_secs())
++}
++
++/// Today's date (UTC) as `YYYY-MM-DD`; the `created` date of an analysis and the date of history entries.
++pub fn today() -> String {
++    let (year, month, day) = civil_from_days((unix_seconds() / 86_400) as i64);
+     format!("{year:04}-{month:02}-{day:02}")
+ }
+ 
++/// The current time (UTC) as RFC 3339 to the second, `2026-11-17T08:15:02Z`; the one time format written to disk.
++pub fn now_utc() -> String {
++    let secs = unix_seconds();
++    let (year, month, day) = civil_from_days((secs / 86_400) as i64);
++    let rest = secs % 86_400;
++    format!(
++        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
++        rest / 3_600,
++        rest % 3_600 / 60,
++        rest % 60
++    )
++}
++
+ /// blake3 (hex) over `symbols.toml`, `types.h` and `references.toml`.
+ ///
+ /// Each file contributes its name, a presence byte and its length-prefixed content, in that fixed order.
+ pub fn knowledge_hash(root: &Path) -> Result<String, WorkspaceError> {
+     let mut hasher = blake3::Hasher::new();
+     for name in [SYMBOLS_FILE, TYPES_FILE, REFERENCES_FILE] {
+         let path = root.join(name);
+         let content = match std::fs::read(&path) {
+             Ok(bytes) => Some(bytes),
+             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+diff --git a/crates/decovery-core/src/attempts.rs b/crates/decovery-core/src/attempts.rs
+new file mode 100644
+index 0000000..fe88a33
+--- /dev/null
++++ b/crates/decovery-core/src/attempts.rs
+@@ -0,0 +1,322 @@
++//! Attempt records: one line per build of a function, kept per function under `cache/attempts/` (design 6).
++//!
++//! The archive of attempts is the base of `history`, the parked filter, the migration of Decomp's memory and the
++//! bench. Records are appended under one lock; a function's shard is a JSON-lines file named by [`address_key`].
++
++use std::collections::{BTreeMap, HashSet};
++use std::fs::{OpenOptions, TryLockError};
++use std::io::{Read, Seek, SeekFrom, Write};
++use std::path::{Path, PathBuf};
++use std::time::{Duration, Instant};
++
++use serde::{Deserialize, Serialize};
++
++use crate::address::{Address, address_key};
++use crate::analysis::now_utc;
++use crate::records::{RebuildResult, VerdictId};
++use crate::workspace::{SCHEMA, WorkspaceError};
++
++/// Directory of the attempt shards, relative to the workspace root.
++pub const ATTEMPTS_DIR: &str = "cache/attempts";
++/// Own attempts without progress after which a function is parked (`[rebuild] attempt_budget` overrides).
++pub const DEFAULT_ATTEMPT_BUDGET: u32 = 30;
++const LOCK_NAME: &str = ".lock";
++const LOCK_WAIT: Duration = Duration::from_secs(10);
++const POLL: Duration = Duration::from_millis(20);
++/// Actor of the bench harness's own builds; they never count toward the budget (the agent must not be charged).
++const HARNESS_ACTOR: &str = "bench-harness";
++
++/// Where an attempt came from.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
++#[serde(rename_all = "kebab-case")]
++#[non_exhaustive]
++pub enum AttemptOrigin {
++    /// A build of the function's current source.
++    Build,
++    /// A variant text supplied by the caller (an agent's own rewrite). Automatic variants are `Search`.
++    Variant,
++    /// A build driven from a whole-function call.
++    Function,
++    /// An automatic search (transformations, permuter, ...).
++    Search,
++    /// A bench harness build.
++    Bench,
++    /// Imported from another tool's memory.
++    Migrate,
++}
++
++/// One attempt to rebuild a function.
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++#[non_exhaustive]
++pub struct AttemptRecord {
++    pub schema: u32,
++    /// RFC 3339 UTC, to the second.
++    pub time: String,
++    pub address: Address,
++    pub name: String,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub file: Option<String>,
++    pub origin: AttemptOrigin,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub label: Option<String>,
++    /// Who made the attempt: `cli`, `mcp` (the agent's callers), `bench-harness`, `bench:<run-id>` or `migrate`.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub actor: Option<String>,
++    pub profile: String,
++    pub flags: String,
++    /// `<algo>:<hex>` of the function's definition text with LF line ends; native records write `blake3:<hex>`,
++    /// migrated ones keep the algorithm of their source (`decomp-sha256:...`).
++    pub body_hash: String,
++    /// blake3 hex over the rest of the file, the headers and the tool fingerprint.
++    pub context_hash: String,
++    /// blake3 hex of the original function bytes.
++    pub original_hash: String,
++    pub result: RebuildResult,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub verdict: Option<VerdictId>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub instructions_differing: Option<u32>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub bytes_differing: Option<u32>,
++    #[serde(default, skip_serializing_if = "Vec::is_empty")]
++    pub blockers: Vec<String>,
++    #[serde(default, skip_serializing_if = "Vec::is_empty")]
++    pub diagnosis: Vec<String>,
++    /// Name of the archived source of this attempt, when one was kept.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub archive: Option<String>,
++    #[serde(flatten)]
++    pub extra: serde_json::Map<String, serde_json::Value>,
++}
++
++impl AttemptRecord {
++    /// A record at the current time with the optional parts empty; fill the public fields that are known.
++    pub fn new(
++        address: Address,
++        name: impl Into<String>,
++        origin: AttemptOrigin,
++        result: RebuildResult,
++    ) -> Self {
++        AttemptRecord {
++            schema: SCHEMA,
++            time: now_utc(),
++            address,
++            name: name.into(),
++            file: None,
++            origin,
++            label: None,
++            actor: None,
++            profile: String::new(),
++            flags: String::new(),
++            body_hash: String::new(),
++            context_hash: String::new(),
++            original_hash: String::new(),
++            result,
++            verdict: None,
++            instructions_differing: None,
++            bytes_differing: None,
++            blockers: Vec::new(),
++            diagnosis: Vec::new(),
++            archive: None,
++            extra: serde_json::Map::new(),
++        }
++    }
++
++    /// Whether this attempt is one of the agent's own and counts toward the budget: origin `build` or `function`,
++    /// and `variant` only when a caller (`cli`, `mcp`) supplied it; `search`, `bench` and `migrate` never count,
++    /// nor does anything made by the bench harness itself.
++    pub fn counts_toward_budget(&self) -> bool {
++        let actor = self.actor.as_deref();
++        if actor == Some(HARNESS_ACTOR) {
++            return false;
++        }
++        match self.origin {
++            AttemptOrigin::Build | AttemptOrigin::Function => true,
++            AttemptOrigin::Variant => matches!(actor, Some("cli" | "mcp")),
++            AttemptOrigin::Search | AttemptOrigin::Bench | AttemptOrigin::Migrate => false,
++        }
++    }
++}
++
++fn io_error(path: &Path, source: std::io::Error) -> WorkspaceError {
++    WorkspaceError::Io {
++        path: path.to_path_buf(),
++        source,
++    }
++}
++
++fn shard_path(root: &Path, address: Address) -> PathBuf {
++    root.join(ATTEMPTS_DIR)
++        .join(format!("{}.jsonl", address_key(address)))
++}
++
++/// Appends `records` to the shards of their functions. Takes the lock `cache/attempts/.lock` (waits up to 10 s)
++/// and writes each shard's new lines with one `write_all`.
++pub fn append_attempts(root: &Path, records: &[AttemptRecord]) -> Result<(), WorkspaceError> {
++    if records.is_empty() {
++        return Ok(());
++    }
++    let dir = root.join(ATTEMPTS_DIR);
++    std::fs::create_dir_all(&dir).map_err(|e| io_error(&dir, e))?;
++    let mut shards: BTreeMap<Address, Vec<u8>> = BTreeMap::new();
++    for record in records {
++        let line = serde_json::to_string(record).map_err(|e| WorkspaceError::Json {
++            path: shard_path(root, record.address),
++            source: Box::new(e),
++        })?;
++        let buffer = shards.entry(record.address).or_default();
++        buffer.extend_from_slice(line.as_bytes());
++        buffer.push(b'\n');
++    }
++    let lock_path = dir.join(LOCK_NAME);
++    let lock = OpenOptions::new()
++        .read(true)
++        .write(true)
++        .create(true)
++        .truncate(false)
++        .open(&lock_path)
++        .map_err(|e| io_error(&lock_path, e))?;
++    let start = Instant::now();
++    loop {
++        match lock.try_lock() {
++            Ok(()) => break,
++            Err(TryLockError::WouldBlock) => {
++                if start.elapsed() >= LOCK_WAIT {
++                    return Err(WorkspaceError::Locked { pid: 0 });
++                }
++                std::thread::sleep(POLL);
++            }
++            Err(TryLockError::Error(e)) => return Err(io_error(&lock_path, e)),
++        }
++    }
++    for (address, mut bytes) in shards {
++        let path = shard_path(root, address);
++        let mut file = OpenOptions::new()
++            .read(true)
++            .append(true)
++            .create(true)
++            .open(&path)
++            .map_err(|e| io_error(&path, e))?;
++        // A torn last line (a crash mid-write) must not swallow the first new record.
++        let length = file.metadata().map_err(|e| io_error(&path, e))?.len();
++        if length > 0 {
++            let mut last = [0u8; 1];
++            file.seek(SeekFrom::End(-1))
++                .and_then(|_| file.read_exact(&mut last))
++                .map_err(|e| io_error(&path, e))?;
++            if last[0] != b'\n' {
++                bytes.insert(0, b'\n');
++            }
++        }
++        file.write_all(&bytes).map_err(|e| io_error(&path, e))?;
++    }
++    Ok(())
++}
++
++/// Reads the attempts of one function, oldest first, and warnings for lines that could not be read (the file and
++/// line are named). A missing shard is an empty list.
++pub fn read_attempts(
++    root: &Path,
++    address: Address,
++) -> Result<(Vec<AttemptRecord>, Vec<String>), WorkspaceError> {
++    let path = shard_path(root, address);
++    let bytes = match std::fs::read(&path) {
++        Ok(bytes) => bytes,
++        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), Vec::new())),
++        Err(e) => return Err(io_error(&path, e)),
++    };
++    let text = String::from_utf8_lossy(&bytes);
++    let mut records = Vec::new();
++    let mut warnings = Vec::new();
++    for (index, line) in text.lines().enumerate() {
++        if line.trim().is_empty() {
++            continue;
++        }
++        let place = format!("{}:{}", path.display(), index + 1);
++        match serde_json::from_str::<AttemptRecord>(line) {
++            Ok(record) if record.schema == SCHEMA => records.push(record),
++            Ok(record) => warnings.push(format!(
++                "{place}: skipped, unsupported schema {} (expected {SCHEMA})",
++                record.schema
++            )),
++            Err(e) => warnings.push(format!("{place}: skipped, {e}")),
++        }
++    }
++    Ok((records, warnings))
++}
++
++/// How far a compared attempt is from identical: 0 identical, else the instructions that differ (the largest
++/// number when that count is unknown). `None` when the attempt was not compared (`error` or an unknown value).
++///
++/// This is the one meaning of "better" in decovery: smaller is better, `None` is worse than any number.
++pub fn distance_of(
++    result: RebuildResult,
++    verdict: Option<VerdictId>,
++    instructions_differing: Option<u32>,
++) -> Option<u64> {
++    let compared = match verdict {
++        Some(VerdictId::Identical) => return Some(0),
++        Some(VerdictId::Equivalent | VerdictId::Differs) => true,
++        Some(VerdictId::Unchecked | VerdictId::Other) => false,
++        None => match result {
++            RebuildResult::Identical => return Some(0),
++            RebuildResult::Differs => true,
++            RebuildResult::Error | RebuildResult::Other => false,
++        },
++    };
++    compared.then(|| instructions_differing.map_or(u64::MAX, u64::from))
++}
++
++/// [`distance_of`] for an attempt record.
++pub fn attempt_distance(r: &AttemptRecord) -> Option<u64> {
++    distance_of(r.result, r.verdict, r.instructions_differing)
++}
++
++/// Where a function stands against its attempt budget.
++#[derive(Debug, Clone, PartialEq, Eq)]
++#[non_exhaustive]
++pub struct AttemptBudget {
++    /// Own attempts counted (distinct bodies, compared).
++    pub own: u32,
++    /// Own attempts since the best distance last improved.
++    pub since_progress: u32,
++    /// The best distance so far.
++    pub best: Option<u64>,
++    pub limit: u32,
++}
++
++impl AttemptBudget {
++    /// Not identical, and the limit of attempts without progress is reached.
++    pub fn parked(&self) -> bool {
++        self.best != Some(0) && self.since_progress >= self.limit
++    }
++}
++
++/// The budget of a function from its attempts (oldest first). Counted are own attempts
++/// ([`AttemptRecord::counts_toward_budget`]) that were compared, each `body_hash` once; a new best distance resets
++/// `since_progress`, any other attempt adds one.
++pub fn attempt_budget(records: &[AttemptRecord], limit: u32) -> AttemptBudget {
++    let mut seen = HashSet::new();
++    let mut budget = AttemptBudget {
++        own: 0,
++        since_progress: 0,
++        best: None,
++        limit,
++    };
++    for record in records {
++        let Some(distance) = attempt_distance(record) else {
++            continue;
++        };
++        if !record.counts_toward_budget() || !seen.insert(record.body_hash.as_str()) {
++            continue;
++        }
++        budget.own += 1;
++        if budget.best.is_none_or(|best| distance < best) {
++            budget.best = Some(distance);
++            budget.since_progress = 0;
++        } else {
++            budget.since_progress += 1;
++        }
++    }
++    budget
++}
+diff --git a/crates/decovery-core/src/lib.rs b/crates/decovery-core/src/lib.rs
+index d649be6..018fd5b 100644
+--- a/crates/decovery-core/src/lib.rs
++++ b/crates/decovery-core/src/lib.rs
+@@ -1,26 +1,31 @@
+ //! Core model of decovery: addresses, programs, knowledge and workspaces.
+ 
+ pub mod address;
+ pub mod analysis;
++pub mod attempts;
+ pub mod knowledge;
+ pub mod migrate;
+ pub mod program;
+ pub mod records;
+ pub mod store;
+ pub mod user_config;
+ pub mod workspace;
+ 
+-pub use address::{Address, AddressError, AddressInput};
++pub use address::{Address, AddressError, AddressInput, address_key};
+ pub use analysis::{
+     ANALYSIS_DIR, AccessKind, Analysis, AnalysisIndex, AnalyzedFunction, CallEdge, DataAccess,
+-    Provider, StringItem, knowledge_hash, today,
++    Provider, StringItem, knowledge_hash, now_utc, today,
++};
++pub use attempts::{
++    ATTEMPTS_DIR, AttemptBudget, AttemptOrigin, AttemptRecord, DEFAULT_ATTEMPT_BUDGET,
++    append_attempts, attempt_budget, attempt_distance, distance_of, read_attempts,
+ };
+ pub use knowledge::{
+     ClaimSource, Confidence, LineComment, LocalVariable, RefutedClaim, Symbol, SymbolKind,
+     SymbolsFile,
+ };
+ pub use migrate::{MigrateError, MigrationReport, migrate_decomp};
+ pub use program::{
+     ArchMode, ExecutableFormat, Permissions, Program, Region, RelocKind, Relocation,
+ };
+ pub use records::{
+diff --git a/crates/decovery-core/src/workspace.rs b/crates/decovery-core/src/workspace.rs
+index 91809a6..0165cde 100644
+--- a/crates/decovery-core/src/workspace.rs
++++ b/crates/decovery-core/src/workspace.rs
+@@ -239,20 +239,23 @@ pub struct RebuildConfig {
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub link: Option<LinkConfig>,
+     /// Runner ids to try in order; empty = the profile's own list.
+     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+     pub runners: Vec<String>,
+     /// Directory of the compiler; overrides the user config `[toolchains]` entry. Relative to the workspace root.
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub tool_dir: Option<String>,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub timeout_s: Option<u32>,
++    /// Own attempts without progress after which a function counts as parked (default 30).
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub attempt_budget: Option<u32>,
+     /// Extra compiler flags per source file name.
+     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+     pub file_flags: BTreeMap<String, String>,
+     /// Frame (stack segment) bases by name.
+     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+     pub frames: BTreeMap<String, Address>,
+ }
+ 
+ /// Linker settings of a rebuild.
+ #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+diff --git a/crates/decovery-core/tests/attempts.rs b/crates/decovery-core/tests/attempts.rs
+new file mode 100644
+index 0000000..4ca1365
+--- /dev/null
++++ b/crates/decovery-core/tests/attempts.rs
+@@ -0,0 +1,222 @@
++use std::path::Path;
++
++use decovery_core::{
++    ATTEMPTS_DIR, Address, AttemptOrigin, AttemptRecord, RebuildResult, VerdictId, address_key,
++    append_attempts, attempt_budget, attempt_distance, now_utc, read_attempts,
++};
++
++fn record(
++    address: Address,
++    hash: &str,
++    result: RebuildResult,
++    differing: Option<u32>,
++) -> AttemptRecord {
++    let mut r = AttemptRecord::new(address, "f", AttemptOrigin::Build, result);
++    r.body_hash = hash.to_string();
++    r.actor = Some("cli".to_string());
++    r.instructions_differing = differing;
++    r
++}
++
++fn flat(a: u32) -> Address {
++    Address::Flat(a)
++}
++
++#[test]
++fn append_then_read_round_trips_unknown_keys() {
++    let dir = tempfile::tempdir().unwrap();
++    let mut r = record(flat(0x12340), "blake3:aa", RebuildResult::Differs, Some(3));
++    r.extra
++        .insert("future".into(), serde_json::json!({"k": [1, 2]}));
++    r.label = Some("first".into());
++    r.blockers = vec!["inline-assembly".into()];
++    append_attempts(dir.path(), std::slice::from_ref(&r)).unwrap();
++    let (back, warnings) = read_attempts(dir.path(), flat(0x12340)).unwrap();
++    assert!(warnings.is_empty());
++    assert_eq!(back, vec![r]);
++    assert!(
++        dir.path()
++            .join(ATTEMPTS_DIR)
++            .join("flat_00012340.jsonl")
++            .is_file()
++    );
++    // A missing shard is empty.
++    assert!(read_attempts(dir.path(), flat(1)).unwrap().0.is_empty());
++}
++
++#[test]
++fn shards_are_per_function() {
++    let dir = tempfile::tempdir().unwrap();
++    let a = record(flat(1), "blake3:a", RebuildResult::Differs, Some(1));
++    let b = record(
++        Address::Seg { seg: 0, off: 0x1FA },
++        "blake3:b",
++        RebuildResult::Differs,
++        Some(1),
++    );
++    append_attempts(dir.path(), &[a.clone(), b.clone()]).unwrap();
++    assert_eq!(read_attempts(dir.path(), flat(1)).unwrap().0, vec![a]);
++    assert_eq!(read_attempts(dir.path(), b.address).unwrap().0, vec![b]);
++    assert!(
++        dir.path()
++            .join(ATTEMPTS_DIR)
++            .join("seg_0000_01FA.jsonl")
++            .is_file()
++    );
++}
++
++// The exhaustive per-variant check lives in `address.rs` (an in-crate `match` without a wildcard).
++#[test]
++fn address_key_covers_every_address_kind() {
++    assert_eq!(address_key(flat(0x12340)), "flat_00012340");
++    assert_eq!(
++        address_key(Address::Seg { seg: 0, off: 0x1FA }),
++        "seg_0000_01FA"
++    );
++    assert_eq!(
++        address_key(Address::Sel {
++            segment: 7,
++            off: 0x1234
++        }),
++        "sel_0007_00001234"
++    );
++}
++
++#[test]
++fn concurrent_appends_keep_every_line() {
++    let dir = tempfile::tempdir().unwrap();
++    let root: &Path = dir.path();
++    std::thread::scope(|scope| {
++        for t in 0..8u32 {
++            scope.spawn(move || {
++                for i in 0..50u32 {
++                    let hash = format!("blake3:{t}-{i}");
++                    let a = record(flat(1), &hash, RebuildResult::Differs, Some(1));
++                    if t % 2 == 0 {
++                        append_attempts(root, &[a]).unwrap();
++                    } else {
++                        let b = record(flat(2), &hash, RebuildResult::Differs, Some(1));
++                        append_attempts(root, &[a, b]).unwrap();
++                    }
++                }
++            });
++        }
++    });
++    let (one, w1) = read_attempts(root, flat(1)).unwrap();
++    let (two, w2) = read_attempts(root, flat(2)).unwrap();
++    assert!(w1.is_empty() && w2.is_empty());
++    assert_eq!(one.len(), 8 * 50);
++    assert_eq!(two.len(), 4 * 50);
++}
++
++#[test]
++fn torn_last_line_is_skipped() {
++    let dir = tempfile::tempdir().unwrap();
++    let r = record(flat(5), "blake3:a", RebuildResult::Differs, Some(2));
++    append_attempts(dir.path(), std::slice::from_ref(&r)).unwrap();
++    let path = dir.path().join(ATTEMPTS_DIR).join("flat_00000005.jsonl");
++    let mut text = std::fs::read_to_string(&path).unwrap();
++    text.push_str("{\"schema\":1,\"time\":\"2026-");
++    std::fs::write(&path, text).unwrap();
++    let (records, warnings) = read_attempts(dir.path(), flat(5)).unwrap();
++    assert_eq!(records, vec![r.clone()]);
++    assert_eq!(warnings.len(), 1);
++    assert!(
++        warnings[0].contains("flat_00000005.jsonl:2"),
++        "{}",
++        warnings[0]
++    );
++    // The next append starts on its own line.
++    let r2 = record(flat(5), "blake3:b", RebuildResult::Differs, Some(1));
++    append_attempts(dir.path(), std::slice::from_ref(&r2)).unwrap();
++    let (records, warnings) = read_attempts(dir.path(), flat(5)).unwrap();
++    assert_eq!(records, vec![r, r2]);
++    assert_eq!(warnings.len(), 1);
++}
++
++#[test]
++fn distance_of_error_is_none() {
++    let a = flat(1);
++    let error = record(a, "h", RebuildResult::Error, None);
++    assert_eq!(attempt_distance(&error), None);
++    let identical = record(a, "h", RebuildResult::Identical, None);
++    assert_eq!(attempt_distance(&identical), Some(0));
++    let differs = record(a, "h", RebuildResult::Differs, Some(4));
++    assert_eq!(attempt_distance(&differs), Some(4));
++    let mut unchecked = differs.clone();
++    unchecked.verdict = Some(VerdictId::Unchecked);
++    assert_eq!(attempt_distance(&unchecked), None);
++    let mut verdict_identical = differs;
++    verdict_identical.verdict = Some(VerdictId::Identical);
++    assert_eq!(attempt_distance(&verdict_identical), Some(0));
++}
++
++#[test]
++fn budget_counts_each_body_once() {
++    let a = flat(1);
++    let records = vec![
++        record(a, "blake3:x", RebuildResult::Differs, Some(5)),
++        record(a, "blake3:x", RebuildResult::Differs, Some(5)),
++        record(a, "blake3:y", RebuildResult::Error, None),
++        record(a, "blake3:z", RebuildResult::Differs, Some(6)),
++    ];
++    let b = attempt_budget(&records, 30);
++    assert_eq!((b.own, b.since_progress, b.best), (2, 1, Some(5)));
++}
++
++#[test]
++fn budget_parks_after_limit_without_progress() {
++    let a = flat(1);
++    let mut records = vec![record(a, "blake3:0", RebuildResult::Differs, Some(4))];
++    for i in 1..31 {
++        let hash = format!("blake3:{i}");
++        records.push(record(a, &hash, RebuildResult::Differs, Some(9)));
++    }
++    let b = attempt_budget(&records, 30);
++    assert_eq!((b.own, b.since_progress, b.best), (31, 30, Some(4)));
++    assert!(b.parked());
++    records.push(record(a, "blake3:win", RebuildResult::Identical, None));
++    let b = attempt_budget(&records, 30);
++    assert_eq!((b.since_progress, b.best), (0, Some(0)));
++    assert!(!b.parked());
++}
++
++#[test]
++fn migrated_automatic_variants_do_not_count() {
++    let a = flat(1);
++    let mut records = Vec::new();
++    for i in 0..40 {
++        let hash = format!("decomp-sha256:{i}");
++        let mut r = record(a, &hash, RebuildResult::Differs, Some(9));
++        r.origin = AttemptOrigin::Variant;
++        r.actor = Some("migrate".into());
++        records.push(r);
++    }
++    // Searches and the bench harness's own builds do not count either; a caller's variant does.
++    let mut search = record(a, "blake3:s", RebuildResult::Differs, Some(9));
++    search.origin = AttemptOrigin::Search;
++    let mut harness = record(a, "blake3:h", RebuildResult::Differs, Some(9));
++    harness.actor = Some("bench-harness".into());
++    let mut agent_variant = record(a, "blake3:v", RebuildResult::Differs, Some(9));
++    agent_variant.origin = AttemptOrigin::Variant;
++    agent_variant.actor = Some("mcp".into());
++    records.extend([search, harness, agent_variant]);
++    let b = attempt_budget(&records, 30);
++    assert_eq!((b.own, b.best, b.parked()), (1, Some(9), false));
++}
++
++#[test]
++fn now_utc_has_rfc3339_shape() {
++    let t = now_utc();
++    let b = t.as_bytes();
++    assert_eq!(b.len(), 20, "{t}");
++    for (i, c) in b.iter().enumerate() {
++        match i {
++            4 | 7 => assert_eq!(*c, b'-'),
++            10 => assert_eq!(*c, b'T'),
++            13 | 16 => assert_eq!(*c, b':'),
++            19 => assert_eq!(*c, b'Z'),
++            _ => assert!(c.is_ascii_digit(), "{t}"),
++        }
++    }
++}
+diff --git a/crates/decovery-facade/src/tools/legacy.rs b/crates/decovery-facade/src/tools/legacy.rs
+index aeab576..b7b2daa 100644
+--- a/crates/decovery-facade/src/tools/legacy.rs
++++ b/crates/decovery-facade/src/tools/legacy.rs
+@@ -6,21 +6,23 @@
+ //! function-level attempt next to the current source of the function), and Decomp's equivalence result is
+ //! evidence with `source = "decomp"`, never a decovery verdict.
+ 
+ use std::collections::BTreeMap;
+ use std::ffi::OsString;
+ use std::path::{Path, PathBuf};
+ use std::sync::atomic::{AtomicBool, Ordering};
+ use std::sync::{Arc, Mutex};
+ use std::time::Duration;
+ 
+-use decovery_core::{Address, Confidence, SymbolKind, Workspace, write_atomic};
++use decovery_core::{
++    Address, Confidence, RebuildResult, SymbolKind, VerdictId, Workspace, distance_of, write_atomic,
++};
+ use decovery_plugin::{CallOptions, PluginError, PluginHost, Progress};
+ use decovery_toolchain::{definitions, from_cp437, splice_function};
+ use serde_json::{Map, Value, json};
+ 
+ use super::build::{BuildRequest, SOURCE_DIR, build, file_of_function, read_text};
+ use super::diagnose::diagnose_tool;
+ use super::variants::Variant;
+ use crate::plugins::{PluginConfig, plugin_config, read_user_plugins};
+ use crate::{Budget, FacadeError, Handle, Response, Session, resolve, store_handle};
+ 
+@@ -790,48 +792,39 @@ fn definition_of(text: &str, name: &str) -> Option<String> {
+         .into_iter()
+         .filter(|d| d.name == name)
+         .collect();
+     match found.as_slice() {
+         [one] => Some(text[one.start..one.end].to_string()),
+         _ => None,
+     }
+ }
+ 
+ /// `true` when `candidate` is better than `current` (variant JSON of `build`): it was compared, has no inline
+-/// assembly, and is identical while the current one is not, or differs in fewer instructions.
++/// assembly, and is closer to identical by the one distance of the core (`decovery_core::distance_of`).
+ fn better(candidate: &Value, current: &Value) -> bool {
+-    let checked = |v: &Value| {
+-        matches!(
+-            v["verdict"].as_str(),
+-            Some("identical" | "equivalent" | "differs")
+-        )
++    let distance = |v: &Value| {
++        let verdict = serde_json::from_value::<VerdictId>(v["verdict"].clone()).ok();
++        let differing = v["instructions_differing"]
++            .as_u64()
++            .and_then(|n| u32::try_from(n).ok());
++        // The variant JSON has no Decomp result; only the verdict says whether it was compared.
++        distance_of(RebuildResult::Error, verdict, differing)
+     };
+     let cheat = candidate["blockers"]
+         .as_array()
+         .into_iter()
+         .flatten()
+         .any(|b| b["kind"] == "inline-assembly");
+-    if !checked(candidate) || cheat {
+-        return false;
+-    }
+-    if !checked(current) {
+-        return true;
+-    }
+-    let identical = |v: &Value| v["verdict"] == "identical";
+-    if identical(current) {
++    let Some(candidate) = distance(candidate).filter(|_| !cheat) else {
+         return false;
+-    }
+-    if identical(candidate) {
+-        return true;
+-    }
+-    let n = |v: &Value| v["instructions_differing"].as_u64().unwrap_or(u64::MAX);
+-    n(candidate) < n(current)
++    };
++    distance(current).is_none_or(|current| candidate < current)
+ }
+ 
+ fn verdict_text(v: &Value) -> String {
+     format!(
+         "{} ({} instructions differ)",
+         v["verdict"].as_str().unwrap_or("?"),
+         v["instructions_differing"]
+     )
+ }
+ 
+diff --git a/schemas/attempt.schema.json b/schemas/attempt.schema.json
+new file mode 100644
+index 0000000..e34dbab
+--- /dev/null
++++ b/schemas/attempt.schema.json
+@@ -0,0 +1,32 @@
++{
++  "$schema": "https://json-schema.org/draft/2020-12/schema",
++  "title": "cache/attempts/<address-key>.jsonl (one JSON object per line)",
++  "type": "object",
++  "required": [
++    "schema", "time", "address", "name", "origin", "profile", "flags",
++    "body_hash", "context_hash", "original_hash", "result"
++  ],
++  "properties": {
++    "schema": { "const": 1 },
++    "time": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$", "description": "RFC 3339 UTC, to the second" },
++    "address": { "type": "string" },
++    "name": { "type": "string" },
++    "file": { "type": "string" },
++    "origin": { "enum": ["build", "variant", "function", "search", "bench", "migrate"] },
++    "label": { "type": "string" },
++    "actor": { "type": "string", "description": "cli | mcp | bench-harness | bench:<run-id> | migrate" },
++    "profile": { "type": "string" },
++    "flags": { "type": "string" },
++    "body_hash": { "type": "string", "pattern": "^[a-z0-9-]+:[0-9a-f]+$", "description": "<algo>:<hex> of the definition text, LF line ends; native records write blake3:<hex>, migrated ones keep their source algorithm (decomp-sha256:...)" },
++    "context_hash": { "type": "string", "description": "blake3 hex over the rest of the file, the headers and the tool fingerprint" },
++    "original_hash": { "type": "string", "description": "blake3 hex of the original function bytes" },
++    "result": { "enum": ["identical", "differs", "error"] },
++    "verdict": { "enum": ["identical", "equivalent", "differs", "unchecked"] },
++    "instructions_differing": { "type": "integer", "minimum": 0 },
++    "bytes_differing": { "type": "integer", "minimum": 0 },
++    "blockers": { "type": "array", "items": { "type": "string" } },
++    "diagnosis": { "type": "array", "items": { "type": "string" } },
++    "archive": { "type": "string" }
++  },
++  "additionalProperties": true
++}
+diff --git a/schemas/decovery.schema.json b/schemas/decovery.schema.json
+index 900d20c..5de6dbd 100644
+--- a/schemas/decovery.schema.json
++++ b/schemas/decovery.schema.json
+@@ -53,20 +53,21 @@
+             "libraries": { "type": "array", "items": { "type": "string" } },
+             "flags": { "type": "string" },
+             "startup": { "type": "string" },
+             "insert": { "type": "boolean" },
+             "stack": { "type": "integer", "minimum": 0 }
+           }
+         },
+         "runners": { "type": "array", "items": { "type": "string" } },
+         "tool_dir": { "type": "string" },
+         "timeout_s": { "type": "integer", "minimum": 0 },
++        "attempt_budget": { "type": "integer", "minimum": 0 },
+         "file_flags": { "type": "object", "additionalProperties": { "type": "string" } },
+         "frames": { "type": "object", "additionalProperties": { "type": "string" } }
+       }
+     },
+     "plugins": {
+       "type": "object",
+       "additionalProperties": {
+         "type": "object",
+         "required": ["command"],
+         "properties": {
