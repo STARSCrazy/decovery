@@ -16,6 +16,10 @@ use crate::{Budget, FacadeError, Response, Session, resolve, store_handle};
 const CODE_TEXT_CHARS: usize = 200;
 /// Default number of rows.
 pub const DEFAULT_LIMIT: usize = 100;
+/// Default number of exemplars of `find similar`.
+pub const DEFAULT_SIMILAR_LIMIT: usize = 3;
+/// The answer when the exemplar index has no other member.
+const NO_EXEMPLARS: &str = "no solved functions to compare with";
 const OUTPUT_MISSING: &str = "output/ not generated; run `decovery show` or analyze";
 
 /// What to search.
@@ -27,6 +31,8 @@ pub enum FindWhat {
     Strings,
     Code,
     Xrefs,
+    /// The most similar identical functions (exemplars) of the target, with their source.
+    Similar,
 }
 
 /// Restricts the function list; all given filters must hold.
@@ -71,14 +77,19 @@ pub struct FindQuery {
 }
 
 impl FindQuery {
-    /// A query for `what` without pattern or filters and the default limit.
+    /// A query for `what` without pattern or filters and the default limit ([`DEFAULT_SIMILAR_LIMIT`] for
+    /// `Similar`).
     pub fn new(what: FindWhat) -> Self {
         FindQuery {
             what,
             pattern: None,
             filter: Vec::new(),
             sort: FunctionSort::Address,
-            limit: DEFAULT_LIMIT,
+            limit: if what == FindWhat::Similar {
+                DEFAULT_SIMILAR_LIMIT
+            } else {
+                DEFAULT_LIMIT
+            },
         }
     }
 }
@@ -134,7 +145,93 @@ pub fn find(session: &Session, query: &FindQuery, budget: Budget) -> Result<Resp
             };
             xrefs(session, target, query.limit, budget)
         }
+        FindWhat::Similar => {
+            let Some(target) = query.pattern.as_deref() else {
+                return Err(FacadeError::Invalid("find similar needs a target".into()));
+            };
+            similar(session, target, query.limit, budget)
+        }
     }
+}
+
+/// The `limit` exemplars of `target` with source, flags and reason. Sources that do not fit `budget` are left
+/// out of `data.items` (`source` null); the full result is then stored as a handle of kind `find-results`.
+fn similar(
+    session: &Session,
+    target: &str,
+    limit: usize,
+    budget: Budget,
+) -> Result<Response, FacadeError> {
+    let start = resolve(session, target)?.function;
+    let name = session.name_of(start).name;
+    let index = crate::exemplar_index(session)?;
+    let exemplars = index.similar(session, start, limit)?;
+    if exemplars.is_empty() {
+        return Ok(Response::new(
+            format!("{name} at {start}: {NO_EXEMPLARS}"),
+            json!({ "address": start.to_string(), "name": name, "total": 0, "items": [] }),
+        ));
+    }
+    let items: Vec<Value> = exemplars
+        .iter()
+        .map(|e| {
+            json!({
+                "address": e.address.to_string(),
+                "name": e.name,
+                "file": e.file,
+                "flags": e.flags,
+                "similarity": e.similarity,
+                "coverage": e.coverage,
+                "score": e.score,
+                "twin": e.twin,
+                "reason": e.reason(),
+                "source": e.source,
+            })
+        })
+        .collect();
+    let mut summary = format!(
+        "{} exemplars of {name} at {start}: {}",
+        exemplars.len(),
+        exemplars
+            .iter()
+            .map(|e| format!("{} ({:.2})", e.name, e.score))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let mut shown = items.clone();
+    let mut used = 0usize;
+    let mut cut = false;
+    for item in &mut shown {
+        used += item.to_string().chars().count();
+        if used > budget.chars {
+            item["source"] = Value::Null;
+            cut = true;
+        }
+    }
+    let mut handles = Vec::new();
+    if cut {
+        let text = serde_json::to_string_pretty(&json!({ "items": items }))
+            .map_err(|e| FacadeError::Invalid(format!("cannot serialize result: {e}")))?
+            + "\n";
+        let mut handle = store_handle(&session.workspace.root, "find-results", &text)?;
+        handle.description = format!("exemplars of {name} with their sources");
+        summary.push_str(&format!(
+            "; sources beyond the budget: detail {}",
+            handle.id
+        ));
+        handles.push(handle);
+    }
+    let mut response = Response::new(
+        summary,
+        json!({
+            "address": start.to_string(),
+            "name": name,
+            "total": exemplars.len(),
+            "items": shown,
+        }),
+    );
+    response.handles = handles;
+    Ok(response)
 }
 
 struct Row {

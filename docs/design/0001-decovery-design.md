@@ -418,12 +418,17 @@ part of the core, not add-ons.
    reports differences between runs with confidence intervals. Private suites over proprietary targets stay local;
    a public suite is built from project-compiled Open Watcom and Turbo C fixtures. Every change to tool output,
    hints, diagnosis or search is judged by a bench run, not by impression.
-2. **Exemplars.** An index over all identical functions of a workspace (and, opt-in, over a user-level library of
-   the author's other workspaces with the same compiler profile). Features: shingles of normalised instruction
-   shapes, size class, call/global/string counts, prologue/epilogue form, diagnosis rule ids of the original's
-   neighbourhood. Similarity by MinHash with LSH buckets, so lookups stay sub-millisecond at 100 000 functions.
-   `show` lists the most similar matched functions; `find {what: "similar", target}` returns the top k with their
-   source text, flags and the reason for the match. The index is cache data, updated incrementally by `build`.
+2. **Exemplars.** An index over the identical functions of a workspace that come from C sources and are not
+   library-classified (`cache/exemplars/index.json`, cache data, refreshed incrementally by `build`; a changed
+   target rebuilds it). *Amended in phase 3 (plan decision 3):* MinHash with LSH buckets over windows of six
+   normalised instruction forms is only the prefilter (every member is a candidate up to 2 000 members); the
+   ranking is Decomp's (`vorbilder.py`): window coverage plus Indel similarity, shared stretches and twins (equal
+   forms with registers kept). The feature list once planned (size class, call/global/string counts,
+   prologue/epilogue form, rule ids) is dropped; the opt-in user-level library over the author's other
+   workspaces moves to phase 4. `show` lists the three most similar matched functions in its response (never in
+   the generated `output/` files) together with the function's current definition in `src/`;
+   `find {what: "similar", target}` returns the top k (default 3) with their source text, flags and the reason
+   for the match. A function is never its own exemplar.
 3. **Function-level attempts.** An agent sends the source of one function, not of a file. decovery splices it into
    its file, shrinks the file to that function, its callees and the declarations it needs (other bodies become
    prototypes; line numbers are kept), proves once per file version by a double compile that shrinking does not

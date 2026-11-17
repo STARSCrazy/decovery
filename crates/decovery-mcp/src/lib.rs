@@ -18,8 +18,8 @@ use std::time::Instant;
 use decovery_core::{CallRecord, ClaimSource, Confidence, append_call};
 use decovery_facade::{
     AnalyzeOptions, AnnotateAction, Annotation, Budget, BuildRequest, DEFAULT_HISTORY_LIMIT,
-    DEFAULT_LIMIT, FacadeError, FindQuery, FindWhat, FunctionFilter, FunctionSort, LegacyCall,
-    LegacyOperation, Progress, Response, Session, Variant,
+    DEFAULT_LIMIT, DEFAULT_SIMILAR_LIMIT, FacadeError, FindQuery, FindWhat, FunctionFilter,
+    FunctionSort, LegacyCall, LegacyOperation, Progress, Response, Session, Variant,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
@@ -121,6 +121,7 @@ enum What {
     Strings,
     Code,
     Xrefs,
+    Similar,
 }
 
 #[derive(Clone, Copy, Deserialize, JsonSchema)]
@@ -152,14 +153,14 @@ enum Sort {
 struct FindParams {
     /// What to search.
     what: What,
-    /// Case-insensitive text, `*` matches any run; for `xrefs` the target (name or address).
+    /// Case-insensitive text, `*` matches any run; for `xrefs` and `similar` the target (name or address).
     pattern: Option<String>,
     /// Restrict the function list (all must hold); `functions` only. `parked`: the attempt budget is spent
     /// without reaching identical (see `history`).
     filter: Option<Vec<Filter>>,
     /// Order of the function list (default `address`); `functions` only.
     sort: Option<Sort>,
-    /// Maximum number of rows (default 100); the rest is stored as a handle.
+    /// Maximum number of rows (default 100; `similar`: 3); the rest is stored as a handle.
     limit: Option<usize>,
     /// Characters of rows returned inline (default 8000); the rest is stored as a handle.
     budget: Option<usize>,
@@ -387,17 +388,19 @@ impl Server {
     }
 
     #[tool(
-        description = "Search functions (filter, sort), names, strings, generated pseudo-C (`code`) or cross references (`xrefs`, pattern = target). Rows beyond the limit are stored as a handle."
+        description = "Search functions (filter, sort), names, strings, generated pseudo-C (`code`), cross references (`xrefs`, pattern = target) or the most similar identical functions with their source (`similar`, pattern = target). Rows beyond the limit are stored as a handle."
     )]
     async fn find(&self, Parameters(p): Parameters<FindParams>) -> CallToolResult {
+        let what = match p.what {
+            What::Functions => FindWhat::Functions,
+            What::Names => FindWhat::Names,
+            What::Strings => FindWhat::Strings,
+            What::Code => FindWhat::Code,
+            What::Xrefs => FindWhat::Xrefs,
+            What::Similar => FindWhat::Similar,
+        };
         let query = FindQuery {
-            what: match p.what {
-                What::Functions => FindWhat::Functions,
-                What::Names => FindWhat::Names,
-                What::Strings => FindWhat::Strings,
-                What::Code => FindWhat::Code,
-                What::Xrefs => FindWhat::Xrefs,
-            },
+            what,
             pattern: p.pattern,
             filter: p
                 .filter
@@ -419,7 +422,11 @@ impl Server {
                 Sort::Callers => FunctionSort::Callers,
                 Sort::Size => FunctionSort::Size,
             },
-            limit: p.limit.unwrap_or(DEFAULT_LIMIT),
+            limit: p.limit.unwrap_or(if what == FindWhat::Similar {
+                DEFAULT_SIMILAR_LIMIT
+            } else {
+                DEFAULT_LIMIT
+            }),
         };
         let budget = budget(p.budget);
         self.blocking(move |root| decovery_facade::find(&Session::open(root)?, &query, budget))

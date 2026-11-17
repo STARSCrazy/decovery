@@ -592,6 +592,10 @@ pub fn build(
             },
             &lock,
         )?;
+        // the exemplar index is cache data: a failure to refresh it does not fail the build
+        if let Err(e) = crate::exemplar_index(&session) {
+            warnings.push(format!("exemplar index not refreshed: {e}"));
+        }
     }
     drop(lock);
     let record_ms = ms(record_started.elapsed());

@@ -4,15 +4,18 @@ use std::time::Duration;
 
 use serde_json::json;
 
+use crate::exemplars::current_source;
 use crate::output::{
     STALE_ANALYSIS, analysis_stale, function_path, render_function, write_function,
 };
-use crate::{Budget, FacadeError, Response, Session, resolve, store_handle};
+use crate::{Budget, FacadeError, Response, Session, exemplar_index, resolve, store_handle};
 
 const LOCK_WAIT: Duration = Duration::from_secs(10);
 
 /// Header and pseudo-C of the function `target` resolves to. Writes the function's file when it is missing;
-/// text beyond `budget` is cut and the full text stored as a handle.
+/// text beyond `budget` is cut and the full text stored as a handle. The data also carries the three most
+/// similar identical functions (`exemplars`, without their source; see `find similar`) and the function's
+/// current definition in `src/` (`source`); neither goes into the generated file.
 pub fn show(session: &Session, target: &str, budget: Budget) -> Result<Response, FacadeError> {
     let start = resolve(session, target)?.function;
     let root = &session.workspace.root;
@@ -39,6 +42,36 @@ pub fn show(session: &Session, target: &str, budget: Budget) -> Result<Response,
     if stale {
         summary.push_str(&format!(" ({STALE_ANALYSIS})"));
     }
+    let mut warnings = Vec::new();
+    let exemplars = match exemplar_index(session).and_then(|ix| ix.similar(session, start, 3)) {
+        Ok(found) => found,
+        Err(e) => {
+            warnings.push(format!("no exemplars: {e}"));
+            Vec::new()
+        }
+    };
+    if !exemplars.is_empty() {
+        let list: Vec<String> = exemplars
+            .iter()
+            .map(|e| format!("{} ({:.2})", e.name, e.score))
+            .collect();
+        summary.push_str(&format!("; exemplars: {}", list.join(", ")));
+    }
+    let exemplars: Vec<serde_json::Value> = exemplars
+        .iter()
+        .map(|e| {
+            json!({
+                "name": e.name,
+                "address": e.address.to_string(),
+                "file": e.file,
+                "similarity": e.similarity,
+                "coverage": e.coverage,
+                "twin": e.twin,
+            })
+        })
+        .collect();
+    let source =
+        current_source(session, start).map(|(file, text)| json!({ "file": file, "text": text }));
     let mut handles = Vec::new();
     let shown = if text.chars().count() > budget.chars {
         let mut handle = store_handle(root, "function-text", &text)?;
@@ -57,8 +90,13 @@ pub fn show(session: &Session, target: &str, budget: Budget) -> Result<Response,
             "file": file.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"),
             "analysis_stale": stale,
             "text": shown,
+            "exemplars": exemplars,
+            "source": source,
         }),
     );
+    if !warnings.is_empty() {
+        response.data["warnings"] = json!(warnings);
+    }
     response.handles = handles;
     Ok(response)
 }

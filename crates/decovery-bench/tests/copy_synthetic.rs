@@ -544,3 +544,33 @@ fn rejected_linked_resource_is_not_deleted_or_modified() {
     assert!(!into.exists());
     assert!(!into.parent().unwrap().join("legacy-view").exists());
 }
+
+#[test]
+fn bench_copy_has_no_exemplar_entry_of_the_function() {
+    // ruling P15: the copy never carries `cache/exemplars/`; the index refreshed in the copy lacks the function
+    // because its rebuild record is gone
+    let python = python_or_skip!();
+    let fixture = build_fixture::fixture(&python, "");
+    decovery_facade::build(
+        fixture.root(),
+        &decovery_facade::BuildRequest::default(),
+        &|_| {},
+    )
+    .unwrap();
+    let original = decovery_facade::Session::open(fixture.root()).unwrap();
+    assert!(
+        decovery_facade::exemplar_index(&original)
+            .unwrap()
+            .contains(build_fixture::SUB_AT)
+    );
+    let task = SuiteTask::new(fixture.root().to_path_buf(), "sub");
+    let (_parent, into) = destination();
+    prepare_copy(&task, StartPoint::Stub, ToolSet::Core, &into).unwrap();
+    assert!(!into.join("cache/exemplars").exists());
+    let copy = decovery_facade::Session::open(&into).unwrap();
+    let index = decovery_facade::exemplar_index(&copy).unwrap();
+    assert!(!index.contains(build_fixture::SUB_AT));
+    assert!(index.contains(build_fixture::ADD_AT));
+    let index_text = std::fs::read_to_string(into.join(decovery_facade::EXEMPLARS_FILE)).unwrap();
+    assert!(!index_text.contains("\"sub\""));
+}

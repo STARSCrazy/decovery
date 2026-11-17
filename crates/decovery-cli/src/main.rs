@@ -14,8 +14,8 @@ mod setup;
 use decovery_core::{CallRecord, ClaimSource, Confidence, append_call};
 use decovery_facade::{
     AnalyzeOptions, AnnotateAction, Annotation, Budget, BuildRequest, DEFAULT_HISTORY_LIMIT,
-    DEFAULT_LIMIT, FacadeError, FindQuery, FindWhat, FunctionFilter, FunctionSort, LegacyCall,
-    LegacyOperation, Progress, Response, Session, Variant,
+    DEFAULT_LIMIT, DEFAULT_SIMILAR_LIMIT, FacadeError, FindQuery, FindWhat, FunctionFilter,
+    FunctionSort, LegacyCall, LegacyOperation, Progress, Response, Session, Variant,
 };
 
 /// Recover source code from old executables.
@@ -134,11 +134,11 @@ enum Command {
     },
     /// Counts of named and rebuilt functions and the next thing to do.
     Status,
-    /// Search functions, names, strings, generated code or cross references.
+    /// Search functions, names, strings, generated code, cross references or similar identical functions.
     Find {
         /// What to search.
         what: What,
-        /// Case-insensitive text, `*` matches any run; for `xrefs` the target (name or address).
+        /// Case-insensitive text, `*` matches any run; for `xrefs` and `similar` the target (name or address).
         pattern: Option<String>,
         /// Restrict the function list (repeatable, all must hold); `functions` only.
         #[arg(long = "filter", value_enum)]
@@ -146,9 +146,9 @@ enum Command {
         /// Order of the function list.
         #[arg(long, value_enum, default_value = "address")]
         sort: Sort,
-        /// Maximum number of rows; the rest is stored as a handle.
-        #[arg(long, default_value_t = DEFAULT_LIMIT)]
-        limit: usize,
+        /// Maximum number of rows (default 100; `similar`: 3); the rest is stored as a handle.
+        #[arg(long)]
+        limit: Option<usize>,
     },
     /// Record knowledge: a name, comment, signature, type, local, refutation or type definition.
     ///
@@ -447,6 +447,7 @@ enum What {
     Strings,
     Code,
     Xrefs,
+    Similar,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -684,14 +685,16 @@ fn run(cli: Cli) -> ExitCode {
             sort,
             limit,
         } => {
+            let what = match what {
+                What::Functions => FindWhat::Functions,
+                What::Names => FindWhat::Names,
+                What::Strings => FindWhat::Strings,
+                What::Code => FindWhat::Code,
+                What::Xrefs => FindWhat::Xrefs,
+                What::Similar => FindWhat::Similar,
+            };
             let query = FindQuery {
-                what: match what {
-                    What::Functions => FindWhat::Functions,
-                    What::Names => FindWhat::Names,
-                    What::Strings => FindWhat::Strings,
-                    What::Code => FindWhat::Code,
-                    What::Xrefs => FindWhat::Xrefs,
-                },
+                what,
                 pattern,
                 filter: filter
                     .into_iter()
@@ -711,7 +714,11 @@ fn run(cli: Cli) -> ExitCode {
                     Sort::Callers => FunctionSort::Callers,
                     Sort::Size => FunctionSort::Size,
                 },
-                limit,
+                limit: limit.unwrap_or(if what == FindWhat::Similar {
+                    DEFAULT_SIMILAR_LIMIT
+                } else {
+                    DEFAULT_LIMIT
+                }),
             };
             finish(find(&cli.workspace, &query, cli.json))
         }
@@ -1808,6 +1815,21 @@ fn find(workspace: &Path, query: &FindQuery, json: bool) -> Result<(), FacadeErr
         for (kind, list, keys) in sections {
             for item in d[list].as_array().into_iter().flatten() {
                 println!("{kind}\t{}", cells(item, keys));
+            }
+        }
+        return Ok(());
+    }
+    if query.what == FindWhat::Similar {
+        for item in d["items"].as_array().into_iter().flatten() {
+            println!(
+                "{}",
+                cells(item, &["address", "name", "file", "flags", "reason"])
+            );
+            if let Some(source) = item["source"].as_str() {
+                print!("{source}");
+                if !source.ends_with('\n') {
+                    println!();
+                }
             }
         }
         return Ok(());
