@@ -35,13 +35,24 @@ fn decomp_workspace() -> PathBuf {
 
 /// Copies `from` to `to` (files and directories; links are not followed).
 fn copy_tree(from: &Path, to: &Path) {
+    copy_filtered(from, to, true);
+}
+
+/// Copies a Decomp workspace; of its top-level `cache/` only `cache/nachbau/` (what `migrate` reads) is copied,
+/// because the rest (Ghidra project, scratch files) is large and neither tool needs it here.
+fn copy_filtered(from: &Path, to: &Path, top: bool) {
     std::fs::create_dir_all(to).unwrap();
     for entry in std::fs::read_dir(from).unwrap() {
         let entry = entry.unwrap();
         let kind = entry.file_type().unwrap();
         let target = to.join(entry.file_name());
-        if kind.is_dir() {
-            copy_tree(&entry.path(), &target);
+        if kind.is_dir() && top && entry.file_name() == "cache" {
+            let nachbau = entry.path().join("nachbau");
+            if nachbau.is_dir() {
+                copy_filtered(&nachbau, &target.join("nachbau"), false);
+            }
+        } else if kind.is_dir() {
+            copy_filtered(&entry.path(), &target, false);
         } else if kind.is_file() {
             std::fs::copy(entry.path(), &target).unwrap();
         }
@@ -77,7 +88,8 @@ fn decomp_identical(workspace: &Path) -> BTreeSet<String> {
 
 /// The names in Decomp's answer, in rank order: lines `<n>. <name> (<address>, nachbau/<file>): …`.
 fn decomp_vorbilder(python: &Path, copy: &Path, at: Address) -> (Vec<String>, String) {
-    let address = format!("0x{:X}", at.linear().unwrap_or(0));
+    // Decomp's normal form for a flat address is `va:XXXXXXXX`; it rejects `0x…`.
+    let address = format!("va:{:08X}", at.linear().unwrap_or(0));
     let out = Command::new(python)
         .args(["-m", "decomp", "--bereich"])
         .arg(copy)

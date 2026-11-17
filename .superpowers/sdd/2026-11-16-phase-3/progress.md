@@ -97,3 +97,11 @@ Task 7: implemented (commit 'feat(bench): run report and compare'): stats (Wilso
 Task 6+7 review: 0 Critical, 1 Important fixed (harness build ignored exit status -> stale verdict), 7 Minor listed; see task-6-7-review.md.
 Task 13: implemented (exemplar index, find similar, show exemplars/source; P15 no hook; perf test ignored + candidate-set assert); workspace 678 passed/18 ignored; step 5 local parity not run (env unset), step 6 owner gate open. NOT YET REVIEWED. Report task-13-report.md.
 Task 12+13 review: 0 Critical, 3 Important fixed (index stale on changed range, show source outside budget, R4 test read `bytegleich` instead of `identisch`), 9 Minor listed; changed find_similar assertion judged legitimate; see task-12-13-review.md.
+
+## Pause 2026-11-17 (resume here)
+Done and reviewed: Tasks 1-7, 12, 13 (reviews: task-3-review.md, task-6-7-review.md, task-12-13-review.md). Owner chose order: 12/13 before 8-11 (for Wizardry 7); bench probe runs (8 step 1, 9, 13 step 6, 15 step 2) need owner go.
+Local tests (env: DECOVERY_LOCAL_WORKSPACE = DECOVERY_DECOMP_WORKSPACE = Decomp ziele/syndicate-1993 (NOT ziele/syndicate), _MZ = ziele/sar, DECOVERY_TARGET_MZ = SAR.EXE, toolchains from the user config, DECOVERY_GOLDEN_DIR, DECOVERY_DECOMP_PYTHON = Decomp .venv). Run them one by one with `-j 2`: the machine ran out of memory twice.
+- second_target_identical_functions: passed.
+- exemplars_match_decomp_vorbilder (Task 13 step 5, R4): first run invalid (test passed `0x…`, Decomp needs `va:XXXXXXXX`; copy included the huge cache). Test fixed (commit "test(exemplars): …"), NOT yet run successfully — rerun first.
+- first_target_identical_functions and all other ignored tests: not yet run.
+Next: rerun local tests, then try `find similar` on Syndicate (no tokens), then Tasks 8-11, 14, 15. Open: 186 MB build output in branch history (force-push denied by the classifier; owner may run the strip script, needs updating to the new HEAD).
