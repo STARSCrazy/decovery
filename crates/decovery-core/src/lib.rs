@@ -31,7 +31,9 @@ pub use knowledge::{
     ClaimSource, Confidence, LineComment, LocalVariable, RefutedClaim, Symbol, SymbolKind,
     SymbolsFile,
 };
-pub use migrate::{MigrateError, MigrationReport, migrate_decomp};
+pub use migrate::{
+    AttemptMigrationReport, MigrateError, MigrationReport, migrate_attempts, migrate_decomp,
+};
 pub use program::{
     ArchMode, ExecutableFormat, Permissions, Program, Region, RelocKind, Relocation,
 };

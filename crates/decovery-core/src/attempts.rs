@@ -290,6 +290,16 @@ pub fn distance_of(
 
 /// [`distance_of`] for an attempt record.
 pub fn attempt_distance(r: &AttemptRecord) -> Option<u64> {
+    // Imported identical findings are evidence until decovery actually judges the source.
+    if r.verdict.is_none()
+        && r.result == RebuildResult::Identical
+        && r.extra.contains_key("decomp_result")
+    {
+        return Some(
+            r.instructions_differing
+                .map_or(u64::MAX, |n| u64::from(n).max(1)),
+        );
+    }
     distance_of(r.result, r.verdict, r.instructions_differing)
 }
 

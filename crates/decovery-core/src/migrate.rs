@@ -5,9 +5,12 @@
 //! [`MigrationReport::untranslated_texts`].
 
 mod analysis_import;
+mod attempts;
 mod decomp_format;
 mod knowledge;
 mod layout;
+
+pub use attempts::{AttemptMigrationReport, migrate_attempts};
 
 /// German-to-English id tables of the import, for parity checks against Decomp's generated output.
 #[doc(hidden)]
@@ -50,6 +53,8 @@ pub struct MigrationReport {
     pub skipped: Vec<String>,
     /// Functions imported from Decomp's `ausgabe/` into `knowledge/analysis/` (0 when there is none).
     pub analysis_functions: u32,
+    /// Attempt memory and archive import counts and diagnostics.
+    pub attempt_memory: AttemptMigrationReport,
 }
 
 /// Errors that stop a migration.
@@ -371,6 +376,7 @@ fn parse_refuted(text: &str) -> RefutedClaim {
 
 /// Migrates the Decomp workspace at `from` into `to` (created if missing).
 pub fn migrate_decomp(from: &Path, to: &Path) -> Result<MigrationReport, MigrateError> {
+    check_destination(from, to)?;
     let mut cx = Ctx::default();
     let config_text = read(&from.join(files::CONFIG))?;
     let table: toml::Table =
@@ -472,13 +478,49 @@ pub fn migrate_decomp(from: &Path, to: &Path) -> Result<MigrationReport, Migrate
         Some(imported) => imported.save(to, &config.target.sha256)?,
         None => 0,
     };
+    let attempt_memory = migrate_attempts(from, to)?;
     Ok(MigrationReport {
         converted,
         unmapped: cx.unmapped.into_iter().collect(),
         untranslated_texts: cx.texts,
         skipped: cx.skipped.into_iter().collect(),
         analysis_functions,
+        attempt_memory,
     })
+}
+
+/// Resolve the existing ancestor before creating anything, so migration never writes into its source tree.
+fn check_destination(from: &Path, to: &Path) -> Result<(), MigrateError> {
+    let source = from.canonicalize().map_err(|e| io(from, e))?;
+    let mut ancestor = std::path::absolute(to).map_err(|e| io(to, e))?;
+    let mut suffix = Vec::new();
+    while !ancestor.exists() {
+        let name = ancestor
+            .file_name()
+            .ok_or_else(|| MigrateError::Invalid {
+                key: "destination".into(),
+                value: to.display().to_string(),
+            })?
+            .to_os_string();
+        suffix.push(name);
+        if !ancestor.pop() {
+            return Err(MigrateError::Invalid {
+                key: "destination".into(),
+                value: to.display().to_string(),
+            });
+        }
+    }
+    let mut destination = ancestor.canonicalize().map_err(|e| io(&ancestor, e))?;
+    for name in suffix.into_iter().rev() {
+        destination.push(name);
+    }
+    if destination.starts_with(&source) {
+        return Err(MigrateError::Invalid {
+            key: "destination".into(),
+            value: "must be outside the source workspace".into(),
+        });
+    }
+    Ok(())
 }
 
 fn markdown_files(dir: &Path) -> Result<Vec<String>, MigrateError> {
@@ -1147,14 +1189,10 @@ foo = 1
             .iter()
             .map(|s| s.split_once(':').unwrap().0)
             .collect();
-        assert_eq!(
-            names,
-            [
-                "cache/ghidra",
-                "cache/nachbau/obj/*.json",
-                "cache/nachbau/versuche.jsonl"
-            ]
-        );
+        assert_eq!(names, ["cache/ghidra", "cache/nachbau/obj/*.json"]);
+        assert_eq!(report.attempt_memory.schema, 1);
+        assert_eq!(report.attempt_memory.attempts, 0);
+        assert!(report.attempt_memory.skipped.is_empty());
     }
 
     #[test]

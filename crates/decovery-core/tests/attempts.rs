@@ -220,3 +220,39 @@ fn now_utc_has_rfc3339_shape() {
         }
     }
 }
+
+#[test]
+fn bench_agent_whole_file_variants_count_toward_budget() {
+    let mut r = record(flat(1), "blake3:a", RebuildResult::Differs, Some(2));
+    r.origin = AttemptOrigin::Variant;
+    r.actor = Some("bench:run-1".into());
+    assert_eq!(attempt_budget(&[r], 30).own, 1);
+}
+
+#[test]
+fn zero_differing_instructions_with_blockers_is_not_identical() {
+    let mut r = record(flat(1), "blake3:a", RebuildResult::Differs, Some(0));
+    r.verdict = Some(VerdictId::Differs);
+    r.blockers.push("unchecked-ref".into());
+    assert_ne!(
+        attempt_distance(&r),
+        Some(0),
+        "zero is reserved for identical"
+    );
+}
+
+#[test]
+fn identical_search_unparks_without_spending_own_budget() {
+    let mut records = vec![
+        record(flat(1), "blake3:a", RebuildResult::Differs, Some(4)),
+        record(flat(1), "blake3:b", RebuildResult::Differs, Some(4)),
+    ];
+    assert!(attempt_budget(&records, 1).parked());
+    let mut solved = record(flat(1), "blake3:c", RebuildResult::Identical, Some(0));
+    solved.verdict = Some(VerdictId::Identical);
+    solved.origin = AttemptOrigin::Search;
+    records.push(solved);
+    let budget = attempt_budget(&records, 1);
+    assert_eq!(budget.own, 2);
+    assert!(!budget.parked());
+}

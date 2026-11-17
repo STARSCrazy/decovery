@@ -119,7 +119,7 @@ fn check_name(name: &str) -> Result<(), String> {
 }
 
 /// Checks all names: each valid, no case-insensitive collision, no name that is also a directory of another.
-fn check_names<'a>(names: impl Iterator<Item = &'a String>) -> Result<(), String> {
+pub(crate) fn check_names<'a>(names: impl Iterator<Item = &'a String>) -> Result<(), String> {
     let mut seen: BTreeMap<String, &str> = BTreeMap::new();
     let mut dirs: BTreeSet<String> = BTreeSet::new();
     let mut lowered: Vec<(String, &str)> = Vec::new();

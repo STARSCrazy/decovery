@@ -1,0 +1,10 @@
+D:\Entwicklung\decovery\.worktrees\phase-3-build\.superpowers/sdd/2026-11-16-phase-3/codex-validation-target\debug\deps\constant_time_eq-38e7169b14862755.d: C:\Users\Manni\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\constant_time_eq-0.4.2\src\lib.rs C:\Users\Manni\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\constant_time_eq-0.4.2\src\classic.rs C:\Users\Manni\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\constant_time_eq-0.4.2\src\generic.rs C:\Users\Manni\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\constant_time_eq-0.4.2\src\sse2.rs
+
+D:\Entwicklung\decovery\.worktrees\phase-3-build\.superpowers/sdd/2026-11-16-phase-3/codex-validation-target\debug\deps\libconstant_time_eq-38e7169b14862755.rlib: C:\Users\Manni\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\constant_time_eq-0.4.2\src\lib.rs C:\Users\Manni\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\constant_time_eq-0.4.2\src\classic.rs C:\Users\Manni\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\constant_time_eq-0.4.2\src\generic.rs C:\Users\Manni\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\constant_time_eq-0.4.2\src\sse2.rs
+
+D:\Entwicklung\decovery\.worktrees\phase-3-build\.superpowers/sdd/2026-11-16-phase-3/codex-validation-target\debug\deps\libconstant_time_eq-38e7169b14862755.rmeta: C:\Users\Manni\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\constant_time_eq-0.4.2\src\lib.rs C:\Users\Manni\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\constant_time_eq-0.4.2\src\classic.rs C:\Users\Manni\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\constant_time_eq-0.4.2\src\generic.rs C:\Users\Manni\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\constant_time_eq-0.4.2\src\sse2.rs
+
+C:\Users\Manni\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\constant_time_eq-0.4.2\src\lib.rs:
+C:\Users\Manni\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\constant_time_eq-0.4.2\src\classic.rs:
+C:\Users\Manni\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\constant_time_eq-0.4.2\src\generic.rs:
+C:\Users\Manni\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\constant_time_eq-0.4.2\src\sse2.rs:

@@ -45,6 +45,12 @@ enum Command {
         /// Directory for the new decovery workspace.
         to: PathBuf,
     },
+    /// Import Decomp's attempt memory and archive into the existing workspace (safe to repeat).
+    MigrateAttempts {
+        /// Source Decomp workspace; default: [legacy] decomp_workspace in decovery.toml.
+        #[arg(long)]
+        from: Option<PathBuf>,
+    },
     /// Compare one rebuilt function of an object file with the original. Exit code 0 when identical,
     /// 1 when not, 2 on errors.
     Compare {
@@ -412,7 +418,10 @@ fn main() -> ExitCode {
 /// log themselves): the command, its target and operation, and the builds and searches it runs.
 fn call_record(command: &Command) -> Option<CallRecord> {
     let (tool, target, operation): (&str, Option<&str>, Option<&str>) = match command {
-        Command::Migrate { .. } | Command::Mcp | Command::Setup { .. } => return None,
+        Command::Migrate { .. }
+        | Command::MigrateAttempts { .. }
+        | Command::Mcp
+        | Command::Setup { .. } => return None,
         Command::Compare { function, .. } => ("compare", Some(function), None),
         Command::Show { target } => ("show", Some(target), None),
         Command::Diagnose { target, deep, .. } => (
@@ -500,6 +509,9 @@ fn log_call(
 fn run(cli: Cli) -> ExitCode {
     match cli.command {
         Command::Migrate { from, to } => finish(migrate(&from, &to, cli.json)),
+        Command::MigrateAttempts { from } => {
+            finish(migrate_attempts(&cli.workspace, from.as_deref(), cli.json))
+        }
         Command::Compare {
             object,
             function,
@@ -824,6 +836,7 @@ fn migrate(from: &Path, to: &Path, json: bool) -> Result<(), FacadeError> {
         println!("  {}", path.display());
     }
     println!("Untranslated free texts: {}", report.untranslated_texts);
+    print_attempt_counts(&report.attempt_memory);
     if !report.skipped.is_empty() {
         println!("Skipped ({}):", report.skipped.len());
         for entry in &report.skipped {
@@ -844,6 +857,58 @@ fn migrate(from: &Path, to: &Path, json: bool) -> Result<(), FacadeError> {
             report.analysis_functions
         ),
         None => println!("No analysis imported; run `decovery analyze` to generate the output"),
+    }
+    Ok(())
+}
+
+fn print_attempt_counts(report: &decovery_core::AttemptMigrationReport) {
+    println!(
+        "Attempt memory: {} imported, {} archive entries, {} already present, {} lines and {} archives skipped",
+        report.attempts,
+        report.archive_entries,
+        report.already_present,
+        report.skipped_lines,
+        report.skipped_archives
+    );
+    for issue in &report.skipped {
+        println!("  {issue}");
+    }
+    for warning in &report.warnings {
+        println!("  warning: {warning}");
+    }
+}
+
+fn migrate_attempts(root: &Path, from: Option<&Path>, json: bool) -> Result<(), FacadeError> {
+    let workspace = decovery_core::Workspace::open(root)?;
+    let configured;
+    let source = match from {
+        Some(path) => path,
+        None => {
+            let legacy = workspace
+                .config
+                .legacy
+                .as_ref()
+                .and_then(|legacy| legacy.decomp_workspace.as_deref())
+                .filter(|path| !path.is_empty())
+                .ok_or_else(|| {
+                    FacadeError::Invalid(
+                        "no [legacy] decomp_workspace configured; pass --from".into(),
+                    )
+                })?;
+            configured = workspace.root.join(legacy);
+            &configured
+        }
+    };
+    let report = decovery_core::migrate_attempts(source, root)
+        .map_err(|e| FacadeError::Invalid(e.to_string()))?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report)
+                .map_err(|e| FacadeError::Invalid(e.to_string()))?
+        );
+    } else {
+        print_attempt_counts(&report);
     }
     Ok(())
 }
