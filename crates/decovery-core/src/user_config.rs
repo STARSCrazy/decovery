@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::workspace::{PluginConfig, SCHEMA, Workspace, WorkspaceError};
 
@@ -28,6 +28,24 @@ pub struct UserConfig {
     /// Compiler profile id to the directory that holds the compiler.
     #[serde(default)]
     pub toolchains: BTreeMap<String, PathBuf>,
+    #[serde(default)]
+    pub bench: BenchConfig,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[non_exhaustive]
+pub struct BenchConfig {
+    pub copies_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub drivers: BTreeMap<String, BenchDriverConfig>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct BenchDriverConfig {
+    pub command: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
 
 /// `%APPDATA%\decovery\config.toml` on Windows; elsewhere `$XDG_CONFIG_HOME/decovery/config.toml`, else

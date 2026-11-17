@@ -90,6 +90,10 @@ def run_job(job, c_root):
         shutil.copyfile(staged, os.path.join(copy_dir, source))
     # a job in a directory (a variant) is served the object named like the directory: V001.OBJ
     obj = os.path.join(OBJECTS, (cd or stem) + ".OBJ")
+    if os.environ.get("FAKE_OMF_REQUIRED_TEXT") and os.path.isfile(staged):
+        with open(staged, encoding="utf-8") as f:
+            if os.environ["FAKE_OMF_REQUIRED_TEXT"] not in f.read():
+                obj = os.path.join(OBJECTS, "FALLBACK.OBJ")
     if not os.path.isfile(obj):
         return {"status": "done", "exit_code": 1, "stdout": f"{source}(1): Error: no object\r\n"}
     shutil.copyfile(obj, os.path.join(c_root, cd or "", stem + ".OBJ"))

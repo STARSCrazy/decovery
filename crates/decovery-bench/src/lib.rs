@@ -1,10 +1,14 @@
 //! Reproducible agent benchmarks over solution-free workspace copies.
 
 mod copy;
+mod driver;
 mod legacy_view;
+mod run;
 mod suite;
 
 pub use copy::{TaskCopy, copies_dir, prepare_copy};
+pub use driver::DriverConfig;
+pub use run::{RunOptions, RunRecord, TaskResult, Totals, run_suite};
 pub use suite::{StartPoint, Suite, SuiteTask, TaskDefaults, ToolSet, read_suite};
 
 use std::path::{Path, PathBuf};

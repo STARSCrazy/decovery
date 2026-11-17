@@ -12,6 +12,7 @@ name = "decovery"
 path = "src/main.rs"
 
 [dependencies]
+decovery-bench.workspace = true
 clap.workspace = true
 decovery-core.workspace = true
 decovery-diff.workspace = true

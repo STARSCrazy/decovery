@@ -102,6 +102,53 @@ pub fn append_call(root: &Path, record: &CallRecord) -> Result<(), WorkspaceErro
     file.write_all(line.as_bytes()).map_err(io)
 }
 
+/// Requested build units: a file/full build is one; variants each reserve one unit.
+pub fn requested_builds(variants: usize) -> u32 {
+    u32::try_from(variants.max(1)).unwrap_or(u32::MAX)
+}
+
+/// Completed calls, sorted by month and append order, with file/line diagnostics for malformed records.
+pub fn read_calls(root: &Path) -> Result<(Vec<CallRecord>, Vec<String>), WorkspaceError> {
+    let dir = root.join(CALLS_DIR);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), Vec::new())),
+        Err(source) => return Err(WorkspaceError::Io { path: dir, source }),
+    };
+    let mut files = entries
+        .map(|e| e.map(|e| e.path()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|source| WorkspaceError::Io { path: dir, source })?;
+    files.sort();
+    let mut records = Vec::new();
+    let mut warnings = Vec::new();
+    for path in files
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
+    {
+        let bytes = std::fs::read(&path).map_err(|source| WorkspaceError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        for (index, line) in bytes.split(|b| *b == b'\n').enumerate() {
+            if line.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+            match serde_json::from_slice::<CallRecord>(line) {
+                Ok(record) if record.schema == 1 => records.push(record),
+                Ok(record) => warnings.push(format!(
+                    "{}:{}: unsupported schema {}",
+                    path.display(),
+                    index + 1,
+                    record.schema
+                )),
+                Err(e) => warnings.push(format!("{}:{}: {e}", path.display(), index + 1)),
+            }
+        }
+    }
+    Ok((records, warnings))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -4,6 +4,7 @@ pub mod address;
 pub mod analysis;
 pub mod archive;
 pub mod attempts;
+pub mod bench;
 pub mod calls;
 pub mod knowledge;
 pub mod migrate;
@@ -26,6 +27,7 @@ pub use attempts::{
     ATTEMPTS_DIR, AttemptBudget, AttemptOrigin, AttemptRecord, DEFAULT_ATTEMPT_BUDGET,
     append_attempts, attempt_budget, attempt_distance, distance_of, read_attempts,
 };
+pub use bench::{BenchLimits, BenchUsage};
 pub use calls::{CALLS_DIR, CallRecord, append_call};
 pub use knowledge::{
     ClaimSource, Confidence, LineComment, LocalVariable, RefutedClaim, Symbol, SymbolKind,

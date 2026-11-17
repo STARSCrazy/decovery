@@ -1,0 +1,278 @@
+//! Real CLI/MCP and native comparisons; only the external compiler and agent are synthetic.
+#[path = "../../decovery-facade/tests/support/build_fixture.rs"]
+mod build_fixture;
+
+use decovery_bench::{DriverConfig, RunOptions, RunRecord, Suite, read_suite, run_suite};
+use serde_json::{Value, json};
+use std::path::{Path, PathBuf};
+
+fn quote(path: &Path) -> String {
+    toml::Value::String(path.to_string_lossy().into_owned()).to_string()
+}
+struct Case {
+    _fixture: build_fixture::Fixture,
+    dir: tempfile::TempDir,
+    suite: Suite,
+    driver: DriverConfig,
+    options: RunOptions,
+}
+fn case(python: &str, mode: &str, tasks: usize) -> Case {
+    let fixture = build_fixture::fixture(python, ", FAKE_OMF_REQUIRED_TEXT = \"return a - b;\"");
+    let mut wrong = build_fixture::SUB.to_vec();
+    wrong[6] = 0x33;
+    fixture.write_obj(
+        "FALLBACK",
+        &[("_add", build_fixture::ADD), ("_sub", &wrong)],
+    );
+    decovery_facade::build(
+        fixture.root(),
+        &decovery_facade::BuildRequest::default(),
+        &|_| {},
+    )
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("suite.toml");
+    let entries: String = (0..tasks).map(|i| format!("[[task]]\nid = \"case/{i}:sub\"\nworkspace = {}\nfunction = \"sub\"\ntags = [\"tiny\"]\n", quote(fixture.root()))).collect();
+    std::fs::write(&path, format!("schema = 1\nname = \"synthetic\"\n[defaults]\nmax_builds = 4\nmax_tool_calls = 8\n{entries}")).unwrap();
+    let suite = read_suite(&path).unwrap();
+    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../decovery-bench/tests/fixtures/fake_driver.py")
+        .canonicalize()
+        .unwrap();
+    let mut driver = DriverConfig::default();
+    driver.command = vec![
+        python.into(),
+        "-B".into(),
+        script.to_string_lossy().into_owned(),
+        "--mcp".into(),
+        "{mcp_config}".into(),
+        "--result".into(),
+        "{result}".into(),
+        "--workdir".into(),
+        "{workdir}".into(),
+    ];
+    driver.env.insert("FAKE_MODE".into(), mode.into());
+    driver.env.insert(
+        "FAKE_SOURCE".into(),
+        "int sub(int a, int b)\n{\n return a - b;\n}\n".into(),
+    );
+    let mut options = RunOptions::new("fake", PathBuf::from(env!("CARGO_BIN_EXE_decovery")));
+    options.copies_dir = Some(dir.path().join("copies"));
+    options.seed = 17;
+    Case {
+        _fixture: fixture,
+        dir,
+        suite,
+        driver,
+        options,
+    }
+}
+fn execute(case: &Case) -> RunRecord {
+    run_suite(&case.suite, &case.driver, &case.options, &|_| {}).unwrap()
+}
+fn calls(case: &mut Case, value: Value) {
+    case.driver
+        .env
+        .insert("FAKE_CALLS".into(), value.to_string());
+}
+fn driver_answers(run: &RunRecord) -> String {
+    run.tasks[0].extra["driver_extra"]["calls"].to_string()
+}
+
+#[test]
+fn solving_driver_is_solved_by_decovery_verdict() {
+    let python = python_or_skip!();
+    let c = case(&python, "solve", 1);
+    let run = execute(&c);
+    assert_eq!(run.state, "done");
+    assert!(run.tasks[0].solved);
+    assert_eq!(run.tasks[0].verdict, "identical");
+    assert_eq!(
+        run.tasks[0].builds, 1,
+        "harness builds do not spend the agent budget"
+    );
+    assert_eq!(run.tasks[0].start_distance, Some(1));
+    assert_eq!(run.tasks[0].best_distance, Some(0));
+    let logs = c.dir.path().join("bench").join(&run.id);
+    assert!(logs.is_dir());
+    assert!(
+        std::fs::read_dir(c.options.copies_dir.as_ref().unwrap().join(&run.id))
+            .unwrap()
+            .next()
+            .is_none()
+    );
+    let log = PathBuf::from(run.tasks[0].log.as_ref().unwrap());
+    assert!(log.parent().unwrap().join("calls").is_dir());
+    assert!(log.parent().unwrap().join("usage.json").is_file());
+}
+
+#[test]
+fn idle_driver_is_unsolved_with_start_distance() {
+    let python = python_or_skip!();
+    let c = case(&python, "idle", 1);
+    let run = execute(&c);
+    assert!(!run.tasks[0].solved);
+    assert_eq!(run.tasks[0].start_distance, Some(1));
+    assert_eq!(run.tasks[0].best_distance, Some(1));
+    assert_eq!(run.tasks[0].builds, 0);
+}
+#[test]
+fn hanging_driver_is_killed_and_evaluated() {
+    let python = python_or_skip!();
+    let mut c = case(&python, "hang", 1);
+    c.suite.defaults.wall_minutes = 0;
+    let run = execute(&c);
+    let task = &run.tasks[0];
+    assert_eq!(task.exit, "timeout");
+    assert_eq!(task.verdict, "differs");
+    assert_ne!(
+        task.extra["driver_exit_code"],
+        json!(0),
+        "the hanging process must not finish naturally"
+    );
+}
+#[test]
+fn crashing_driver_is_recorded() {
+    let python = python_or_skip!();
+    let c = case(&python, "crash", 1);
+    let run = execute(&c);
+    assert_eq!(run.tasks[0].exit, "driver-error");
+    assert_eq!(run.tasks[0].extra["driver_exit_code"], 7);
+    assert_eq!(run.tasks[0].best_distance, Some(1));
+}
+#[test]
+fn tool_calls_beyond_limit_are_refused() {
+    let python = python_or_skip!();
+    let mut c = case(&python, "calls", 1);
+    c.suite.defaults.max_tool_calls = 1;
+    calls(
+        &mut c,
+        json!([{"name":"status","arguments":{}},{"name":"status","arguments":{}}]),
+    );
+    let run = execute(&c);
+    assert!(driver_answers(&run).contains("limit reached"));
+    assert_eq!(
+        run.tasks[0].tool_calls, 2,
+        "refused calls are still logged and counted"
+    );
+}
+#[test]
+fn variants_count_as_builds() {
+    let python = python_or_skip!();
+    let mut c = case(&python, "calls", 1);
+    c.suite.defaults.max_builds = 2;
+    let source = c.driver.env["FAKE_SOURCE"].clone();
+    calls(
+        &mut c,
+        json!([{"name":"build","arguments":{"function":"sub","variants":[{"function_source":source},{"function_source":"int sub(int a,int b) { return a - b; /* other */ }"}]}},{"name":"build","arguments":{"function":"sub"}}]),
+    );
+    let run = execute(&c);
+    assert_eq!(run.tasks[0].builds, 2);
+    assert!(driver_answers(&run).contains("2 of 2 builds used"));
+}
+#[test]
+fn core_tool_set_refuses_bridge_tools() {
+    let python = python_or_skip!();
+    let mut c = case(&python, "calls", 1);
+    calls(
+        &mut c,
+        json!([{"name":"search","arguments":{"function":"sub"}},{"name":"verify","arguments":{"function":"sub"}},{"name":"diagnose","arguments":{"target":"sub","deep":"registers"}}]),
+    );
+    let run = execute(&c);
+    assert_eq!(run.tasks[0].tool_calls, 3);
+    assert_eq!(
+        driver_answers(&run)
+            .matches("not available in this bench run")
+            .count(),
+        3
+    );
+}
+#[test]
+fn driver_result_tokens_are_recorded() {
+    let python = python_or_skip!();
+    let c = case(&python, "idle", 1);
+    let run = execute(&c);
+    let t = &run.tasks[0];
+    assert_eq!(t.input_tokens, Some(12));
+    assert_eq!(t.output_tokens, Some(3));
+    assert_eq!(t.cache_read_tokens, Some(7));
+    assert_eq!(t.cache_write_tokens, Some(2));
+    assert_eq!(t.cost_kind.as_deref(), Some("estimate"));
+    assert_eq!(t.cost_usd, Some(0.001));
+}
+#[test]
+fn run_limit_stops_new_tasks() {
+    let python = python_or_skip!();
+    let mut c = case(&python, "idle", 2);
+    c.options.max_total_tokens = Some(17);
+    let run = execute(&c);
+    assert_eq!(run.state, "stopped-at-limit");
+    assert_eq!(run.tasks[0].exit, "ok");
+    assert_eq!(run.tasks[1].exit, "not-run");
+}
+#[test]
+fn quota_pauses_and_resume_continues() {
+    let python = python_or_skip!();
+    let mut c = case(&python, "quota", 2);
+    c.driver.env.insert(
+        "FAKE_QUOTA_MARKER".into(),
+        c.dir
+            .path()
+            .join("quota.marker")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    let first = execute(&c);
+    assert_eq!(first.state, "paused");
+    assert_eq!(first.tasks[0].exit, "quota");
+    c.options.resume = Some(first.id.clone());
+    let second = execute(&c);
+    assert_eq!(second.id, first.id);
+    assert_eq!(second.seed, first.seed);
+    assert_eq!(second.state, "done");
+    assert!(second.tasks.iter().all(|t| t.solved));
+}
+#[test]
+fn parallel_tasks_give_same_results_as_serial() {
+    let python = python_or_skip!();
+    let mut c = case(&python, "solve", 2);
+    let serial = execute(&c);
+    c.options.parallel = 2;
+    let parallel = execute(&c);
+    let metrics = |r: &RunRecord| {
+        r.tasks
+            .iter()
+            .map(|t| (t.id.clone(), t.repeat, t.solved, t.builds, t.best_distance))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(metrics(&serial), metrics(&parallel));
+}
+#[test]
+fn run_record_matches_schema() {
+    let python = python_or_skip!();
+    let c = case(&python, "idle", 1);
+    let run = execute(&c);
+    let schema: Value =
+        serde_json::from_str(include_str!("../../../schemas/bench-run.schema.json")).unwrap();
+    fn required(schema: &Value, value: &Value) {
+        if let Some(keys) = schema["required"].as_array() {
+            for key in keys {
+                assert!(value.get(key.as_str().unwrap()).is_some(), "missing {key}");
+            }
+        }
+        if let Some(properties) = schema["properties"].as_object() {
+            for (key, child) in properties {
+                if let Some(v) = value.get(key) {
+                    required(child, v);
+                }
+            }
+        }
+        if let Some(items) = schema.get("items") {
+            for item in value.as_array().into_iter().flatten() {
+                required(items, item);
+            }
+        }
+    }
+    required(&schema, &serde_json::to_value(&run).unwrap());
+    assert_eq!(serde_json::to_value(run).unwrap()["schema"], 1);
+}

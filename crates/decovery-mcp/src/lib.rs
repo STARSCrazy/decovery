@@ -12,6 +12,7 @@
 //! `mcp` or `DECOVERY_ACTOR`); no tool reads it.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use decovery_core::{CallRecord, ClaimSource, Confidence, append_call};
@@ -49,6 +50,22 @@ const ARGUMENTS_REJECTED: &str = "failed to deserialize parameters:";
 
 /// Serves the twelve tools for the workspace at `root` on stdin/stdout until the client disconnects.
 pub fn serve_stdio(root: PathBuf) -> Result<(), FacadeError> {
+    serve_stdio_with_limits(root, None)
+}
+
+/// A benchmark endpoint optionally enforces schema-one limits before dispatching any tool.
+pub fn serve_stdio_with_limits(
+    root: PathBuf,
+    limits_path: Option<PathBuf>,
+) -> Result<(), FacadeError> {
+    let bench = limits_path
+        .map(|path| -> Result<_, FacadeError> {
+            let limits = decovery_core::BenchLimits::read(&path)?;
+            let usage = decovery_core::BenchUsage::load(&root)?;
+            usage.save(&root)?;
+            Ok(Arc::new(Mutex::new(LimitState { limits, usage })))
+        })
+        .transpose()?;
     decovery_facade::keep_legacy_plugin(true);
     decovery_facade::set_actor("mcp");
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -56,7 +73,9 @@ pub fn serve_stdio(root: PathBuf) -> Result<(), FacadeError> {
         .build()
         .map_err(|e| FacadeError::Invalid(format!("cannot start the MCP server: {e}")))?;
     runtime.block_on(async move {
-        let service = Server::new(root)
+        let mut server = Server::new(root);
+        server.bench = bench;
+        let service = server
             .serve(rmcp::transport::stdio())
             .await
             .map_err(|e| FacadeError::Invalid(format!("MCP initialization failed: {e}")))?;
@@ -72,6 +91,12 @@ pub fn serve_stdio(root: PathBuf) -> Result<(), FacadeError> {
 struct Server {
     root: PathBuf,
     tool_router: ToolRouter<Self>,
+    bench: Option<Arc<Mutex<LimitState>>>,
+}
+
+struct LimitState {
+    limits: decovery_core::BenchLimits,
+    usage: decovery_core::BenchUsage,
 }
 
 /// Default inline budget of `show` and `find`.
@@ -349,6 +374,7 @@ impl Server {
         Server {
             root,
             tool_router: Self::tool_router(),
+            bench: None,
         }
     }
 
@@ -610,8 +636,15 @@ impl ServerHandler for Server {
     ) -> Result<CallToolResponse, ErrorData> {
         let started = Instant::now();
         let mut record = call_record(&request.name, request.arguments.as_ref());
-        let tcc = ToolCallContext::new(self, request, context);
-        let mut result = self.tool_router.call(tcc).await;
+        let requested = record.clone();
+        let (charged, denial) = self.admit(&record);
+        let mut result = if let Some(reason) = denial {
+            Ok(CallToolResponse::Complete(refused(reason)))
+        } else {
+            self.tool_router
+                .call(ToolCallContext::new(self, request, context))
+                .await
+        };
         record.seconds = started.elapsed().as_secs_f64();
         record.outcome = match &mut result {
             Err(_) => "refused".into(),
@@ -644,6 +677,16 @@ impl ServerHandler for Server {
         if let Err(e) = append_call(&self.root, &record) {
             eprintln!("decovery mcp: the call was not logged: {e}");
         }
+        if let Some(bench) = &self.bench {
+            let mut state = bench.lock().unwrap_or_else(|p| p.into_inner());
+            if charged && record.outcome == "refused" {
+                state.usage.builds = state.usage.builds.saturating_sub(requested.builds);
+                state.usage.searches = state.usage.searches.saturating_sub(requested.searches);
+            }
+            if let Err(e) = state.usage.save(&self.root) {
+                eprintln!("decovery mcp: usage was not saved: {e}");
+            }
+        }
         result
     }
 
@@ -655,6 +698,25 @@ impl ServerHandler for Server {
 }
 
 impl Server {
+    fn admit(&self, record: &CallRecord) -> (bool, Option<String>) {
+        let Some(bench) = &self.bench else {
+            return (false, None);
+        };
+        let mut state = bench.lock().unwrap_or_else(|p| p.into_inner());
+        let denial = state.limits.refusal(&state.usage, record);
+        let mut cost = record.clone();
+        if denial.is_some() {
+            cost.builds = 0;
+            cost.searches = 0;
+        }
+        state.usage.record(&cost);
+        if let Err(e) = state.usage.save(&self.root) {
+            state.usage.builds = state.usage.builds.saturating_sub(cost.builds);
+            state.usage.searches = state.usage.searches.saturating_sub(cost.searches);
+            return (false, Some(format!("cannot persist bench usage: {e}")));
+        }
+        (denial.is_none(), denial)
+    }
     /// Runs the long facade call `op` on the blocking pool and forwards its progress as MCP progress
     /// notifications when the client sent a progress token.
     async fn with_progress<F>(
@@ -742,7 +804,7 @@ fn call_record(tool: &str, arguments: Option<&JsonObject>) -> CallRecord {
                 .and_then(|a| a.get("variants"))
                 .and_then(serde_json::Value::as_array)
                 .map_or(0, Vec::len);
-            record.builds = u32::try_from(variants.max(1)).unwrap_or(u32::MAX);
+            record.builds = decovery_core::calls::requested_builds(variants);
         }
         "search" => record.searches = 1,
         _ => {}

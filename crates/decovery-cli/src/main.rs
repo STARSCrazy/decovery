@@ -259,7 +259,11 @@ enum Command {
         limit: usize,
     },
     /// Serve the tools to AI agents over MCP on stdin/stdout (stdout carries only MCP frames).
-    Mcp,
+    Mcp {
+        /// Benchmark limits file (schema one); no limits are applied without it.
+        #[arg(long)]
+        limits: Option<PathBuf>,
+    },
     /// Install tools into `extern/` and register them in the user config.
     Setup {
         #[command(subcommand)]
@@ -420,7 +424,7 @@ fn call_record(command: &Command) -> Option<CallRecord> {
     let (tool, target, operation): (&str, Option<&str>, Option<&str>) = match command {
         Command::Migrate { .. }
         | Command::MigrateAttempts { .. }
-        | Command::Mcp
+        | Command::Mcp { .. }
         | Command::Setup { .. } => return None,
         Command::Compare { function, .. } => ("compare", Some(function), None),
         Command::Show { target } => ("show", Some(target), None),
@@ -475,7 +479,7 @@ fn call_record(command: &Command) -> Option<CallRecord> {
             ..
         } => {
             let variants = variant.len() + function_source.len();
-            record.builds = u32::try_from(variants.max(1)).unwrap_or(u32::MAX);
+            record.builds = decovery_core::calls::requested_builds(variants);
         }
         Command::Search { .. } => record.searches = 1,
         _ => {}
@@ -748,7 +752,9 @@ fn run(cli: Cli) -> ExitCode {
             offset,
             limit,
         } => finish(detail(&cli.workspace, &handle, offset, limit, cli.json)),
-        Command::Mcp => finish(decovery_mcp::serve_stdio(cli.workspace)),
+        Command::Mcp { limits } => {
+            finish(decovery_mcp::serve_stdio_with_limits(cli.workspace, limits))
+        }
         Command::Setup {
             what:
                 SetupCommand::Ghidra {
