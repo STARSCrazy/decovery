@@ -42,6 +42,9 @@ struct IndexFile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Entry {
     address: Address,
+    /// Last address of the analysed range the forms were decoded from; a changed range re-decodes the entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    end: Option<Address>,
     name: String,
     file: String,
     #[serde(default)]
@@ -127,8 +130,14 @@ pub fn exemplar_index(session: &Session) -> Result<ExemplarIndex, FacadeError> {
     });
 
     let members = members(session);
+    let analysed = session.analysis.index();
     let before = file.entries.len();
-    file.entries.retain(|e| members.contains_key(&e.address));
+    // a member whose analysed range changed is dropped here and decoded again below
+    file.entries.retain(|e| {
+        members.contains_key(&e.address)
+            && e.end.is_some()
+            && analysed.function_at(e.address).map(|f| f.end) == e.end
+    });
     changed |= file.entries.len() != before;
     for entry in &mut file.entries {
         let record = members[&entry.address];
@@ -166,8 +175,10 @@ pub fn exemplar_index(session: &Session) -> Result<ExemplarIndex, FacadeError> {
                 &mut file.forms,
             );
             let coarse = intern(&coarse_forms(code, bits, base), &mut ids, &mut file.forms);
+            let end = index.function_at(record.address).map(|f| f.end);
             file.entries.push(Entry {
                 address: record.address,
+                end,
                 name: record.name.clone(),
                 file: record.file.clone().unwrap_or_default(),
                 flags: record.flags.clone().unwrap_or_default(),
@@ -215,6 +226,7 @@ impl ExemplarIndex {
             .enumerate()
             .map(|(k, forms)| Entry {
                 address: Address::Flat(u32::try_from(k).unwrap_or(u32::MAX)),
+                end: None,
                 name: format!("member_{k}"),
                 file: String::new(),
                 flags: String::new(),

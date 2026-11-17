@@ -353,3 +353,71 @@ fn lookup_of_10000_members_is_fast_in_wall_time() {
     let limit_ms = if cfg!(debug_assertions) { 50 } else { 5 };
     assert!(elapsed.as_millis() < limit_ms, "{elapsed:?}");
 }
+
+#[test]
+fn changed_range_redecodes_entry() {
+    // the analysed range of a member changes under the same target: its forms must follow the new range
+    let f = workspace();
+    seed(&f, &[record("seg:0000:0010", "add", "a.c", "identical")]);
+    exemplar_index(&Session::open(f.root()).unwrap()).unwrap();
+    assert_eq!(
+        index_file(&f)["entries"][0]["forms"]
+            .as_array()
+            .unwrap()
+            .len(),
+        6
+    );
+
+    let root = f.root();
+    let workspace = decovery_core::Workspace::open(root).unwrap();
+    let lock = workspace.lock(std::time::Duration::from_secs(5)).unwrap();
+    let mut analysis = decovery_core::Analysis::new(
+        decovery_core::Provider::new("test", "1"),
+        "aa",
+        decovery_core::knowledge_hash(root).unwrap(),
+        "2026-11-06",
+    );
+    let seg = |off: u16| Address::Seg { seg: 0, off };
+    analysis.functions = vec![
+        // `push bp; mov bp, sp` only
+        decovery_core::AnalyzedFunction::new(seg(0x10), seg(0x12), 3),
+        decovery_core::AnalyzedFunction::new(seg(0x20), seg(0x2A), 11),
+        decovery_core::AnalyzedFunction::new(seg(0x30), seg(0x34), 5),
+    ];
+    analysis.save(root, &lock).unwrap();
+    drop(lock);
+
+    exemplar_index(&Session::open(root).unwrap()).unwrap();
+    assert_eq!(
+        index_file(&f)["entries"][0]["forms"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn show_budget_covers_source_text() {
+    // the current definition counts against the budget like the pseudo-C; beyond it, it becomes a handle
+    let f = workspace();
+    let long = format!(
+        "int add(int a, int b)\n{{\n    return a + b;\n}}\n\nint sub(int a, int b)\n{{\n    /* {} */\n    return a - b;\n}}\n",
+        "x".repeat(9000)
+    );
+    std::fs::write(f.root().join("src/a.c"), long).unwrap();
+    let session = Session::open(f.root()).unwrap();
+    let response = show(&session, "sub", Budget::default()).unwrap();
+    assert_eq!(response.data["source"]["file"], "a.c");
+    assert!(
+        response.data["source"]["text"].is_null(),
+        "{}",
+        response.data["source"]
+    );
+    let handle = response
+        .handles
+        .iter()
+        .find(|h| h.kind == "source-text")
+        .expect("a source-text handle");
+    assert_eq!(response.data["source"]["handle"], handle.id.as_str());
+}

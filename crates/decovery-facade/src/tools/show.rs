@@ -70,8 +70,7 @@ pub fn show(session: &Session, target: &str, budget: Budget) -> Result<Response,
             })
         })
         .collect();
-    let source =
-        current_source(session, start).map(|(file, text)| json!({ "file": file, "text": text }));
+    let source = current_source(session, start);
     let mut handles = Vec::new();
     let shown = if text.chars().count() > budget.chars {
         let mut handle = store_handle(root, "function-text", &text)?;
@@ -81,6 +80,22 @@ pub fn show(session: &Session, target: &str, budget: Budget) -> Result<Response,
         cut
     } else {
         text
+    };
+    // the current definition shares the budget with the pseudo-C; beyond it, it is a handle of its own
+    let source = match source {
+        None => serde_json::Value::Null,
+        Some((file, text)) => {
+            let left = budget.chars.saturating_sub(shown.chars().count());
+            if text.chars().count() > left {
+                let mut handle = store_handle(root, "source-text", &text)?;
+                handle.description = format!("current definition of {name} in src/{file}");
+                let id = handle.id.clone();
+                handles.push(handle);
+                json!({ "file": file, "text": null, "handle": id })
+            } else {
+                json!({ "file": file, "text": text })
+            }
+        }
     };
     let mut response = Response::new(
         summary,

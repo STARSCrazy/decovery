@@ -48,14 +48,25 @@ fn copy_tree(from: &Path, to: &Path) {
     }
 }
 
-/// Names of the functions Decomp's `wissen/nachbau.toml` records as identical (`ergebnis = "bytegleich"`).
+/// Names of the functions Decomp's `_vorbilder` takes as candidates from `wissen/nachbau.toml`: `ergebnis =
+/// "identisch"`, no differing instructions (`befehle_abweichend` missing or 0), source not `.asm`/`.s`.
 fn decomp_identical(workspace: &Path) -> BTreeSet<String> {
     let text = std::fs::read_to_string(workspace.join("wissen/nachbau.toml")).unwrap();
     let table: toml::Table = text.parse().unwrap();
     let mut names = BTreeSet::new();
     for (_, value) in table {
         for item in value.as_array().into_iter().flatten() {
-            let identical = item.get("ergebnis").and_then(|v| v.as_str()) == Some("bytegleich");
+            let identical = item.get("ergebnis").and_then(|v| v.as_str()) == Some("identisch")
+                && item
+                    .get("befehle_abweichend")
+                    .and_then(|v| v.as_integer())
+                    .unwrap_or(0)
+                    == 0
+                && !item
+                    .get("datei")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_ascii_lowercase)
+                    .is_some_and(|d| d.ends_with(".asm") || d.ends_with(".s"));
             if let (true, Some(name)) = (identical, item.get("name").and_then(|v| v.as_str())) {
                 names.insert(name.to_string());
             }
@@ -158,4 +169,49 @@ fn exemplars_match_decomp_vorbilder() {
         top1 >= NEEDED && top3 >= NEEDED,
         "top 1 equal {top1}/{CASES}, top 3 sharing {top3}/{CASES}"
     );
+}
+
+#[test]
+fn decomp_identical_follows_decomp_member_rule() {
+    // Decomp's `_vorbilder`: `ergebnis == "identisch"`, no differing instructions, not from assembler
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("wissen")).unwrap();
+    std::fs::write(
+        dir.path().join("wissen/nachbau.toml"),
+        r#"[[funktion]]
+adresse = "0x10"
+name = "same"
+datei = "a.c"
+ergebnis = "identisch"
+befehle_abweichend = 0
+
+[[funktion]]
+adresse = "0x20"
+name = "old_entry"
+datei = "a.c"
+ergebnis = "identisch"
+
+[[funktion]]
+adresse = "0x30"
+name = "longer_original"
+datei = "a.c"
+ergebnis = "identisch"
+befehle_abweichend = 2
+
+[[funktion]]
+adresse = "0x40"
+name = "assembler"
+datei = "b.ASM"
+ergebnis = "identisch"
+
+[[funktion]]
+adresse = "0x50"
+name = "differs"
+datei = "a.c"
+ergebnis = "abweichend"
+"#,
+    )
+    .unwrap();
+    let names: Vec<String> = decomp_identical(dir.path()).into_iter().collect();
+    assert_eq!(names, ["old_entry", "same"]);
 }
