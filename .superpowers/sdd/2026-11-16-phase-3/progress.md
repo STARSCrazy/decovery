@@ -93,3 +93,4 @@ Preserve explicit Ghidra aliases so linked destinations remain protected.
 Co-Authored-By: Codex <noreply@openai.com>
 ```
 Task 6: implemented on 796e193 as `feat(bench): driver contract, limits and the bench run (task 6)` (DONE_WITH_CONCERNS: schema rewritten, fake-runner variant fix, call-limit exit, `bench run` CLI, ADR 0009; P19 left to Task 11; workspace 642 passed / 17 ignored). NOT YET REVIEWED.
+Task 7: implemented (commit 'feat(bench): run report and compare'): stats (Wilson, Newcombe, bootstrap), report/compare with text and JSON, CLI `bench report|compare`; ruling: differences are B minus A, paired bootstrap when task sets match, not-run/quota left out; workspace tests all green. NOT YET REVIEWED.

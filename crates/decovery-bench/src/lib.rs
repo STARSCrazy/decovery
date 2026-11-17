@@ -3,12 +3,20 @@
 mod copy;
 mod driver;
 mod legacy_view;
+mod report;
 mod run;
+mod stats;
 mod suite;
 
 pub use copy::{TaskCopy, copies_dir, prepare_copy};
 pub use driver::DriverConfig;
+pub use report::{
+    GroupBy, GroupReport, MetricComparison, MetricSummary, Report, RunComparison, compare, report,
+};
 pub use run::{RunOptions, RunRecord, TaskResult, Totals, run_suite};
+pub use stats::{
+    bootstrap_mean_difference, bootstrap_paired_difference, newcombe_difference, wilson,
+};
 pub use suite::{StartPoint, Suite, SuiteTask, TaskDefaults, ToolSet, read_suite};
 
 use std::path::{Path, PathBuf};

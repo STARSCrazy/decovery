@@ -312,6 +312,30 @@ enum BenchCommand {
         #[arg(long)]
         keep: bool,
     },
+    /// Success rate with a 95 % Wilson interval and cost medians/means of one run record. Exit code 0, 2 on
+    /// errors.
+    Report {
+        /// Run record (`<suite dir>/bench/<run-id>.json`).
+        run: PathBuf,
+        /// Group the tasks by workspace, profile or tag (a task counts in each of its tags).
+        #[arg(long, value_enum)]
+        group_by: Option<BenchGroupBy>,
+    },
+    /// Compare two run records metric by metric with 95 % intervals (difference = B minus A); paired by task
+    /// when both hold the same tasks. Exit code 0, 2 on errors.
+    Compare {
+        /// Run record A (the baseline).
+        a: PathBuf,
+        /// Run record B.
+        b: PathBuf,
+    },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum BenchGroupBy {
+    Workspace,
+    Profile,
+    Tag,
 }
 
 #[derive(Subcommand)]
@@ -828,6 +852,12 @@ fn run(cli: Cli) -> ExitCode {
             options.keep = keep;
             bench_run(&suite, &options, cli.json)
         }
+        Command::Bench {
+            what: BenchCommand::Report { run, group_by },
+        } => bench_report(&run, group_by, cli.json),
+        Command::Bench {
+            what: BenchCommand::Compare { a, b },
+        } => bench_compare(&a, &b, cli.json),
         Command::Mcp { limits } => {
             finish(decovery_mcp::serve_stdio_with_limits(cli.workspace, limits))
         }
@@ -880,6 +910,50 @@ fn run(cli: Cli) -> ExitCode {
             what: SetupCommand::Toolchain { profile, dir },
         } => finish(setup_toolchain(&profile, &dir, cli.json)),
     }
+}
+
+/// Print the JSON or the text form of a result; errors exit 2.
+fn bench_print(result: Result<(String, String), String>, json: bool) -> ExitCode {
+    match result {
+        Ok((j, t)) => {
+            println!("{}", if json { &j } else { &t }.trim_end());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// `bench report`.
+fn bench_report(run: &Path, group_by: Option<BenchGroupBy>, json: bool) -> ExitCode {
+    let group = match group_by {
+        None => decovery_bench::GroupBy::None,
+        Some(BenchGroupBy::Workspace) => decovery_bench::GroupBy::Workspace,
+        Some(BenchGroupBy::Profile) => decovery_bench::GroupBy::Profile,
+        Some(BenchGroupBy::Tag) => decovery_bench::GroupBy::Tag,
+    };
+    let result = decovery_bench::RunRecord::read(run)
+        .map_err(|e| e.to_string())
+        .and_then(|record| {
+            let report = decovery_bench::report(&record, group);
+            let json = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
+            Ok((json, report.to_text()))
+        });
+    bench_print(result, json)
+}
+
+/// `bench compare`.
+fn bench_compare(a: &Path, b: &Path, json: bool) -> ExitCode {
+    let result = (|| {
+        let a = decovery_bench::RunRecord::read(a).map_err(|e| e.to_string())?;
+        let b = decovery_bench::RunRecord::read(b).map_err(|e| e.to_string())?;
+        let comparison = decovery_bench::compare(&a, &b);
+        let json = serde_json::to_string_pretty(&comparison).map_err(|e| e.to_string())?;
+        Ok((json, comparison.to_text()))
+    })();
+    bench_print(result, json)
 }
 
 /// `bench run`: the record as JSON or one line per task, exit 0 only for a finished run.
