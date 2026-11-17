@@ -341,6 +341,43 @@ fn variants_still_write_no_rebuild_record() {
     assert_eq!(attempts(&f, SUB_AT).len(), 1);
 }
 
+#[test]
+fn build_reports_malformed_attempt_lines() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    let dir = f.root().join("cache/attempts");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("seg_0000_0020.jsonl"), "{broken\n").unwrap();
+    let response = build_files(&f, &["a.c"]);
+    let warnings = response.data["warnings"].to_string();
+    assert!(warnings.contains("seg_0000_0020.jsonl:1"), "{warnings}");
+}
+
+#[test]
+fn parked_filter_reports_malformed_attempt_lines() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    let dir = f.root().join("cache/attempts");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("seg_0000_0020.jsonl"), "{broken\n").unwrap();
+    let mut query = FindQuery::new(FindWhat::Functions);
+    query.filter = vec![FunctionFilter::Parked];
+    let response = find(&Session::open(f.root()).unwrap(), &query, Budget::default()).unwrap();
+    let warnings = response.data["warnings"].to_string();
+    assert!(warnings.contains("seg_0000_0020.jsonl:1"), "{warnings}");
+}
+
+#[test]
+fn parked_filter_does_not_hide_unreadable_attempt_shards() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    std::fs::create_dir_all(f.root().join("cache/attempts/seg_0000_0020.jsonl")).unwrap();
+    let mut query = FindQuery::new(FindWhat::Functions);
+    query.filter = vec![FunctionFilter::Parked];
+    let error = find(&Session::open(f.root()).unwrap(), &query, Budget::default()).unwrap_err();
+    assert!(error.to_string().contains("seg_0000_0020.jsonl"), "{error}");
+}
+
 // -- the bridge's search -------------------------------------------------------------------------------------
 
 fn toml_string(s: &str) -> String {

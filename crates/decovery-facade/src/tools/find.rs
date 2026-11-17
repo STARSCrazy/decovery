@@ -95,13 +95,15 @@ pub fn find(session: &Session, query: &FindQuery, budget: Budget) -> Result<Resp
     }
     let pattern = query.pattern.as_deref().map(Pattern::new);
     match query.what {
-        FindWhat::Functions => finish(
-            session,
-            "functions",
-            functions(session, query, pattern),
-            query,
-            budget,
-        ),
+        FindWhat::Functions => {
+            let mut warnings = Vec::new();
+            let rows = functions(session, query, pattern, &mut warnings)?;
+            let mut response = finish(session, "functions", rows, query, budget)?;
+            if !warnings.is_empty() {
+                response.data["warnings"] = json!(warnings);
+            }
+            Ok(response)
+        }
         FindWhat::Names => finish(session, "names", names(session, pattern), query, budget),
         FindWhat::Strings => finish(session, "strings", strings(session, pattern), query, budget),
         FindWhat::Code => {
@@ -190,9 +192,12 @@ fn finish(
     Ok(response)
 }
 
-/// Whether the function at `start` has attempts and their budget is spent without reaching identical; an
-/// unreadable shard counts as no attempts.
-fn is_parked(session: &Session, start: Address) -> bool {
+/// Whether the function at `start` has spent its attempt budget. Report damaged lines and propagate I/O errors.
+fn is_parked(
+    session: &Session,
+    start: Address,
+    warnings: &mut Vec<String>,
+) -> Result<bool, FacadeError> {
     let limit = session
         .workspace
         .config
@@ -200,10 +205,9 @@ fn is_parked(session: &Session, start: Address) -> bool {
         .as_ref()
         .and_then(|r| r.attempt_budget)
         .unwrap_or(DEFAULT_ATTEMPT_BUDGET);
-    match read_attempts(&session.workspace.root, start) {
-        Ok((records, _)) => !records.is_empty() && attempt_budget(&records, limit).parked(),
-        Err(_) => false,
-    }
+    let (records, issues) = read_attempts(&session.workspace.root, start)?;
+    warnings.extend(issues);
+    Ok(!records.is_empty() && attempt_budget(&records, limit).parked())
 }
 
 fn kebab_confidence(c: Confidence) -> &'static str {
@@ -222,7 +226,12 @@ struct Entry {
     rebuild: &'static str,
 }
 
-fn functions(session: &Session, query: &FindQuery, pattern: Option<Pattern>) -> Vec<Row> {
+fn functions(
+    session: &Session,
+    query: &FindQuery,
+    pattern: Option<Pattern>,
+    warnings: &mut Vec<String>,
+) -> Result<Vec<Row>, FacadeError> {
     let index = session.analysis.index();
     let rebuild: HashMap<Address, RebuildResult> = session
         .rebuild
@@ -245,6 +254,8 @@ fn functions(session: &Session, query: &FindQuery, pattern: Option<Pattern>) -> 
             Some(RebuildResult::Error) => "error",
             Some(_) => "other",
         };
+        let parked = query.filter.contains(&FunctionFilter::Parked)
+            && is_parked(session, f.start, warnings)?;
         let keep = query.filter.iter().all(|flt| match flt {
             FunctionFilter::Named => status != "unnamed",
             FunctionFilter::Unnamed => status == "unnamed",
@@ -253,7 +264,7 @@ fn functions(session: &Session, query: &FindQuery, pattern: Option<Pattern>) -> 
             FunctionFilter::NotTried => rebuild == "not-tried",
             FunctionFilter::Identical => rebuild == "identical",
             FunctionFilter::Differs => rebuild == "differs",
-            FunctionFilter::Parked => is_parked(session, f.start),
+            FunctionFilter::Parked => parked,
         });
         if !keep {
             continue;
@@ -272,7 +283,7 @@ fn functions(session: &Session, query: &FindQuery, pattern: Option<Pattern>) -> 
         FunctionSort::Callers => entries.sort_by_key(|e| (std::cmp::Reverse(e.callers), e.start)),
         FunctionSort::Size => entries.sort_by_key(|e| (std::cmp::Reverse(e.size), e.start)),
     }
-    entries
+    Ok(entries
         .into_iter()
         .map(|e| {
             row(
@@ -294,7 +305,7 @@ fn functions(session: &Session, query: &FindQuery, pattern: Option<Pattern>) -> 
                 ],
             )
         })
-        .collect()
+        .collect())
 }
 
 pub(crate) fn distinct_callers(index: &AnalysisIndex<'_>, f: Address) -> usize {

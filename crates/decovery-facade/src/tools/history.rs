@@ -298,9 +298,16 @@ pub(crate) fn record_attempts(root: &Path, tried: Vec<Tried>) -> Vec<String> {
     let mut records = Vec::new();
     for mut t in tried {
         let previous = last.entry(t.record.address).or_insert_with(|| {
-            read_attempts(root, t.record.address)
-                .ok()
-                .and_then(|(mut records, _)| records.pop())
+            match read_attempts(root, t.record.address) {
+                Ok((mut records, issues)) => {
+                    warnings.extend(issues);
+                    records.pop()
+                }
+                Err(e) => {
+                    warnings.push(format!("attempt history could not be read: {e}"));
+                    None
+                }
+            }
         });
         if previous.as_ref().is_some_and(|p| p.same_attempt(&t.record)) {
             continue;
@@ -381,7 +388,10 @@ pub fn history(
     let best_text = match best {
         Some((0, _)) => "identical".to_string(),
         Some((u64::MAX, _)) => "differs".to_string(),
-        Some((d, _)) => format!("{d} instructions differ"),
+        Some((d, r)) => format!(
+            "{} instructions differ",
+            r.instructions_differing.map_or(d, u64::from)
+        ),
         None => "none compared".to_string(),
     };
     let parked = spent.parked() && !records.is_empty();

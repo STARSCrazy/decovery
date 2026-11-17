@@ -134,7 +134,7 @@ impl AttemptRecord {
     }
 
     /// Whether this attempt is one of the agent's own and counts toward the budget: origin `build` or `function`,
-    /// and `variant` only when a caller (`cli`, `mcp`) supplied it; `search`, `bench` and `migrate` never count,
+    /// and `variant` only when a caller (`cli`, `mcp`, `bench:<run-id>`) supplied it; `search`, `bench` and `migrate` never count,
     /// nor does anything made by the bench harness itself.
     pub fn counts_toward_budget(&self) -> bool {
         let actor = self.actor.as_deref();
@@ -143,7 +143,9 @@ impl AttemptRecord {
         }
         match self.origin {
             AttemptOrigin::Build | AttemptOrigin::Function => true,
-            AttemptOrigin::Variant => matches!(actor, Some("cli" | "mcp")),
+            AttemptOrigin::Variant => {
+                actor.is_some_and(|a| matches!(a, "cli" | "mcp") || a.starts_with("bench:"))
+            }
             AttemptOrigin::Search | AttemptOrigin::Bench | AttemptOrigin::Migrate => false,
         }
     }
@@ -263,7 +265,9 @@ pub fn read_attempts(
 }
 
 /// How far a compared attempt is from identical: 0 identical, else the instructions that differ (the largest
-/// number when that count is unknown). `None` when the attempt was not compared (`error` or an unknown value).
+/// number when that count is unknown). A non-identical result with zero differing instructions has distance 1:
+/// reference blockers can remain, and only identical has distance 0.
+/// `None` when the attempt was not compared (`error` or an unknown value).
 ///
 /// This is the one meaning of "better" in decovery: smaller is better, `None` is worse than any number.
 pub fn distance_of(
@@ -281,7 +285,7 @@ pub fn distance_of(
             RebuildResult::Error | RebuildResult::Other => false,
         },
     };
-    compared.then(|| instructions_differing.map_or(u64::MAX, u64::from))
+    compared.then(|| instructions_differing.map_or(u64::MAX, |n| u64::from(n).max(1)))
 }
 
 /// [`distance_of`] for an attempt record.
@@ -324,10 +328,18 @@ pub fn attempt_budget(records: &[AttemptRecord], limit: u32) -> AttemptBudget {
         let Some(distance) = attempt_distance(record) else {
             continue;
         };
+        // A judged automated search can solve the function without spending the agent's own budget.
+        if record.actor.as_deref() != Some(HARNESS_ACTOR) && distance == 0 {
+            budget.best = Some(0);
+            budget.since_progress = 0;
+        }
         if !record.counts_toward_budget() || !seen.insert(record.body_hash.as_str()) {
             continue;
         }
         budget.own += 1;
+        if distance == 0 {
+            continue;
+        }
         if budget.best.is_none_or(|best| distance < best) {
             budget.best = Some(distance);
             budget.since_progress = 0;
