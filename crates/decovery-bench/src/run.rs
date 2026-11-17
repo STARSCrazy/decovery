@@ -751,6 +751,11 @@ fn build(
     let mut bytes = output.stdout;
     bytes.extend_from_slice(&output.stderr);
     super::copy::write(log, &bytes)?;
+    // 0 = identical, 1 = built but not identical; anything else did not build, so `rebuild.toml` still holds an
+    // older record (possibly the agent's) that must not become the harness's verdict
+    if !matches!(output.status.code(), Some(0 | 1)) {
+        return Ok(("unchecked".into(), None));
+    }
     let record = read_rebuild(root)?.into_iter().find(|r| r.name == name);
     Ok(record.map_or(("unchecked".into(), None), |r| {
         (
@@ -758,4 +763,31 @@ fn build(
             distance_of(r.result, r.verdict, Some(r.instructions_differing)),
         )
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_harness_build_does_not_reuse_a_stale_verdict() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("knowledge")).unwrap();
+        // a record left by an earlier build (for example the agent's), saying identical
+        std::fs::write(
+            root.join("knowledge/rebuild.toml"),
+            "schema = 1\n[[function]]\naddress = \"flat:00000010\"\nname = \"sub\"\nfile = \"a.c\"\nresult = \"identical\"\nverdict = \"identical\"\n",
+        )
+        .unwrap();
+        // the test binary rejects the build arguments and exits non-zero without touching the record
+        let exe = std::env::current_exe().unwrap();
+        let (verdict, distance) =
+            build(&exe, root, "a.c", "sub", &root.join("final-build.log")).unwrap();
+        assert_eq!(
+            verdict, "unchecked",
+            "a failed build must not report the old verdict"
+        );
+        assert_eq!(distance, None);
+    }
 }
