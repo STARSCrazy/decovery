@@ -48,7 +48,10 @@ def ghidra_project_dir(cache_dir: Path) -> Path:
     """Where Decomp keeps the Ghidra project of a workspace whose cache is `cache_dir`: `cache/ghidra`, or, when a
     path component starts with a dot (Ghidra refuses those), `%LOCALAPPDATA%/decomp/ghidra/<sha256 of the path>`.
     Mirrors `decomp.engine.ghidra.engine.GhidraEngine._projektordner`."""
-    folder = (Path(cache_dir) / "ghidra").resolve()
+    folder = Path(cache_dir) / "ghidra"
+    if _is_link(folder):
+        return folder  # Keep the alias so copy_ghidra can still refuse a linked destination.
+    folder = folder.resolve()
     if not any(part.startswith(".") for part in folder.parts[1:]):
         return folder
     base = Path(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()) / "decomp" / "ghidra"

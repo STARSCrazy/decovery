@@ -486,6 +486,7 @@ decovery/
     decovery-objects/     omf, coff, a.out (elf via `object`)
     decovery-x86/         iced wrapper, CFG, data flow, calling-convention detection
     decovery-toolchain/   profiles, runners, build orchestration
+    decovery-bench/       suites, solution-free task copies, external agent-driver runs and statistics
     decovery-diff/        objdiff-core adapter, instruction alignment, metrics
     decovery-runtime/     runtime/emulator contracts + generic records (coverage, calls, snapshots, cases)
     decovery-source-c/    C frontend

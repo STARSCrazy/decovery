@@ -283,6 +283,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "decovery-bench"
+version = "0.2.0"
+dependencies = [
+ "decovery-core",
+ "decovery-facade",
+ "decovery-toolchain",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
 name = "decovery-cli"
 version = "0.2.0"
 dependencies = [

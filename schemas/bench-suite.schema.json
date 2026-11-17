@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "decovery benchmark suite",
+  "type": "object",
+  "required": ["schema", "name", "task"],
+  "properties": {
+    "schema": { "const": 1 },
+    "name": { "type": "string", "minLength": 1 },
+    "defaults": {
+      "type": "object",
+      "properties": {
+        "start": { "enum": ["stub", "pseudo-c"], "default": "stub" },
+        "tools": { "enum": ["core", "core-legacy", "core+legacy"], "default": "core", "description": "core+legacy is an input alias; serialized ids use core-legacy" },
+        "max_builds": { "type": "integer", "minimum": 0, "default": 40 },
+        "max_tool_calls": { "type": "integer", "minimum": 0, "default": 120 },
+        "max_searches": { "type": "integer", "minimum": 0, "description": "Default 0 for core, 2 for core-legacy" },
+        "wall_minutes": { "type": "integer", "minimum": 0, "default": 15 },
+        "max_tokens": { "type": "integer", "minimum": 0 },
+        "max_cost_usd": { "type": "number", "minimum": 0 },
+        "prompt": { "type": "string", "description": "Absolute or relative to the suite file" }
+      }
+    },
+    "task": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["workspace", "function"],
+        "properties": {
+          "id": { "type": "string", "description": "Default: workspace directory name/function; run directories must use a separate safe task key" },
+          "workspace": { "type": "string", "description": "Absolute or relative to the suite file" },
+          "function": { "type": "string", "description": "Name or address of a function with a native identical verdict and a source definition" },
+          "start": { "enum": ["stub", "pseudo-c"] },
+          "tags": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    }
+  }
+}

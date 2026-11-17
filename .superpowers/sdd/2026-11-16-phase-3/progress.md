@@ -49,3 +49,46 @@ STOPPED here on owner's request. Resume: generate review package 505dd60..e1ae43
 - Task 4 ruling (B/T4): imported Decomp results remain evidence (`verdict = None`, `extra.decomp_result`); an unjudged imported identical result cannot have distance zero or clear native parking. Hash algorithm/version is preserved as `decomp-sha256[-text-v2]:<hex>`. Local timestamps use the current machine UTC offset at migration and retain raw time and offset in extras (historical DST can differ, as accepted in the prior ruling).
 - Task 4: implementation ready, uncommitted; report `task-4-report.md`. Core 112/112 and CLI 1/1 public tests pass (private parity ignored because `DECOVERY_LOCAL_WORKSPACE` is unset). Final serial workspace check: 613 passed, 1 failed, 17 ignored; only failure is the unchanged Windows worker cleanup test under denied process access. Formatting and Clippy pass. Earlier overlapping-Cargo doctest artifacts disappeared in the final serial run. Task 5 has not started.
 - Task 3/4 commit blocker: `git apply --cached` failed before any index change with `Unable to create D:/Entwicklung/decovery/.git/worktrees/phase-3-build/index.lock: Permission denied`, despite the coordinator's writable-root update. No commits created; HEAD remains `486beb8`. Both environment blockers were reported to the coordinator. Restore access, rerun full checks, commit Task 3 fixes/review and its separate progress line, then Task 4 implementation/report and its separate progress line. Resume Task 5 afterward. No owner/model-spending gate reached.
+
+## Coordinator handoff update
+
+Owner/coordinator confirmed external full-suite validation and committed Task 3 fixes as `af0f35d` and Task 4 as `a8edb28`; `4c571e9` removed accidentally committed build output. Those confirmations supersede the earlier uncommitted/blocker status above. Latest owner rule: do not attempt staging/commits in this sandbox; coordinator commits. Put build output/logs only in ignored `target/`. Per task, record exact files and a proposed commit message here. The unchanged Windows worker-cleanup failure may be recorded without stopping continuation.
+
+## Task 5 — ready for coordinator commit
+
+Status: DONE_WITH_CONCERNS, uncommitted. Report: `task-5-report.md`. Task 6 has not started; stopping at the remaining context budget after finishing this task and its verification. No owner/model-spending gate reached; no model driver run.
+
+Implemented suite/default/task models, schema and isolated native/legacy task copies. Native identical verdicts are required. All archives are excluded (P7); ancillary solution text/hashes are redacted; targets/tool paths resolve to originals; target records, objects, history and generated/cache leak channels are excluded. Typed address matching, source/destination protection, effective ancestor checks, redirected Ghidra resources and safe cleanup have regression coverage. The bridge's explicit-link fix also preserves its linked-destination protection.
+
+Rulings: use the binding P7 whole-archive exclusion; redact copied auxiliary text/structured string values rather than copy hidden definitions; reject leaking linked resources without modifying their targets. A generated stub/provider start point may equal a trivial solution, while surrounding copied text is still sanitized. P13 task-key/repeat parent isolation remains mandatory in Task 6; P14 checks run on its effective `into`; P15 adds no dead exemplar hook. Cost/tradeoff: reduced quoted context in task copies and absent historical archive payloads; originals are unchanged. These choices are described in `task-5-report.md`.
+
+Verification: Task 5 Rust tests 15/15 pass; Python explicit-project-link regressions 2/2 pass; formatting and Clippy pass. Full Rust suite: **628 passed, 1 failed, 17 ignored**, only the accepted Windows worker-cleanup access failure. Full legacy Python suite: **32 run, 30 pass, 1 error, 1 skip**; the existing changed-source concurrency test misses reply 2. Focused reproduction takes 66.438 s; a separate process using the committed resolver reproduces in 66.435 s (`target/task-5-baseline-probe.log`). The unchanged denied tree-kill path's two 30 s waits exceed the harness's 60 s reply wait. Validate that Python suite outside the sandbox before commit. No tests were disabled or weakened. Build/test artifacts are only under `target/` and must not be staged.
+
+Exact task files (including SDD records; the report is ignored and needs explicit force-add by coordinator):
+
+- `Cargo.toml`
+- `Cargo.lock`
+- `crates/decovery-bench/Cargo.toml`
+- `crates/decovery-bench/src/lib.rs`
+- `crates/decovery-bench/src/suite.rs`
+- `crates/decovery-bench/src/copy.rs`
+- `crates/decovery-bench/src/legacy_view.rs`
+- `crates/decovery-bench/tests/copy_synthetic.rs`
+- `schemas/bench-suite.schema.json`
+- `docs/design/0001-decovery-design.md`
+- `plugins/decomp-legacy/decovery_decomp_legacy/shadow.py`
+- `plugins/decomp-legacy/tests/test_plugin.py`
+- `.superpowers/sdd/2026-11-16-phase-3/task-5-report.md`
+- `.superpowers/sdd/2026-11-16-phase-3/progress.md`
+
+Proposed commit message:
+
+```text
+feat(bench): suites and solution-free task copies
+
+Add isolated native and legacy task views with checked start points,
+artifact exclusions, source protection and streamed leak verification.
+Preserve explicit Ghidra aliases so linked destinations remain protected.
+
+Co-Authored-By: Codex <noreply@openai.com>
+```
