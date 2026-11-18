@@ -104,4 +104,10 @@ Local tests (env: DECOVERY_LOCAL_WORKSPACE = DECOVERY_DECOMP_WORKSPACE = Decomp 
 - second_target_identical_functions: passed.
 - exemplars_match_decomp_vorbilder (Task 13 step 5, R4): first run invalid (test passed `0x…`, Decomp needs `va:XXXXXXXX`; copy included the huge cache). Test fixed (commit "test(exemplars): …"), NOT yet run successfully — rerun first.
 - first_target_identical_functions and all other ignored tests: not yet run.
+2026-11-18: exemplars parity ran (46 min, mostly Decomp's Python start per case): top-1 6/20. Root cause R4: iced
+prints `jmp short N`, capstone `jmp N`. Fixed in commit "fix(exemplars): drop short/near …" (index schema 2);
+quick re-check against the stored Decomp answers: top-1 18/20, top-3 20/20 (the 2 misses: Decomp prints nothing for
+begtext and audio_driver_call_b7, probably no function start in its engine). Official rerun: passed (18/20, 20/20) after the test asked for at most 30 (Decomp's preselection).
+Codex cannot run the local tests: its sandbox denies reading Decomp's cache directories.
+Task 16 (richer Ghidra decompile output) added to the plan, runs after Task 9.
 Next: rerun local tests, then try `find similar` on Syndicate (no tokens), then Tasks 8-11, 14, 15. Open: 186 MB build output in branch history (force-push denied by the classifier; owner may run the strip script, needs updating to the new HEAD).

@@ -151,7 +151,9 @@ fn exemplars_match_decomp_vorbilder() {
     for (size, at, name) in picks {
         let (theirs, text) = decomp_vorbilder(&python, &copy, *at);
         let ours: Vec<String> = index
-            .similar(&session, *at, index.len())
+            // At most Decomp's preselection (30): a larger `top` widens the preselection and ranks members
+            // Decomp never scores.
+            .similar(&session, *at, 30)
             .unwrap_or_default()
             .into_iter()
             .filter(|e| identical.contains(&e.name))
