@@ -25,8 +25,15 @@ working on the target; later changes there do not move this baseline.
 | overlay attempts | 0 (none recorded; synthetic tests cover the path) |
 | unmapped keys | 0 |
 | untranslated free texts copied | 634 |
+| globals (`output/globals.md` rows) | 879 |
+| global accesses imported / skipped | 4006 / 0 |
 
 Migration wall time 16 s (debug build).
+
+Before the fix `fix(migrate): globals of overlay workspaces` the globals table was skipped: only 100 of 4006
+accesses resolved, because functions with `ovl:` starts got no name from their file stem. After the fix all 4006
+resolve; Decomp names none of the 879 globals. The Task 10 build on the re-migrated workspace is unchanged
+(322 of 322 identical, 7 of 7 overlay modules).
 
 ## Build and comparison (Task 10)
 

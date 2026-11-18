@@ -310,3 +310,18 @@ Result through `runner/run` of both plugins (worktree unicorn-dos, `CC -n +b`, t
 - Plan: Tasks 1–8 ticked except Task 7 step 3 (count part: 902 of 927 by pattern), R1–R5 rows closed/held.
 - Docs: `docs/parity/phase-4.md`, CHANGELOG, README (Aztec profiles, overlay commands).
 - Commit `docs: phase-4 acceptance`.
+
+## Fix: globals of overlay workspaces — done
+
+- Cause: `analysis_import::file_stem` had no arm for `Address::Ovl`, so functions in `ovl_*` directories got no
+  name (stem `ovl_<OVL>_<seg>_<off>_<name>` was never stripped); every accessor named by an overlay function was
+  unresolved (3906 of 4006). Not duplicate names: Decomp's names are unique (`<OVERLAY>_name`, `fun_<OVL>_…`).
+  A name that does occur twice stays ambiguous and is counted as skipped (unchanged behaviour).
+- Test `imports_global_accesses_of_overlay_functions` (two overlays with `ovmain`, `ovl:` global address).
+- Local: re-migrated into `%TEMP%\w7-migrated2`: 1144 functions, 879 globals (none named), 4006 accesses imported,
+  0 skipped; skipped files now only `decomp-symbole.json`, `index.md`, `stand.json`.
+- Parity re-run there (`runners = ["dosbox-lab"]`, `tool_dir` Aztec 4.2b, scratch config only): 8 sources,
+  322/322 identical, 7/7 overlay modules, 6.5 s.
+- First target: `migrate_attempts_local::private_attempt_migration_is_repeatable` passes (83 s); flat/seg stems
+  unchanged by construction.
+- Commit `fix(migrate): globals of overlay workspaces`.

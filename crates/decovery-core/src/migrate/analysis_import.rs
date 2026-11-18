@@ -136,11 +136,12 @@ fn sorted_entries(dir: &Path) -> Result<Vec<PathBuf>, MigrateError> {
     Ok(paths)
 }
 
-/// Decomp's file-name stem for an address: `va_0001A2B0`, `rel_0001_0010`.
+/// Decomp's file-name stem for an address: `va_0001A2B0`, `rel_0001_0010`, `ovl_VBASE_0000_505E`.
 fn file_stem(at: Address) -> Option<String> {
     match at {
         Address::Flat(v) => Some(format!("va_{v:08X}")),
         Address::Seg { seg, off } => Some(format!("rel_{seg:04X}_{off:04X}")),
+        Address::Ovl { overlay, seg, off } => Some(format!("ovl_{overlay}_{seg:04X}_{off:04X}")),
         _ => None,
     }
 }
@@ -653,6 +654,90 @@ segment = [
                 (flat(0x10010), flat(0x60000), AccessKind::Write),
                 (flat(0x10020), flat(0x60004), AccessKind::Write),
             ]
+        );
+    }
+
+    #[test]
+    fn imports_global_accesses_of_overlay_functions() {
+        let (from, to) = setup();
+        let ovl = |name: &str, off: u16| Address::Ovl {
+            overlay: name.parse().unwrap(),
+            seg: 0,
+            off,
+        };
+        for (dir, file, lage, name) in [
+            (
+                "ovl_VA",
+                "ovl_VA_0000_0010_ovmain.c",
+                "ovl:VA:0000:0010 .. ovl:VA:0000:001F (16 Bytes, VA+0xe)",
+                "ovmain",
+            ),
+            (
+                "ovl_VB",
+                "ovl_VB_0000_0010_ovmain.c",
+                "ovl:VB:0000:0010 .. ovl:VB:0000:001F (16 Bytes, VB+0xe)",
+                "ovmain",
+            ),
+            (
+                "ovl_VA",
+                "ovl_VA_0000_0020_VA_helper.c",
+                "ovl:VA:0000:0020 .. ovl:VA:0000:002F (16 Bytes, VA+0x1e)",
+                "VA_helper",
+            ),
+            (
+                "ovl_VB",
+                "ovl_VB_0000_0020_fun_VB_0000_0020.c",
+                "ovl:VB:0000:0020 .. ovl:VB:0000:002F (16 Bytes, VB+0x1e)",
+                "fun_VB_0000_0020",
+            ),
+        ] {
+            write_function(
+                from.path(),
+                dir,
+                file,
+                lage,
+                name,
+                "x;
+",
+            );
+        }
+        std::fs::write(
+            from.path().join("ausgabe/globale.md"),
+            "# Globale Variablen
+
+| Adresse | Name | Liest | Schreibt |
+| --- | --- | --- | --- |
+| ovl:VA:0FF6:0002 | flag | VA_helper, ovmain | fun_VB_0000_0020 |
+",
+        )
+        .unwrap();
+        let report = migrate_decomp(from.path(), to.path()).unwrap();
+        let a = Analysis::load(to.path()).unwrap().unwrap();
+        let global = Address::Ovl {
+            overlay: "VA".parse().unwrap(),
+            seg: 0x0FF6,
+            off: 2,
+        };
+        let got: Vec<_> = a
+            .data_accesses
+            .iter()
+            .map(|d| (d.function, d.address, d.kind))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (ovl("VA", 0x20), global, AccessKind::Read),
+                (ovl("VB", 0x20), global, AccessKind::Write),
+            ]
+        );
+        // `ovmain` exists in both overlays: ambiguous, so it is the one skipped access.
+        assert!(
+            report
+                .skipped
+                .iter()
+                .any(|s| s.starts_with("ausgabe/globale.md: 1 accesses")),
+            "{:?}",
+            report.skipped
         );
     }
 
