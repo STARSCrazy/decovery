@@ -34,7 +34,9 @@ fn case(python: &str, mode: &str, tasks: usize) -> Case {
     let path = dir.path().join("suite.toml");
     let entries: String = (0..tasks).map(|i| format!("[[task]]\nid = \"case/{i}:sub\"\nworkspace = {}\nfunction = \"sub\"\ntags = [\"tiny\"]\n", quote(fixture.root()))).collect();
     std::fs::write(&path, format!("schema = 1\nname = \"synthetic\"\n[defaults]\nmax_builds = 4\nmax_tool_calls = 8\n{entries}")).unwrap();
-    let suite = read_suite(&path).unwrap();
+    let mut suite = read_suite(&path).unwrap();
+    // single-session behaviour unless a test is about continuations
+    suite.defaults.max_continuations = 0;
     let script = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../decovery-bench/tests/fixtures/fake_driver.py")
         .canonicalize()
@@ -50,6 +52,8 @@ fn case(python: &str, mode: &str, tasks: usize) -> Case {
         "{result}".into(),
         "--workdir".into(),
         "{workdir}".into(),
+        "--prompt".into(),
+        "{prompt}".into(),
     ];
     driver.env.insert("FAKE_MODE".into(), mode.into());
     driver.env.insert(
@@ -352,4 +356,95 @@ env = {{ {} }}
         .unwrap();
     assert_eq!(unknown.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&unknown.stderr).contains("missing"));
+}
+
+#[test]
+fn default_suite_allows_one_continuation() {
+    assert_eq!(decovery_bench::TaskDefaults::default().max_continuations, 1);
+}
+#[test]
+fn unsolved_driver_with_budget_left_is_continued() {
+    let python = python_or_skip!();
+    let mut c = case(&python, "idle-then-solve", 1);
+    c.suite.defaults.max_continuations = 1;
+    let run = execute(&c);
+    let t = &run.tasks[0];
+    assert!(t.solved, "the continuation session solves the task");
+    assert_eq!(t.continuations, 1);
+    assert_eq!(t.exit, "ok");
+    let prompt = t.extra["driver_extra"]["prompt"].as_str().unwrap();
+    assert!(prompt.starts_with("This is continuation 1 of at most 1"));
+    assert!(prompt.contains("verdict is differs, best distance 1 (start distance 1)"));
+    assert!(prompt.contains("Recover the implementation of sub"));
+    assert_eq!(t.extra["session_logs"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        serde_json::to_value(&run).unwrap()["tasks"][0]["continuations"],
+        1
+    );
+}
+#[test]
+fn solved_task_is_not_continued() {
+    let python = python_or_skip!();
+    let mut c = case(&python, "solve", 1);
+    c.suite.defaults.max_continuations = 3;
+    let t = &execute(&c).tasks[0];
+    assert!(t.solved);
+    assert_eq!(t.continuations, 0);
+    assert_eq!(t.input_tokens, Some(12));
+}
+#[test]
+fn task_at_a_limit_is_not_continued() {
+    let python = python_or_skip!();
+    let mut c = case(&python, "calls", 1);
+    c.suite.defaults.max_continuations = 3;
+    c.suite.defaults.max_tool_calls = 1;
+    calls(&mut c, json!([{"name":"status","arguments":{}}]));
+    let t = &execute(&c).tasks[0];
+    assert_eq!(t.continuations, 0, "tool calls are spent");
+    assert_eq!(t.tool_calls, 1);
+    let mut c = case(&python, "idle", 1);
+    c.suite.defaults.max_continuations = 3;
+    c.suite.defaults.max_tokens = Some(30);
+    let t = &execute(&c).tasks[0];
+    assert_eq!(
+        t.continuations, 1,
+        "15 tokens per session, the second session reaches 30"
+    );
+    assert_eq!(t.input_tokens, Some(24));
+    let mut c = case(&python, "idle", 1);
+    c.suite.defaults.max_continuations = 3;
+    c.suite.defaults.max_cost_usd = Some(0.001);
+    assert_eq!(execute(&c).tasks[0].continuations, 0, "cost is spent");
+}
+#[test]
+fn continuations_stop_at_the_maximum_and_totals_accumulate() {
+    let python = python_or_skip!();
+    let mut c = case(&python, "calls", 1);
+    c.suite.defaults.max_continuations = 2;
+    c.suite.defaults.max_builds = 10;
+    c.suite.defaults.max_tool_calls = 10;
+    calls(
+        &mut c,
+        json!([{"name":"build","arguments":{"function":"sub"}}]),
+    );
+    let run = execute(&c);
+    let t = &run.tasks[0];
+    assert!(!t.solved);
+    assert_eq!(t.continuations, 2);
+    assert_eq!(t.builds, 3);
+    assert_eq!(t.tool_calls, 3);
+    assert_eq!(t.input_tokens, Some(36));
+    assert_eq!(t.output_tokens, Some(9));
+    assert_eq!(t.cache_read_tokens, Some(21));
+    assert_eq!(t.cache_write_tokens, Some(6));
+    assert!((t.cost_usd.unwrap() - 0.003).abs() < 1e-9);
+    assert_eq!(run.totals.builds, 3);
+    assert_eq!(run.totals.input_tokens, Some(36));
+    let mut c = case(&python, "idle", 1);
+    c.suite.defaults.max_continuations = 0;
+    assert_eq!(
+        execute(&c).tasks[0].continuations,
+        0,
+        "0 disables continuations"
+    );
 }

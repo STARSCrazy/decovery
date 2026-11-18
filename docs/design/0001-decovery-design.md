@@ -423,7 +423,9 @@ part of the core, not add-ons.
    logbook, and hands an **agent driver** an MCP endpoint scoped to that copy plus a budget (builds, tool calls,
    wall time, tokens). The driver is an external command (a headless agent CLI or any MCP client), configured like a
    plugin; decovery never embeds a model. Per task it records: solved (decovery's verdict, never the agent's),
-   builds, tool calls, tokens and cost as reported by the driver, wall time, best intermediate distance. A run
+   builds, tool calls, tokens and cost as reported by the driver, wall time, best intermediate distance. When the
+   driver ends unsolved with budget left, the harness starts it again in the same copy with a short continuation
+   prompt (at most `max_continuations` times, default 1; limits cover the whole task; ADR 0009 decision 10). A run
    stores `bench/<run-id>.json` with tool version, configuration hash, driver, model and seed; `bench compare`
    reports differences between runs with confidence intervals. Private suites over proprietary targets stay local;
    a public suite is built from project-compiled Open Watcom and Turbo C fixtures. Every change to tool output,

@@ -37,6 +37,8 @@ pub struct TaskDefaults {
     pub max_tokens: Option<u64>,
     pub max_cost_usd: Option<f64>,
     pub prompt: Option<PathBuf>,
+    /// How often the harness starts the driver again when it ends unsolved with budget left (0 disables).
+    pub max_continuations: u32,
     #[serde(flatten)]
     pub extra: BTreeMap<String, toml::Value>,
 }
@@ -52,6 +54,7 @@ impl Default for TaskDefaults {
             max_tokens: None,
             max_cost_usd: Some(3.0),
             prompt: None,
+            max_continuations: 1,
             extra: BTreeMap::new(),
         }
     }

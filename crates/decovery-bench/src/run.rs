@@ -74,6 +74,9 @@ pub struct TaskResult {
     pub wall_s: f64,
     pub exit: String,
     pub log: Option<String>,
+    /// Driver sessions started after the first one because the agent ended with budget left (ADR 0009, 10).
+    #[serde(default)]
+    pub continuations: u32,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -102,6 +105,7 @@ impl TaskResult {
             wall_s: 0.0,
             exit: "not-run".into(),
             log: None,
+            continuations: 0,
             extra: Map::new(),
         }
     }
@@ -565,123 +569,122 @@ fn evaluate(
             &mcp,
             &json!({"schema":1,"mcpServers":{"decovery":{"command":exe,"args":["mcp","--workspace",copy.root,"--limits",limits,"--jobs",jobs.to_string()]}}}),
         )?;
-        let report = log_dir.join("result.json");
-        let log = log_dir.join("driver.log");
-        result.log = Some(log.to_string_lossy().into_owned());
-        let mut bindings = BTreeMap::new();
-        for (key, value) in [
-            ("{prompt}", prompt_path.to_string_lossy().into_owned()),
-            ("{mcp_config}", mcp.to_string_lossy().into_owned()),
-            ("{workdir}", copy.root.to_string_lossy().into_owned()),
-            ("{result}", report.to_string_lossy().into_owned()),
-            ("{seed}", format!("{}", options.seed)),
-            (
-                "{max_tokens}",
-                suite
-                    .defaults
-                    .max_tokens
-                    .map_or(String::new(), |v| v.to_string()),
-            ),
-            (
-                "{max_cost_usd}",
-                suite
-                    .defaults
-                    .max_cost_usd
-                    .map_or(String::new(), |v| v.to_string()),
-            ),
-            (
-                "{wall_seconds}",
-                (u64::from(suite.defaults.wall_minutes) * 60).to_string(),
-            ),
-        ] {
-            bindings.insert(key, value);
-        }
-        match super::driver::invoke(
-            &task.id,
-            driver,
-            &bindings,
-            &copy.root,
-            &log,
-            Duration::from_secs(u64::from(suite.defaults.wall_minutes) * 60),
-            &format!("bench:{run_id}"),
-        ) {
-            Ok(outcome) => {
-                result.exit = outcome.exit;
-                result
-                    .extra
-                    .insert("driver_exit_code".into(), json!(outcome.code));
-                result.extra.insert("driver_pid".into(), json!(outcome.pid));
-                result
-                    .extra
-                    .insert("warnings".into(), json!(outcome.warnings));
-                if let Some(d) = outcome.result {
-                    result.extra.insert("model".into(), json!(d.model));
-                    result.input_tokens = d.input_tokens;
-                    result.output_tokens = d.output_tokens;
-                    result.cache_read_tokens = d.cache_read_tokens;
-                    result.cache_write_tokens = d.cache_write_tokens;
-                    result.cost_usd = d.cost_usd;
-                    result.cost_kind = d.cost_kind;
+        let d = &suite.defaults;
+        let wall = Duration::from_secs(u64::from(d.wall_minutes) * 60);
+        let driver_began = Instant::now();
+        let mut session_prompt = prompt_path.clone();
+        let mut warnings = Vec::new();
+        let mut session_logs = Vec::new();
+        let mut session: u32 = 0;
+        loop {
+            let suffix = if session == 0 {
+                String::new()
+            } else {
+                format!("-continuation-{session}")
+            };
+            let report = log_dir.join(format!("result{suffix}.json"));
+            let log = log_dir.join(format!("driver{suffix}.log"));
+            if session == 0 {
+                result.log = Some(log.to_string_lossy().into_owned());
+            }
+            session_logs.push(log.to_string_lossy().into_owned());
+            // limits apply to the whole task: a continuation gets what the earlier sessions left
+            let remaining_wall = wall.saturating_sub(driver_began.elapsed());
+            let tokens_used = task_tokens(&result);
+            let cost_used = result.cost_usd.unwrap_or(0.0);
+            let mut bindings = BTreeMap::new();
+            for (key, value) in [
+                ("{prompt}", session_prompt.to_string_lossy().into_owned()),
+                ("{mcp_config}", mcp.to_string_lossy().into_owned()),
+                ("{workdir}", copy.root.to_string_lossy().into_owned()),
+                ("{result}", report.to_string_lossy().into_owned()),
+                ("{seed}", format!("{}", options.seed)),
+                (
+                    "{max_tokens}",
+                    d.max_tokens
+                        .map_or(String::new(), |v| v.saturating_sub(tokens_used).to_string()),
+                ),
+                (
+                    "{max_cost_usd}",
+                    d.max_cost_usd
+                        .map_or(String::new(), |v| (v - cost_used).max(0.0).to_string()),
+                ),
+                ("{wall_seconds}", remaining_wall.as_secs().to_string()),
+            ] {
+                bindings.insert(key, value);
+            }
+            result.exit = "driver-error".into();
+            match super::driver::invoke(
+                &task.id,
+                driver,
+                &bindings,
+                &copy.root,
+                &log,
+                remaining_wall,
+                &format!("bench:{run_id}"),
+            ) {
+                Ok(outcome) => {
+                    result.exit = outcome.exit;
                     result
                         .extra
-                        .insert("driver_extra".into(), Value::Object(d.extra));
+                        .insert("driver_exit_code".into(), json!(outcome.code));
+                    result.extra.insert("driver_pid".into(), json!(outcome.pid));
+                    warnings.extend(outcome.warnings);
+                    if let Some(r) = outcome.result {
+                        if !result.extra.contains_key("model") || r.model.is_some() {
+                            result.extra.insert("model".into(), json!(r.model));
+                        }
+                        result.input_tokens = add(result.input_tokens, r.input_tokens);
+                        result.output_tokens = add(result.output_tokens, r.output_tokens);
+                        result.cache_read_tokens =
+                            add(result.cache_read_tokens, r.cache_read_tokens);
+                        result.cache_write_tokens =
+                            add(result.cache_write_tokens, r.cache_write_tokens);
+                        result.cost_usd = match (result.cost_usd, r.cost_usd) {
+                            (None, None) => None,
+                            (a, b) => Some(a.unwrap_or(0.0) + b.unwrap_or(0.0)),
+                        };
+                        result.cost_kind = r.cost_kind.or(result.cost_kind.take());
+                        result
+                            .extra
+                            .insert("driver_extra".into(), Value::Object(r.extra));
+                    }
+                }
+                Err(e) => {
+                    result
+                        .extra
+                        .insert("driver_error".into(), json!(e.to_string()));
                 }
             }
-            Err(e) => {
-                result
-                    .extra
-                    .insert("driver_error".into(), json!(e.to_string()));
+            result.extra.insert("warnings".into(), json!(warnings));
+            let build_log = log_dir.join(format!("final-build{suffix}.log"));
+            judge(exe, task, &copy, &build_log, &mut result)?;
+            if result.exit == "quota" {
+                break;
             }
+            if result.solved || result.exit != "ok" || session >= d.max_continuations {
+                break;
+            }
+            let usage = BenchUsage::load(&copy.root)?;
+            let budget_left = usage.builds < d.max_builds
+                && usage.tool_calls < d.max_tool_calls
+                && d.max_tokens.is_none_or(|m| task_tokens(&result) < m)
+                && d.max_cost_usd
+                    .is_none_or(|m| result.cost_usd.unwrap_or(0.0) < m)
+                && driver_began.elapsed() < wall;
+            if !budget_left {
+                break;
+            }
+            session += 1;
+            let text =
+                continuation_prompt(session, d.max_continuations, &result, &usage, d, &prompt);
+            session_prompt = log_dir.join(format!("prompt-continuation-{session}.md"));
+            super::copy::write(&session_prompt, text.as_bytes())?;
         }
-        let (attempts, warnings) = read_attempts(&copy.root, copy.address)?;
+        result.continuations = session;
         result
             .extra
-            .insert("attempt_warnings".into(), json!(warnings));
-        result.best_distance = attempts
-            .iter()
-            .filter_map(attempt_distance)
-            .chain(result.start_distance)
-            .min();
-        if result.exit != "quota" {
-            for a in attempts
-                .iter()
-                .rev()
-                .filter(|a| a.verdict == Some(VerdictId::Identical))
-            {
-                let Some(id) = &a.archive else {
-                    continue;
-                };
-                if let Ok(entry) = archive_load(&copy.root, id)
-                    && entry.meta["address"] == json!(copy.address)
-                    && let Some(body) = entry.files.get("function.c")
-                    && let Ok(body) = std::str::from_utf8(body)
-                {
-                    let path = copy.root.join("src").join(&copy.file);
-                    let source = std::fs::read_to_string(&path).map_err(|e| io(&path, e))?;
-                    let replacement = decovery_toolchain::splice_function(
-                        &source, &copy.name, body,
-                    )
-                    .map_err(|e| BenchError::Driver {
-                        task: task.id.clone(),
-                        reason: e.to_string(),
-                    })?;
-                    if replacement != source {
-                        super::copy::write(&path, replacement.as_bytes())?;
-                    }
-                    break;
-                }
-            }
-            let (verdict, distance) = build(
-                exe,
-                &copy.root,
-                &copy.file,
-                &copy.name,
-                &log_dir.join("final-build.log"),
-            )?;
-            result.verdict = verdict;
-            result.solved = result.verdict == "identical";
-            result.best_distance = result.best_distance.into_iter().chain(distance).min();
-        }
+            .insert("session_logs".into(), json!(session_logs));
         let usage = BenchUsage::load(&copy.root)?;
         if result.exit == "ok" && limit_spent(&copy.root, &usage, suite)? {
             result.exit = "call-limit".into();
@@ -727,6 +730,103 @@ fn evaluate(
     }
     result.wall_s = began.elapsed().as_secs_f64();
     result
+}
+
+fn add(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (None, None) => None,
+        (a, b) => Some(a.unwrap_or(0).saturating_add(b.unwrap_or(0))),
+    }
+}
+/// Tokens a task has used, counted like the drivers count them against `max_tokens`.
+fn task_tokens(result: &TaskResult) -> u64 {
+    result
+        .input_tokens
+        .unwrap_or(0)
+        .saturating_add(result.output_tokens.unwrap_or(0))
+}
+fn continuation_prompt(
+    session: u32,
+    max: u32,
+    result: &TaskResult,
+    usage: &BenchUsage,
+    d: &super::TaskDefaults,
+    task_prompt: &str,
+) -> String {
+    let distance = |d: Option<u64>| d.map_or_else(|| "unknown".to_string(), |d| d.to_string());
+    format!(
+        "This is continuation {session} of at most {max} for this task. An earlier session ended on its own          while budget was left and the function is not solved yet. You are a new session: you see only this          workspace, its attempt history and this prompt.
+
+         Current state: decovery's verdict is {verdict}, best distance {best} (start distance {start}).          Used so far: {builds} of {max_builds} builds, {calls} of {max_calls} tool calls. Start with status          and history to see the earlier attempts, then keep going until the verdict is identical or a limit          is reached; do not stop while budget remains.
+
+         The original task follows. Its limits are totals for the whole task, including earlier sessions.
+
+         ---
+
+{task_prompt}",
+        verdict = result.verdict,
+        best = distance(result.best_distance),
+        start = distance(result.start_distance),
+        builds = usage.builds,
+        max_builds = d.max_builds,
+        calls = usage.tool_calls,
+        max_calls = d.max_tool_calls,
+    )
+}
+
+/// Records the attempt distances and, unless the driver stopped on quota, splices the best identical attempt and
+/// sets decovery's own verdict from one harness build.
+fn judge(
+    exe: &Path,
+    task: &SuiteTask,
+    copy: &super::TaskCopy,
+    build_log: &Path,
+    result: &mut TaskResult,
+) -> Result<(), BenchError> {
+    let (attempts, warnings) = read_attempts(&copy.root, copy.address)?;
+    result
+        .extra
+        .insert("attempt_warnings".into(), json!(warnings));
+    result.best_distance = attempts
+        .iter()
+        .filter_map(attempt_distance)
+        .chain(result.start_distance)
+        .chain(result.best_distance)
+        .min();
+    if result.exit == "quota" {
+        return Ok(());
+    }
+    for a in attempts
+        .iter()
+        .rev()
+        .filter(|a| a.verdict == Some(VerdictId::Identical))
+    {
+        let Some(id) = &a.archive else {
+            continue;
+        };
+        if let Ok(entry) = archive_load(&copy.root, id)
+            && entry.meta["address"] == json!(copy.address)
+            && let Some(body) = entry.files.get("function.c")
+            && let Ok(body) = std::str::from_utf8(body)
+        {
+            let path = copy.root.join("src").join(&copy.file);
+            let source = std::fs::read_to_string(&path).map_err(|e| io(&path, e))?;
+            let replacement = decovery_toolchain::splice_function(&source, &copy.name, body)
+                .map_err(|e| BenchError::Driver {
+                    task: task.id.clone(),
+                    reason: e.to_string(),
+                })?;
+            if replacement != source {
+                super::copy::write(&path, replacement.as_bytes())?;
+            }
+            break;
+        }
+    }
+    let (verdict, distance) = build(exe, &copy.root, &copy.file, &copy.name, build_log)?;
+    result.verdict = verdict;
+    result.solved = result.verdict == "identical";
+    result.best_distance = result.best_distance.into_iter().chain(distance).min();
+    Ok(())
 }
 
 /// The agent ended after the endpoint refused a call while one of its limits was spent.

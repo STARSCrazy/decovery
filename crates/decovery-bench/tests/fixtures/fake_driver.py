@@ -11,8 +11,12 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--mcp", required=True)
 parser.add_argument("--result", required=True)
 parser.add_argument("--workdir", required=True)
+parser.add_argument("--prompt")
 args = parser.parse_args()
 mode = os.environ.get("FAKE_MODE", "solve")
+prompt = Path(args.prompt).read_text(encoding="utf-8") if args.prompt else ""
+if mode == "idle-then-solve":
+    mode = "solve" if prompt.startswith("This is continuation") else "idle"
 if mode == "hang":
     time.sleep(3)
     raise SystemExit(0)
@@ -62,4 +66,5 @@ finally:
         child.kill()
         child.wait()
 result["calls"] = answers
+result["prompt"] = prompt
 Path(args.result).write_text(json.dumps(result), encoding="utf-8")

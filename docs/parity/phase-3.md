@@ -110,3 +110,16 @@ Observations:
 - Three of the four unsolved tasks stopped at distance 1: a near-identical result is the usual stopping point.
 - Cost per task rose from 0.22 to 0.30 USD estimated (mean over these five); the re-run used 1.47 USD of the 24 USD
   allowance. `rate_limit` is now recorded in `driver_extra`.
+
+## Harness continuation (Task 9 step 3, 2026-11-18)
+
+Because the prompt alone did not keep the agent going, the harness now continues an agent that ends with exit `ok`,
+unsolved and with budget left (ADR 0009 decision 10): it starts the driver again in the same copy with a short
+continuation prompt in front of the task prompt, at most `max_continuations` times per task (suite `[defaults]`,
+default 1, 0 disables). Builds, tool calls, tokens, cost and wall time are totals over all sessions of a task and the
+limits apply to those totals; the task record has `continuations`. Each continuation is a fresh Claude Code session
+(`--no-session-persistence` stays); `tools/bench-drivers/claude_code.py` needed no change, it only receives a
+different prompt file and the remaining token, cost and wall budget.
+
+Results of runs after this change are not comparable with the probe and the re-run above (both were single-session
+runs); compare later runs only with runs that use the same `max_continuations`.

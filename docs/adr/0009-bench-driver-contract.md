@@ -1,6 +1,6 @@
 # ADR 0009: The bench driver contract
 
-Status: accepted · 2026-11-17
+Status: accepted · 2026-11-17 · amended 2026-11-18 (decision 10, continuations)
 
 ## Context
 
@@ -47,6 +47,24 @@ linked, ADR 0003) and must be the only party that sets a verdict (design 4, ADR 
 9. **Records**: `<suite dir>/bench/<run-id>.json` (`schemas/bench-run.schema.json`, `run-id` =
    `YYYYMMDD-HHMMSS-` + 6 hex), the copy's call log and usage copied beside the task's logs, copies under
    `<copies_dir>/<run-id>/` deleted unless `--keep`.
+10. **Continuations** (amended 2026-11-18 after the phase-3 probe, where agents ended on their own with budget left
+    and three tasks stopped at distance 1). When a driver session ends with exit `ok`, the harness judges the copy
+    as in decision 6; if the verdict is not `identical`, fewer than `max_continuations` continuations ran (suite
+    `[defaults]`, default 1, 0 disables) and the task's builds, tool calls, tokens (input + output), cost and wall
+    time are all below their limits, it starts the same driver again in the same copy. The continuation gets
+    `prompt-continuation-<n>.md` as `{prompt}`: a short note (continuation n of at most N, decovery's current
+    verdict, best and start distance, builds and tool calls used, "keep going until identical or a limit") followed
+    by the original task prompt. Its files are `driver-continuation-<n>.log`, `result-continuation-<n>.json` and
+    `final-build-continuation-<n>.log`. Limits apply to the whole task: the endpoint keeps counting in the copy,
+    and `{max_tokens}`, `{max_cost_usd}` and `{wall_seconds}` (and the harness's wall kill) carry what the earlier
+    sessions left. Tokens and cost are summed over the sessions; the task's `exit` is the last session's;
+    `continuations` in the task record counts the extra sessions and `session_logs` lists every driver log.
+    A continuation is a **fresh agent session**, not a resumed one: drivers keep running without session
+    persistence and see only the copy (its call log, attempts and archive) and the new prompt. Resuming would need
+    a session id in the contract, driver-specific state outside the copy, and it replays the whole earlier
+    conversation as input on every turn of the continuation, so it is not cheaper; the copy's history already
+    carries what the next session needs. Runs with continuations are not comparable with runs before this
+    amendment.
 
 ## Consequences
 
