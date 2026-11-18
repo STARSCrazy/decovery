@@ -187,3 +187,65 @@ detail 23, status 6, analyze 2.
 (the only interval that excludes 0). Verdict: the success rate is reproducible (same count, same groups); output
 tokens differ slightly between runs, so "consistent within noise" holds for every metric except output tokens.
 Four tasks per quartile make the per-quartile figures anecdotal.
+
+## Exemplars in `show` (Task 15 step 3, 2026-11-18)
+
+`decovery show` in the first-target workspace (release executable, 650 functions, 618 identical) on 10 functions: 8 of
+the 16 first-target acceptance tasks that were unsolved in at least one of the two runs (4 unsolved in both runs, 4 in
+one) and the 2 smallest of the 32 functions that still differ (355 and 414 bytes). The list of acceptance tasks that
+no run solved has only 4 members, so the set is topped up with differing functions. Result: all 10 list exemplars,
+3 of 3 requested in each case (summary line `exemplars: name (similarity), ...` and `data.exemplars`). Over the 8
+bench-unsolved functions the top exemplar's window-coverage score ranges from 0.00 to 0.40 and its similarity from
+0.27 to 0.67; no top exemplar is a twin. Six of the smallest differing functions were tried, all list 3 of 3. Low scores are normal for unsolved functions: the index holds only identical C
+functions, and the exemplars shown are the nearest ones, not close matches.
+
+Exemplar parity with Decomp's `nachbau vorbilder` (Task 13 step 5, local test, 20 not-identical functions of the
+first target): top 1 equal in 18 of 20 and top-3 sets sharing at least 2 members in 20 of 20 (criterion 17 of 20 each).
+A first run gave 6 of 20: iced-x86 prints `jmp short N` where capstone prints `jmp N`; after dropping the `short` and
+`near` qualifiers (index schema 2) the figure is 18 of 20 and 20 of 20. In the 2 misses Decomp printed nothing, most
+likely because its engine finds no function start there. R4 is met.
+
+Task 13 step 6 (re-run of the probe suite with exemplars, `bench compare` against the Task-9 run) was **not run**:
+it needs model tokens and the owner's go, and the acceptance runs spent the allowance. So this document does not say
+whether exemplars changed success, builds or tokens. The acceptance runs cannot answer it either: they use another
+suite, another prompt (continue paragraph, one harness continuation) and no exemplar-free control. The share of tasks
+that called `find similar` is also unknown: the tool-call log records `find` without the question kind (only
+`diagnose` carries an operation), and the drivers kept no stream (`driver.log` is empty for all tasks). In the
+acceptance runs `find` made up 131 of 1 154 agent calls (11 %); `show` made 123.
+
+## Migration of attempt memory (Task 4)
+
+Decomp's attempt memory and archive of the first target were migrated into the workspace (`migrate` /
+`migrate-attempts`, idempotent): **66 299 attempts** in one JSON Lines shard per function and **4 049 archive entries**
+(content-addressed, SHA-256 verified, links rejected). The migrated workspace used for the acceptance runs holds
+66 949 attempts in 650 shards and 4 699 archive entries; the differences (650 each, equal to the function count) are
+consistent with one build attempt per function recorded after the migration, not checked further. Re-running the
+import adds only new lines.
+
+## Bridge use (tool-call logs, Task 3 and Task 15 step 4)
+
+Source: `cache/calls/<yyyy-mm>.jsonl` of every task copy of the two acceptance runs, actor `bench:<run>` (1 154 calls;
+a further 142 lines are the harness's own start and final builds and are not counted). All 60 task runs used
+`tools = "core"`, so there is **no bridge call at all**: `search`, `verify` and `diagnose --deep` are refused in a
+`core` copy and the 2 `diagnose` calls with a registers operation were refused and counted. The data therefore say nothing about which Decomp tools matter for the port order of ADR 0008
+step 3. Task 9 step 4 (one `core+legacy` task) was not run.
+
+Native tools over both runs (calls, total seconds, median / maximum seconds per call; refusals and errors included):
+
+| Tool | Calls | Total s | Median s | Max s | Not ok |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| build | 678 | 698.8 | 1.01 | 2.83 | 11 refused |
+| show | 123 | 4.6 | 0.012 | 0.10 | 8 error |
+| find | 131 | 2.2 | 0.008 | 0.07 | 0 |
+| history | 101 | 1.3 | 0.010 | 0.13 | 0 |
+| diagnose | 90 | 1.5 | 0.012 | 0.05 | 2 refused |
+| detail | 23 | 0.1 | 0.004 | 0.05 | 1 error |
+| status | 6 | 0.1 | 0.008 | 0.02 | 0 |
+| analyze | 2 | 0.4 | 0.213 | 0.22 | 2 error |
+
+Per task (60 task runs): 19 calls, of which 11 builds. `build` takes 99 % of the agent-visible tool time.
+
+The owner's own workspaces hold almost nothing: the first-target copy's log has 57 CLI calls (29 build, 25 show,
+3 find) and the second target's 2 (1 build, 1 link); the first-target figure includes the `show` checks above. Real work
+with the bridge has not yet happened since Task 3, so the port order of ADR 0008 step 3 has no usage data; more will
+come from `tools = "core+legacy"` runs and from the owner's own use.

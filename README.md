@@ -136,6 +136,23 @@ and `--apply` writes it into `src/` only when decovery's verdict is better (iden
 instructions). `verify` reports Decomp's result as evidence (`source = "decomp"`) and records nothing. The MCP
 server keeps the plugin, and with it Decomp's server and Ghidra project, running between calls.
 
+## Memory, jobs, exemplars and the benchmark
+
+- `decovery history <name>` lists what was tried on a function (builds, variants, search candidates) with decovery's
+  verdict, the best attempt and the attempt budget; `--archive` shows one archived definition. Attempts are JSON Lines
+  shards in `cache/attempts/`. `decovery migrate-attempts` imports Decomp's attempt memory and archive (safe to repeat).
+- `decovery job` lists, shows and cancels jobs: long commands (`build`, `link`, `analyze`, `diagnose --deep`,
+  `search`, `verify`) can run in the background; the job store is persistent.
+- `decovery show <name>` and `decovery find similar <name>` list similar identical functions (exemplars) of the
+  workspace; they appear in the response, never in the generated `output/` files.
+- Every MCP tool call is logged in `cache/calls/<yyyy-mm>.jsonl` (tool, seconds, outcome, actor).
+- `decovery bench run|report|compare` measures how well an agent recovers solved functions from solution-free copies
+  (ADR 0009). A run needs a suite file naming workspaces and functions and a driver from the user config
+  (`[bench.drivers.<name>]`). The reference driver `tools/bench-drivers/claude_code.py` runs Claude Code on your
+  subscription and needs a one-time login into its own profile (`CLAUDE_CONFIG_DIR`, by default
+  `%LOCALAPPDATA%\decovery\claude-bench`); see [tools/bench-drivers/README.md](tools/bench-drivers/README.md). Results
+  and open points: [the phase-3 parity report](docs/parity/phase-3.md).
+
 ## No proprietary material
 
 This repository must never contain game executables, commercial compilers or libraries, code decompiled from
