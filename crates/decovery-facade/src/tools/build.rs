@@ -933,10 +933,14 @@ pub(super) fn place_objects<'o>(
     let mut placed = Vec::new();
     let mut taken: HashMap<Address, String> = HashMap::new();
     for &(id, source, object) in objects {
+        let overlay = object_overlay(knowledge, profile, object);
         for module in &object.modules {
             for view in functions(module).into_iter().filter(|f| is_public(f)) {
                 let raw = view.name;
-                let Some((name, address)) = place_name(knowledge, profile, raw) else {
+                let found = overlay
+                    .and_then(|o| place_in_overlay(knowledge, profile, raw, o))
+                    .or_else(|| place_name(knowledge, profile, raw));
+                let Some((name, address)) = found else {
                     hints.push(format!(
                         "{}: no counterpart in the original",
                         profile.decoration.undecorate(raw)
@@ -983,6 +987,43 @@ fn place_name<'a>(
         })
 }
 
+/// The overlay that holds an object's functions: the one overlay all its by-name placed functions lie in.
+fn object_overlay(
+    knowledge: &KnowledgeView<'_>,
+    profile: &Profile,
+    object: &ObjectFile,
+) -> Option<OverlayName> {
+    let mut found = None;
+    for module in &object.modules {
+        for view in functions(module).into_iter().filter(|f| is_public(f)) {
+            let Some((_, address)) = place_name(knowledge, profile, view.name) else {
+                continue;
+            };
+            match (found, address.overlay()) {
+                (_, None) => return None,
+                (None, Some(o)) => found = Some(o),
+                (Some(f), Some(o)) if f != o => return None,
+                _ => {}
+            }
+        }
+    }
+    found
+}
+
+/// A function of an object that lies in `overlay`, by the overlay-qualified name `<OVERLAY>_<name>`: names must be
+/// unique across overlays, so Decomp's analysis names each overlay's own copy of a name used in every overlay
+/// (`ovmain`) that way. Only an address inside `overlay` counts.
+fn place_in_overlay<'a>(
+    knowledge: &KnowledgeView<'_>,
+    profile: &Profile,
+    raw: &'a str,
+    overlay: OverlayName,
+) -> Option<(&'a str, Address)> {
+    let c_name = profile.decoration.undecorate(raw);
+    let address = knowledge.address_of(&format!("{overlay}_{c_name}"))?;
+    (address.overlay() == Some(overlay)).then_some((c_name, address))
+}
+
 /// Length of the original function at `address`: from the analysis, else the symbol's size.
 pub(super) fn original_len(
     index: Option<&decovery_core::AnalysisIndex<'_>>,
@@ -991,12 +1032,7 @@ pub(super) fn original_len(
 ) -> Option<u32> {
     index
         .and_then(|ix| ix.function_at(address))
-        .and_then(|f| {
-            f.end
-                .linear()?
-                .checked_sub(f.start.linear()?)?
-                .checked_add(1)
-        })
+        .and_then(|f| f.end.bytes_from(f.start)?.checked_add(1))
         .or_else(|| symbol_sizes.get(&address).copied().flatten())
         .and_then(|n| u32::try_from(n).ok())
 }
@@ -1612,5 +1648,72 @@ size = 21
         );
         assert!(modules.is_empty());
         assert_eq!(warnings.len(), 1);
+    }
+
+    fn aztec_object(names: &[&str]) -> ObjectFile {
+        let spec = AztecModuleSpec {
+            name: "M".into(),
+            code: vec![0xC3; 2 * names.len()],
+            named: names
+                .iter()
+                .enumerate()
+                .map(|(i, n)| AztecSymbolSpec {
+                    name: (*n).into(),
+                    section: AztecSection::Code,
+                    value: 2 * i as u16,
+                    public: true,
+                })
+                .collect(),
+            ..AztecModuleSpec::default()
+        };
+        read_aztec(&write_aztec(&spec), "M.O").unwrap()
+    }
+
+    #[test]
+    fn overlay_main_is_placed_in_its_own_overlay() {
+        let dir = workspace(2);
+        std::fs::create_dir_all(dir.path().join("knowledge")).unwrap();
+        let mut symbols = String::from("schema = 1\n\n");
+        for (address, name) in [
+            ("ovl:A:0000:5000", "A_ovmain"),
+            ("ovl:B:0000:5000", "B_ovmain"),
+            ("ovl:B:0000:5010", "helper"),
+        ] {
+            symbols.push_str(&format!(
+                "[[symbol]]\naddress = \"{address}\"\nkind = \"function\"\nname = \"{name}\"\nsource = \"human\"\nconfidence = \"confirmed\"\n\n"
+            ));
+        }
+        std::fs::write(dir.path().join("knowledge/symbols.toml"), symbols).unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
+        let knowledge = KnowledgeView::new(&ws, None);
+        let profile = decovery_toolchain::profile("aztec-c86-4.2b").unwrap();
+        let with_helper = aztec_object(&["ovmain_", "helper_"]);
+        let alone = aztec_object(&["ovmain_"]);
+        let objects = [(0, "b.c", &with_helper), (1, "x.c", &alone)];
+        let mut hints = Vec::new();
+        let (_, placed) = place_objects(
+            &knowledge,
+            &profile,
+            None,
+            &HashMap::new(),
+            &objects,
+            &mut hints,
+        );
+        let at: Vec<_> = placed
+            .iter()
+            .map(|b| (b.name.as_str(), b.address.to_string()))
+            .collect();
+        assert_eq!(
+            at,
+            [
+                ("ovmain", "ovl:B:0000:5000".to_string()),
+                ("helper", "ovl:B:0000:5010".to_string())
+            ]
+        );
+        assert_eq!(
+            hints,
+            ["ovmain: no counterpart in the original"],
+            "no overlay to qualify the name with"
+        );
     }
 }
