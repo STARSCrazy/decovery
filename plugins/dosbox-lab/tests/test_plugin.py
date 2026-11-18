@@ -61,6 +61,11 @@ def run_open(plugin, message):
     return json.loads(stdout.getvalue().splitlines()[-1])
 
 
+def without_times(job):
+    """A job's outcome without `started_ms` and `ended_ms`."""
+    return {k: v for k, v in job.items() if k not in ("started_ms", "ended_ms")}
+
+
 def request(request_id, method, params=None):
     return {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params or {}}
 
@@ -265,7 +270,7 @@ class RunTest(unittest.TestCase):
             "DECOVERY-JOB-2\r\nno newline" "DECOVERY-JOB-2-END\r\n"
         )
         answer = serve(self, FakeBackend(BatchResult("done", stdout)), ws.params(["A"], ["B"], ["C"]))
-        jobs = answer["result"]["jobs"]
+        jobs = [without_times(job) for job in answer["result"]["jobs"]]
         self.assertEqual(jobs[0], {"status": "done", "exit_code": 0, "stdout": "OK\r\n", "message": None})
         self.assertEqual(jobs[1], {"status": "done", "exit_code": 3, "stdout": "boom\r\n", "message": None})
         self.assertEqual(jobs[2], {"status": "done", "exit_code": 0, "stdout": "no newline", "message": None})
@@ -413,6 +418,18 @@ class InstanceTest(unittest.TestCase):
         self.assertLessEqual(call["timeout_s"], 4 * 10 + 30)  # within the host's call budget (T x jobs + 30 s)
         self.assertLess(call["ended_at"], 1 + 10 + 1)  # stopped by the per-job limit, not by the backstop
 
+    def test_jobs_report_their_times(self):
+        ws = Workspace(self)
+        backend = ScriptBackend(delay=0)
+        params = ws.params(["RUN 1"], ["RUN 3"], ["RUN 2 3"], share=1)
+        answer = run_open(build_plugin(lambda: backend, clock=backend.clock), request(1, "runner/run", params))
+        jobs = answer["result"]["jobs"]
+        spans = sorted((j["started_ms"], j["ended_ms"]) for j in jobs)
+        self.assertEqual([end - start for start, end in spans], [1000, 3000, 2000])  # job order: no costs
+        for (_, end), (start, _) in zip(spans, spans[1:]):
+            self.assertLessEqual(end, start)
+        self.assertNotIn("cpu_ms", jobs[0])
+
     def test_results_do_not_depend_on_the_number_of_instances(self):
         jobs = [
             ["SET FOO=one", "SET PATH=D:\\BIN", "ECHO [%FOO%] [%PATH%]", "RUN 3"],
@@ -428,7 +445,7 @@ class InstanceTest(unittest.TestCase):
             params = ws.params(*jobs, timeout_s=10, share=share, costs=costs)
             answer = run_open(build_plugin(lambda: backend, clock=backend.clock), request(1, "runner/run", params))
             self.assertEqual(len(backend.calls), share)
-            results[share] = answer["result"]["jobs"]
+            results[share] = [without_times(job) for job in answer["result"]["jobs"]]
         self.assertEqual(results[1], results[4])
         self.assertEqual([j["status"] for j in results[1]], ["done", "done", "done", "timeout"])
         self.assertEqual(results[1][0]["stdout"], "[one] [D:\\BIN]\r\n")

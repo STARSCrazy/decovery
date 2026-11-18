@@ -7,7 +7,8 @@ Worker processes start on demand, so a request with a small share starts only th
 goes to the standard error: a printing worker cannot corrupt the protocol stream.
 
 A job is a dict: `drives` {letter: path}, `read_only` [letters], `current` drive, `timeout_s`, `steps` (from
-`batch.plan`), optionally `cost`. Its outcome has the `runner/run` shape: `status`, `exit_code`, `stdout`, `message`.
+`batch.plan`), optionally `cost` and `epoch` (`time.time()` of the request's start). Its outcome has the
+`runner/run` shape: `status`, `exit_code`, `stdout`, `message`, and from `execute_timed` the job's times.
 
 A worker process that dies (a crash inside unicorn) breaks the whole pool and with it every job still pending. Those
 jobs run once more, each in a fresh process of its own, so only a job that breaks again is reported as failed.
@@ -142,6 +143,21 @@ def execute_job(job: dict, machine_for: Callable[[str, Any], Any]) -> dict:
     return _outcome("done", exit_code, stdout, None)
 
 
+def execute_timed(job: dict, machine_for: Callable[[str, Any], Any]) -> dict:
+    """`execute_job` plus the job's times: `started_ms` and `ended_ms` (wall clock, milliseconds since the job's
+    `epoch`, the `time.time()` of the request's start; left out without one) and `cpu_ms` (this process's CPU time
+    for the job)."""
+    started, cpu = time.time(), time.process_time()
+    outcome = execute_job(job, machine_for)
+    ended = time.time()
+    outcome["cpu_ms"] = max(0, round((time.process_time() - cpu) * 1000))
+    epoch = job.get("epoch")
+    if isinstance(epoch, (int, float)) and not isinstance(epoch, bool):
+        outcome["started_ms"] = max(0, round((started - epoch) * 1000))
+        outcome["ended_ms"] = max(outcome["started_ms"], round((ended - epoch) * 1000))
+    return outcome
+
+
 def _within(job: dict, left: float) -> dict:
     """`job` with a time limit of at most `left` seconds (0: none is left)."""
     if "timeout_s" not in job:
@@ -165,7 +181,7 @@ def run_job(job: dict) -> dict:
     global _CACHE
     if _CACHE is None:
         _CACHE = MachineCache()
-    return execute_job(job, _CACHE.get)
+    return execute_timed(job, _CACHE.get)
 
 
 def quiet_stdout() -> None:

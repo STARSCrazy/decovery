@@ -14,7 +14,7 @@ from decovery_plugin import Context, Plugin, RpcError
 
 from .batch import plan
 from .errors import INVALID_PARAMS
-from .pool import MEMORY_PER_WORKER_MB, JobPool, MachineCache, execute_job, parallel
+from .pool import MEMORY_PER_WORKER_MB, JobPool, MachineCache, execute_timed, parallel
 
 __version__ = "0.1.0"
 
@@ -83,6 +83,7 @@ def build_plugin(machine_factory: Callable[[Any], Any] | None = None) -> Plugin:
         drives, read_only, current, timeout_s, commands, costs, share = _parse(params)
         # every program is checked before any job runs (RUNNER_UNSUPPORTED leaves nothing behind)
         steps = [plan(job, drives, current=current) for job in commands]
+        epoch = time.time()  # the jobs' times are relative to it
         jobs = [
             {
                 "drives": {k: str(v) for k, v in drives.items()},
@@ -91,6 +92,7 @@ def build_plugin(machine_factory: Callable[[Any], Any] | None = None) -> Plugin:
                 "timeout_s": timeout_s,
                 "steps": job_steps,
                 "cost": cost,
+                "epoch": epoch,
             }
             for job_steps, cost in zip(steps, costs)
         ]
@@ -116,7 +118,7 @@ def build_plugin(machine_factory: Callable[[Any], Any] | None = None) -> Plugin:
             with lock:
                 outcomes = []
                 for index, job in enumerate(jobs):
-                    outcomes.append(execute_job(job, machines.get))
+                    outcomes.append(execute_timed(job, machines.get))
                     report(index, outcomes[-1])
         return {"jobs": outcomes}
 
