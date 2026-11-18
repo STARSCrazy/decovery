@@ -116,6 +116,21 @@ pub fn overlay_regions(ws: &Workspace) -> (Vec<Region>, Vec<String>) {
     (regions, warnings)
 }
 
+/// Reads and checks the file of overlay `o` (Aztec C86 layout); the error names the file.
+pub fn read_overlay_of(
+    ws: &Workspace,
+    o: &decovery_core::OverlayConfig,
+) -> Result<decovery_loaders::Overlay, String> {
+    let path = locate(Path::new(&o.file), &ws.root);
+    let bytes = std::fs::read(&path)
+        .map_err(|e| format!("overlay {}: cannot read {}: {e}", o.name, path.display()))?;
+    let file = bytes
+        .get(usize::try_from(o.file_offset).unwrap_or(usize::MAX)..)
+        .unwrap_or(&[]);
+    decovery_loaders::read_overlay(file, o.name.as_str())
+        .map_err(|e| format!("overlay {}: {e}", o.name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

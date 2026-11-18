@@ -186,3 +186,80 @@ Result through `runner/run` of both plugins (worktree unicorn-dos, `CC -n +b`, t
 - Not done: Ghidra analysis of a workspace with overlays (the plugin's overlay spaces are untested against a real
   Ghidra); overlay migration from Decomp stays Task 9.
 - Commit `feat(loaders): Aztec overlays`.
+
+## Task 7: prologue search with placeholders, 386 prefixes in 16-bit code (R2) — done
+
+- `decovery_x86::{PatternByte, ProloguePattern, PatternError, find_prologues}` (`prologue.rs`, port of Decomp's
+  `prologe.py`): hex text with `??`; with a call target the last two bytes must be `??` (the call displacement);
+  the destination is computed in the match address's own kind (Seg/Ovl: 16-bit wrap in the same segment, Flat:
+  32-bit) and handed to the resolver, which names it (for an overlay the resolver maps seg:off into the main
+  program itself, as Decomp's "only segment and offset count"). Overlapping matches count each; addresses past the
+  segment end are skipped; never panics. `decovery-x86` now depends on `decovery-core` (for `Address`).
+- Profiles: `prologue_pattern = "B8 ?? ?? E8 ?? ??"`, `prologue_call = "$csav"` in all three Aztec profiles;
+  `Profile::prologue_pattern: Option<ProloguePattern>` validated at parse (call without pattern, or a call pattern
+  without trailing `??`, is `Invalid`). `decovery-toolchain` depends on `decovery-x86`. Nothing consumes the
+  pattern yet (function search goes through Ghidra; the migrated workspace's analysis keeps Decomp's list).
+- R2: iced-x86 decodes 66h/67h prefixed instructions in 16-bit mode with the right lengths; no decoder change was
+  needed. Address-width fields stay 2-byte only (a 67h 32-bit displacement is not taken for a relocatable field).
+  Shapes of `mov ax,1` and `66 mov eax,1` differ.
+- Tests `crates/decovery-x86/tests/prologue_synthetic.rs`: `pattern_text_parses`, `placeholder_bytes_match_any`,
+  `call_target_must_resolve`, `call_target_in_an_overlay_uses_the_processor_address`, `no_match_in_data`,
+  `prefixed_386_instructions_in_16_bit_code`; profile tests `aztec_prologue_pattern`,
+  `prologue_call_without_pattern_is_invalid`.
+- Local `crates/decovery-cli/tests/prologue_local.rs` (CLI crate: needs `overlay add`), call target from Decomp's
+  `[analyse] prologe` address: per overlay prologue matches ⊆ baseline functions (0 false matches), 902 of 927
+  baseline overlay functions found; the 25 missing are the frameless library functions behind each C module
+  (`$ovbgn` at the entry, `$cswt`, `swapmem`, …), which Decomp found by calls, not by the pattern. Decoding every
+  overlay's code function by function: decoded length sum = code size for all 13 overlays; 386-prefixed
+  instructions in VPCLV 3, VMAZE 2, VMEXT 2, VMEXE 3, VTREA 3; undecodable bytes 0–20 per overlay (data inside the
+  code, e.g. switch tables). R2 closed.
+- Commit `feat(x86): prologue search with placeholders`.
+
+## Task 8: overlay module build and compare — done
+
+- `decovery_diff::{compare_overlay_module, ModuleVerdict}` (`module.rs`; port of Decomp's
+  `tools/pruefe_wizardry7_overlay.py`). Named `compare_overlay_module`, not `compare_module` as in the plan: that
+  name is the existing OMF module comparison. Takes `&[&ObjectFile]` (source order). Placement: code from corg,
+  data from dorg, BSS from dorg + header dsize; the module must end at the overlay entry (`$ovbgn`), data and code
+  of the library behind it are not compared. All references resolved: internal (any object's public symbols, own
+  locals, unnamed positions) computed and checked; externals bound from the original field, every further use of
+  the name must agree (else `ambiguous`, wrong ref); selector / far-pointer fields are gaps. `identical` = code
+  equal and size = entry − corg, data equal, BSS = header, no ambiguity. Fields beyond the plan: `code_size`,
+  `data_size`, `externals`, `ambiguous`.
+- Tests `crates/decovery-diff/tests/overlay_module_synthetic.rs` (plan's `module_synthetic.rs` exists for the OMF
+  module compare): `module_of_two_objects_places_in_order`, `data_difference_is_reported_with_offset`,
+  `module_with_different_bss_is_not_identical`, `relocated_data_word_is_a_gap`,
+  `wrong_internal_reference_is_reported`, `code_that_does_not_end_at_the_entry_is_not_identical`.
+- Facade `build`: for Aztec profiles the objects whose placed functions lie in an overlay are grouped per overlay
+  (source order) and compared; response `modules` [{overlay, identical, code{…}, data{…}, bss, externals,
+  ambiguous}] and a summary note; unreadable overlay → warning. `program::read_overlay_of`. Unit tests
+  `overlay_module_verdict_is_reported`, `unreadable_overlay_is_a_warning`. `show` unchanged (no module view yet).
+- Local `crates/decovery-cli/tests/aztec_overlay_local.rs` (scratch workspace, dosbox-lab, 8 sources 9.7 s wall):
+  per function compare_with_gaps at the baseline's overlay address, per module compare_overlay_module.
+
+  | overlay | functions | Decomp identical | decovery identical | not tried | equal verdicts |
+  |---|---|---|---|---|---|
+  | VBASE | 77 | 0 | 0 | 77 | 77 |
+  | VDOPT | 48 | 46 | 46 | 2 | 48 |
+  | VINIT | 17 | 16 | 16 | 1 | 17 |
+  | VMAZE | 138 | 0 | 0 | 138 | 138 |
+  | VMELE | 44 | 42 | 42 | 2 | 44 |
+  | VMEXE | 78 | 0 | 0 | 78 | 78 |
+  | VMEXT | 50 | 49 | 49 | 1 | 50 |
+  | VMNPC | 132 | 0 | 0 | 132 | 132 |
+  | VPCLV | 51 | 50 | 50 | 1 | 51 |
+  | VPCMK | 76 | 74 | 74 | 2 | 76 |
+  | VPCVW | 84 | 0 | 0 | 84 | 84 |
+  | VPOPS | 43 | 42 | 42 | 1 | 43 |
+  | VTREA | 89 | 0 | 0 | 89 | 89 |
+
+  927/927 overlay verdicts equal (319 identical; with Task 4's 3 main-program functions 322 = baseline), 0
+  differ. Modules (code / data / BSS / resolved refs, all identical, numbers equal Decomp's notes):
+  VINIT 5623 / 302 / 0x2 / 618; VDOPT 18123 / 19 / 0xCDE / 1658; VMELE 14082 / 20 / 0x1A / 1244;
+  VMEXT 21005 / 221 / 0x99C / 2189; VPCLV 21570 / 869 / 0x3A4 / 1832; VPCMK 28581 / 1189 / 0x268 / 2361;
+  VPOPS 20111 / 51 / 0x2B8 / 1434. Externals bound per module 96–131, 0 ambiguous.
+- One harness finding, not a verdict disagreement: Decomp names the C function `ovmain` of every overlay
+  `<OVERLAY>_ovmain` (names must be unique across overlays); the local test looks up `<OVERLAY>_<name>` as a
+  fallback. Task 9 (migration) must handle this: the object's `ovmain_` has to place at the overlay's
+  `<OVERLAY>_ovmain` (facade `place_objects` looks names up globally).
+- Commit `feat(diff): overlay module compare with data and BSS`.
