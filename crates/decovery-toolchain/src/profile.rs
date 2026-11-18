@@ -518,7 +518,7 @@ mod tests {
             assert!(p.linker.is_none() && p.assembler.is_none(), "{id}");
             assert!(p.prologue.is_empty());
             assert_eq!(p.fingerprint, ["BIN/CC.EXE"]);
-            assert_eq!(p.runners, ["dosbox-lab"]);
+            assert_eq!(p.runners, ["unicorn-dos", "dosbox-lab"]);
             assert_eq!(p.job_prelude, ["SET CCTEMP=C:\\{tmp}\\"]);
             assert_eq!(
                 p.prelude,

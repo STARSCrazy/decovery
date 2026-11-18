@@ -242,6 +242,8 @@ class _PharLapRegs(Regs):
 
     def write_linear(self, address: int, data: bytes) -> None:
         self.mu.mem_write(address, data)
+        if data:  # code translated from these bytes is stale now
+            self.mu.ctl_remove_cache(address, address + len(data))
 
 
 class PharLapEmu:

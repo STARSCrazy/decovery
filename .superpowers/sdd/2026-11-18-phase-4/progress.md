@@ -88,3 +88,29 @@ With `DECOVERY_AZTEC_RUNNER=unicorn-dos`: fails (exit 254), as above.
 No plugin code changed.
 
 Commit `feat(runners): run the Aztec C86 compiler chain`.
+
+## R1 follow-up: unicorn-dos runs the Aztec C86 pass chain — done
+
+Root cause: stale translated code in unicorn, not DOS semantics. CC reads CGEN's image with INT 21h AH=3Fh over its
+own code at PSP+10h and jumps in. The emulated DOS writes the read bytes with `mem_write` from the interrupt hook,
+which does not drop unicorn's translation blocks for that range, so CGEN's startup partly ran CC's old translated
+code (memory at CGEN's entry was byte-identical to a direct CGEN start, yet it still failed: "no operand", exit
+254). Command tail CR, tail garbage, FCBs and environment were each patched to the direct values: no effect.
+Fix: `write_linear` (real mode and Phar Lap) calls `ctl_remove_cache` for the written range.
+
+Second gap fixed: AH=41h on a file that is still open (CGEN deletes `ctmp1`/`ctmp2` while holding them) now
+removes the name for DOS at once and the host file when its last handle closes (or at program end); a create under
+that name starts a new file.
+
+Tests (synthetic): `test_code_read_over_executed_code_runs` (realmode), three delete-while-open tests (dosfs); all
+red without the fix. Plugin suite: 89 passed, 3 skipped.
+
+Result through `runner/run` of both plugins (worktree unicorn-dos, `CC -n +b`, the third target's sources):
+- 4.2b: all 8 sources, objects byte-identical to dosbox-lab's. Request with 8 jobs: unicorn-dos 2.7 s, dosbox-lab
+  4.7 s; single jobs in unicorn-dos 0.3–2.6 s (farmem 0.3 s, vmele 1.4 s) vs ~1.0–1.4 s per dosbox-lab request.
+  The three smallest: unicorn-dos 1.6 s, dosbox-lab 3.4 s.
+- 5.2a: three smallest identical (1.8 s vs 3.7 s). 3.4b: farmem identical (0.35 s vs 1.3 s); vinit/vmele time out
+  in dosbox-lab with 3.4b, not compared.
+- Profiles: `runners = ["unicorn-dos", "dosbox-lab"]` for all three.
+- Note: the user config runs an installed copy of unicorn-dos (`extern/unicorn-venv`); it needs the new plugin
+  code (reinstall after merge) before the Aztec profiles work with unicorn-dos first.

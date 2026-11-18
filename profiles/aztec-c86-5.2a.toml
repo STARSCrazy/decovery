@@ -7,9 +7,9 @@ version = "5.2a"
 bits = 16
 object_format = "aztec"
 object_extension = "O"
-# unicorn-dos cannot run the pass chain yet (risk R1, docs/plans/2026-11-18-phase-4.md): CGEN loaded in place by CC
-# sees no arguments there
-runners = ["dosbox-lab"]
+# unicorn-dos first (faster); CC loads each pass in place over its own code, which unicorn-dos runs since it drops
+# stale translated code on DOS writes
+runners = ["unicorn-dos", "dosbox-lab"]
 # CC runs the passes and the assembler itself (command form as in Decomp)
 command = "CC -n {flags} {input}"
 prelude = ['SET CLIB=D:\LIB\', 'SET INCLUDE=D:\INCLUDE\', 'SET PATH=D:\BIN']

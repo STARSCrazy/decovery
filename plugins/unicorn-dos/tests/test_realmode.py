@@ -420,6 +420,25 @@ class RealModeTest(unittest.TestCase):
         self.assertEqual(d[9]["AX"] & 0xFF, 0)
         self.assertTrue(d[9]["FLAGS"] & ZERO)
 
+    def test_code_read_over_executed_code_runs(self):
+        """A program that reads the next pass over code it already ran (Aztec C86's CC loads CGEN this way) runs the
+        new code, not the translation of the old bytes."""
+        (self.c / "NEXT.BIN").write_bytes(b"\xb0\x07\xc3")  # mov al, 7; ret
+        code = bytearray(
+            PUSH_CS_POP_DS
+            + b"\xe8\x3b\x00"  # call 0x40: the old code
+            + mov16("AX", 0x3D00) + mov16("DX", 0x50) + int21()  # open NEXT.BIN
+            + b"\x89\xc3"  # mov bx, ax
+            + mov_ah(0x3F) + mov16("CX", 3) + mov16("DX", 0x40) + int21()  # read it over the old code
+            + mov_ah(0x3E) + int21()
+            + b"\xe8\x00\x00"  # call 0x40 (displacement set below)
+            + mov_ah(0x4C) + int21()  # exit with AL
+        )  # fmt: skip
+        struct.pack_into("<H", code, len(code) - 6, 0x40 - (len(code) - 4))
+        code = bytes(code).ljust(0x40, b"\x90") + b"\xb0\x01\xc3".ljust(0x10, b"\x90") + b"NEXT.BIN\0"
+        result, _ = self.run_program(asm.mz_exe(code))
+        self.assertEqual(result.exit_code, 7)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -224,6 +224,8 @@ class _RealModeRegs(Regs):
 
     def write_linear(self, address: int, data: bytes) -> None:
         self.mu.mem_write(address, data)
+        if data:  # code translated from these bytes is stale now (programs that load the next pass in place)
+            self.mu.ctl_remove_cache(address, address + len(data))
 
 
 class Arena:
