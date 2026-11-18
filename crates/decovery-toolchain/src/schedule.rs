@@ -83,7 +83,7 @@ pub struct Throughput {
     /// spread over the slots.
     pub lower_bound_ms: u64,
     /// Busy job time over `slots` x time, counted only while at least `slots` jobs are runnable (queued or
-    /// running); `None` when that never happens.
+    /// running) and from the first job start on (worker start-up is excluded); `None` when that never happens.
     pub saturation: Option<f64>,
     /// `lower_bound_ms` / wall time (1 when the wall time is 0).
     pub efficiency: f64,
@@ -104,9 +104,14 @@ pub fn throughput(jobs: &[JobSpan], slots: u32, wall_ms: u64, compile_ms: u64) -
         .collect();
     edges.sort_unstable();
     edges.dedup();
+    // Worker start-up (request sent until the first job starts) is not counted (owner decision 5, 2026-11-18).
+    let first_start = jobs.iter().map(|j| j.start_ms).min().unwrap_or(0);
     let (mut busy, mut offered) = (0u64, 0u64);
     for pair in edges.windows(2) {
         let (from, to) = (pair[0], pair[1]);
+        if from < first_start {
+            continue;
+        }
         let alive = |j: &&JobSpan| j.end_ms > from;
         let runnable = jobs
             .iter()

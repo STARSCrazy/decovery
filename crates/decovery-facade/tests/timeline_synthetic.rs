@@ -92,6 +92,24 @@ fn saturation_of_full_slots_is_one() {
 }
 
 #[test]
+fn worker_start_up_is_not_counted_in_saturation() {
+    // the request is sent at 0, the first job starts at 100 (workers spawning): that interval is excluded
+    let jobs = [span(0, 100, 200), span(0, 100, 200)];
+    let t = throughput(&jobs, 2, 200, 200);
+    assert_eq!(t.saturation, Some(1.0));
+    // idle time after the first start still counts
+    let jobs = [span(0, 100, 200), span(0, 150, 250)];
+    let t = throughput(&jobs, 2, 250, 250);
+    // [100,150): 1 busy of 2; [150,200): 2 of 2; after 200 fewer than 2 runnable
+    let expected = (50.0 + 100.0) / 200.0;
+    assert!(
+        (t.saturation.unwrap() - expected).abs() < 1e-9,
+        "{:?}",
+        t.saturation
+    );
+}
+
+#[test]
 fn idle_slot_with_queued_job_lowers_saturation() {
     // the second slot stays idle for 50 ms although three jobs are queued (a worker starting up)
     let jobs = [span(0, 0, 100), span(0, 50, 150), span(0, 100, 200)];
