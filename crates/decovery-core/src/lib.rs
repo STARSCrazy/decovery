@@ -6,6 +6,7 @@ pub mod archive;
 pub mod attempts;
 pub mod bench;
 pub mod calls;
+pub mod jobs;
 pub mod knowledge;
 pub mod migrate;
 pub mod program;
@@ -29,6 +30,10 @@ pub use attempts::{
 };
 pub use bench::{BenchLimits, BenchUsage};
 pub use calls::{CALLS_DIR, CallRecord, append_call};
+pub use jobs::{
+    JOBS_DIR, JobLease, JobProgress, JobRecord, JobState, job_cancel_requested, job_create,
+    job_lease, job_list, job_load, job_request_cancel, job_save,
+};
 pub use knowledge::{
     ClaimSource, Confidence, LineComment, LocalVariable, RefutedClaim, Symbol, SymbolKind,
     SymbolsFile,

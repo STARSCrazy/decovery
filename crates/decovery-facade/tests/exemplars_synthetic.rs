@@ -205,12 +205,22 @@ fn build_refresh_adds_new_identical_function() {
     let f = fixture(&python, "");
     let mut request = BuildRequest::default();
     request.files = vec!["a.c".into()];
-    build(f.root(), &request, &|_| {}).unwrap();
+    build(
+        f.root(),
+        &request,
+        &decovery_facade::Control::progress_only(&|_| {}),
+    )
+    .unwrap();
     let mut names = entry_names(&index_file(&f));
     names.sort();
     assert_eq!(names, ["add", "sub"]);
     request.files = vec!["z.c".into()];
-    build(f.root(), &request, &|_| {}).unwrap();
+    build(
+        f.root(),
+        &request,
+        &decovery_facade::Control::progress_only(&|_| {}),
+    )
+    .unwrap();
     let mut names = entry_names(&index_file(&f));
     names.sort();
     assert_eq!(names, ["add", "sub", "zed"]);

@@ -15,6 +15,9 @@ A job whose last command runs WLINK is an LE link job: its command line goes to 
 (`NB.OBJ`, `NB.LNK`, `STUB.EXE`) are copied to `linked/` in FAKE_OMF_DIR, and `REBUILD.EXE` from FAKE_OMF_DIR is
 copied into the C mount as the program `NB.LNK` names (exit 0); without it the job prints an error and exits 1.
 
+With FAKE_OMF_BLOCK=1 a call appends its job count to `block.log` and waits (up to 60 s) for `$/cancel`; when
+cancelled it appends `cancelled` to `cancel.log` and answers -32002.
+
 With FAKE_NOT_RUN_ONCE=1 the first call with more than one job answers only its first job; the others come back
 `failed` with "job not run: ..." like the dosbox-lab runner after a hang.
 """
@@ -106,6 +109,11 @@ def run_job(job, c_root):
 def run(params, ctx):
     jobs = params["jobs"]
     append("requests.log", str(len(jobs)))
+    if os.environ.get("FAKE_OMF_BLOCK") == "1":
+        append("block.log", str(len(jobs)))
+        if ctx.wait_cancelled(60):
+            append("cancel.log", "cancelled")
+            ctx.check_cancelled()
     c_root = {m["drive"]: m["path"] for m in params["mounts"]}["C"]
     marker = os.path.join(OBJECTS, "not-run.marker")
     cut = os.environ.get("FAKE_NOT_RUN_ONCE") == "1" and len(jobs) > 1 and not os.path.exists(marker)

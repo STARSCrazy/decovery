@@ -28,14 +28,24 @@ fn attempts(f: &Fixture, at: Address) -> Vec<AttemptRecord> {
 fn build_files(f: &Fixture, files: &[&str]) -> Response {
     let mut request = BuildRequest::default();
     request.files = files.iter().map(|s| s.to_string()).collect();
-    build(f.root(), &request, &|_| {}).unwrap()
+    build(
+        f.root(),
+        &request,
+        &decovery_facade::Control::progress_only(&|_| {}),
+    )
+    .unwrap()
 }
 
 fn build_variants(f: &Fixture, variants: Vec<Variant>) -> Response {
     let mut request = BuildRequest::default();
     request.function = Some("sub".into());
     request.variants = variants;
-    build(f.root(), &request, &|_| {}).unwrap()
+    build(
+        f.root(),
+        &request,
+        &decovery_facade::Control::progress_only(&|_| {}),
+    )
+    .unwrap()
 }
 
 fn sub_with(mark: &str) -> String {
@@ -422,7 +432,12 @@ fn search_records_only_the_candidate() {
     let mut call = LegacyCall::new("sub", LegacyOperation::Chain);
     call.user_plugins = Some(BTreeMap::new());
     call.apply = true;
-    let response = search(f.root(), &call, &|_| {}).unwrap();
+    let response = search(
+        f.root(),
+        &call,
+        &decovery_facade::Control::progress_only(&|_| {}),
+    )
+    .unwrap();
     assert_eq!(
         response.data["candidate"]["applied"], true,
         "{}",

@@ -17,9 +17,10 @@ use std::time::Instant;
 
 use decovery_core::{CallRecord, ClaimSource, Confidence, append_call};
 use decovery_facade::{
-    AnalyzeOptions, AnnotateAction, Annotation, Budget, BuildRequest, DEFAULT_HISTORY_LIMIT,
-    DEFAULT_LIMIT, DEFAULT_SIMILAR_LIMIT, FacadeError, FindQuery, FindWhat, FunctionFilter,
-    FunctionSort, LegacyCall, LegacyOperation, Progress, Response, Session, Variant,
+    AnalyzeOptions, AnnotateAction, Annotation, Budget, BuildRequest, Control,
+    DEFAULT_HISTORY_LIMIT, DEFAULT_LIMIT, DEFAULT_SIMILAR_LIMIT, FacadeError, FindQuery, FindWhat,
+    FunctionFilter, FunctionSort, LegacyCall, LegacyOperation, Progress, Response, Session,
+    Variant,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
@@ -733,7 +734,7 @@ impl Server {
         op: F,
     ) -> CallToolResult
     where
-        F: FnOnce(&Path, &dyn Fn(Progress)) -> Result<Response, FacadeError> + Send + 'static,
+        F: FnOnce(&Path, &Control) -> Result<Response, FacadeError> + Send + 'static,
     {
         let root = self.root.clone();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Progress>();
@@ -756,7 +757,7 @@ impl Server {
             let progress = |p: Progress| {
                 let _ = tx.send(p);
             };
-            op(&root, &progress)
+            op(&root, &Control::progress_only(&progress))
         })
         .await;
         if let Some(forward) = forward {

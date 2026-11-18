@@ -35,7 +35,7 @@ use super::build::{
     startup_frames, symbol_sizes, toolchain, verdict_id,
 };
 use super::history::{AttemptSource, Tried, fingerprint_of, hex, mark_archived, record_attempts};
-use crate::{FacadeError, KnowledgeView, Response};
+use crate::{Control, FacadeError, KnowledgeView, Response};
 
 /// Most variants one `build` call compiles.
 pub const MAX_VARIANTS: usize = 64;
@@ -559,9 +559,10 @@ impl Compare<'_> {
 pub(super) fn build_variants(
     root: &Path,
     request: &BuildRequest,
-    progress: &dyn Fn(Progress),
+    control: &Control,
     started: Instant,
 ) -> Result<Response, FacadeError> {
+    let progress = control.progress;
     let function = request.function.as_deref().ok_or_else(|| {
         FacadeError::Invalid("build with variants needs a function (--function <name>)".into())
     })?;
@@ -736,7 +737,7 @@ pub(super) fn build_variants(
             .map(|g| SourceJob::new(dos_name.clone(), flags.clone()).in_dir(g.dir.clone()))
             .collect::<Result<_, _>>()
             .map_err(toolchain)?;
-        let compiled = compile_jobs(&ws, &profile, &jobs_input, &run_dir.0, progress)?;
+        let compiled = compile_jobs(&ws, &profile, &jobs_input, &run_dir.0, control)?;
         if compiled.files.len() != groups.len() {
             return Err(FacadeError::Invalid(format!(
                 "internal error: {} compile results for {} distinct texts",
@@ -977,7 +978,8 @@ pub(super) fn build_variants(
         results.push(result);
     }
 
-    // one attempt per variant, outside the workspace lock
+    // one attempt per variant, outside the workspace lock; a cancel before it records nothing
+    control.check()?;
     if let Some(address) = address {
         let fingerprint = fingerprint_of(&ws, &profile);
         let mut tried = Vec::new();

@@ -13,9 +13,10 @@ mod setup;
 
 use decovery_core::{CallRecord, ClaimSource, Confidence, append_call};
 use decovery_facade::{
-    AnalyzeOptions, AnnotateAction, Annotation, Budget, BuildRequest, DEFAULT_HISTORY_LIMIT,
-    DEFAULT_LIMIT, DEFAULT_SIMILAR_LIMIT, FacadeError, FindQuery, FindWhat, FunctionFilter,
-    FunctionSort, LegacyCall, LegacyOperation, Progress, Response, Session, Variant,
+    AnalyzeOptions, AnnotateAction, Annotation, Budget, BuildRequest, Control,
+    DEFAULT_HISTORY_LIMIT, DEFAULT_LIMIT, DEFAULT_SIMILAR_LIMIT, FacadeError, FindQuery, FindWhat,
+    FunctionFilter, FunctionSort, LegacyCall, LegacyOperation, Progress, Response, Session,
+    Variant,
 };
 
 /// Recover source code from old executables.
@@ -573,6 +574,8 @@ fn log_call(
     record.seconds = started.elapsed().as_secs_f64();
     if code == ExitCode::from(2) {
         record.outcome = "error".into();
+    } else if code == ExitCode::from(130) {
+        record.outcome = "cancelled".into();
     }
     if let Err(e) = append_call(workspace, record) {
         eprintln!("warning: the call was not logged: {e}");
@@ -1431,11 +1434,13 @@ fn legacy(workspace: &Path, call: &LegacyCall, json: bool) -> Result<(), FacadeE
         LegacyOperation::Chain
         | LegacyOperation::Permute
         | LegacyOperation::Beam
-        | LegacyOperation::Forms => decovery_facade::search(workspace, &call, &progress)?,
-        LegacyOperation::Equivalence | LegacyOperation::Behavior => {
-            decovery_facade::verify(workspace, &call, &progress)?
+        | LegacyOperation::Forms => {
+            decovery_facade::search(workspace, &call, &Control::progress_only(&progress))?
         }
-        _ => decovery_facade::diagnose_deep(workspace, &call, &progress)?,
+        LegacyOperation::Equivalence | LegacyOperation::Behavior => {
+            decovery_facade::verify(workspace, &call, &Control::progress_only(&progress))?
+        }
+        _ => decovery_facade::diagnose_deep(workspace, &call, &Control::progress_only(&progress))?,
     };
     if json {
         return print_json(&response);
@@ -1503,7 +1508,8 @@ fn analyze(workspace: &Path, options: &AnalyzeOptions, json: bool) -> Result<(),
             None => eprintln!("{message}"),
         }
     };
-    let response = decovery_facade::analyze(workspace, options, &progress)?;
+    let response =
+        decovery_facade::analyze(workspace, options, &Control::progress_only(&progress))?;
     print_summary(&response, json)
 }
 
@@ -1544,7 +1550,7 @@ fn build(
             .variants
             .push(Variant::function(read(path)?).with_label(path.display().to_string()));
     }
-    let response = decovery_facade::build(workspace, &request, &progress)?;
+    let response = decovery_facade::build(workspace, &request, &Control::progress_only(&progress))?;
     if !request.variants.is_empty() {
         return print_variants(&response, json);
     }
@@ -1597,7 +1603,7 @@ fn link(workspace: &Path, json: bool) -> Result<ExitCode, FacadeError> {
             eprintln!("{message}");
         }
     };
-    let response = decovery_facade::link(workspace, &progress)?;
+    let response = decovery_facade::link(workspace, &Control::progress_only(&progress))?;
     let d = &response.data;
     let code = match d["result"].as_str() {
         Some("identical") => ExitCode::SUCCESS,

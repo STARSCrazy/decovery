@@ -432,7 +432,7 @@ fn other_functions_stay_identical_in_copy() {
     decovery_facade::build(
         fixture.root(),
         &decovery_facade::BuildRequest::default(),
-        &|_| {},
+        &decovery_facade::Control::progress_only(&|_| {}),
     )
     .unwrap();
     let task = SuiteTask::new(fixture.root().to_path_buf(), "sub");
@@ -445,8 +445,12 @@ fn other_functions_stay_identical_in_copy() {
             .iter()
             .any(|r| r.name == "add" && r.verdict == Some(decovery_core::VerdictId::Identical))
     );
-    let response =
-        decovery_facade::build(&into, &decovery_facade::BuildRequest::default(), &|_| {}).unwrap();
+    let response = decovery_facade::build(
+        &into,
+        &decovery_facade::BuildRequest::default(),
+        &decovery_facade::Control::progress_only(&|_| {}),
+    )
+    .unwrap();
     assert!(
         read_rebuild(&into)
             .unwrap()
@@ -554,7 +558,7 @@ fn bench_copy_has_no_exemplar_entry_of_the_function() {
     decovery_facade::build(
         fixture.root(),
         &decovery_facade::BuildRequest::default(),
-        &|_| {},
+        &decovery_facade::Control::progress_only(&|_| {}),
     )
     .unwrap();
     let original = decovery_facade::Session::open(fixture.root()).unwrap();

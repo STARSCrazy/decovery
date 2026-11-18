@@ -1,5 +1,6 @@
 //! Shared operations of decovery: sessions, target resolution and the layers built on them.
 
+mod control;
 mod error;
 mod exemplars;
 pub mod output;
@@ -10,7 +11,8 @@ pub mod response;
 mod session;
 pub mod tools;
 
-pub use decovery_plugin::Progress;
+pub use control::Control;
+pub use decovery_plugin::{CancelToken, Progress};
 pub use error::FacadeError;
 pub use exemplars::{EXEMPLARS_FILE, Exemplar, ExemplarIndex, LSH_ALL, exemplar_index};
 pub use output::{

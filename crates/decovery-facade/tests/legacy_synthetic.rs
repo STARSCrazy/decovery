@@ -8,12 +8,13 @@ mod build_fixture;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use build_fixture::{A_C, ADD, Fixture, SUB, fixture};
 use decovery_core::read_rebuild;
 use decovery_facade::{
-    FacadeError, LegacyCall, LegacyOperation, LegacyOptions, Progress, Response, diagnose_deep,
-    search, verify,
+    CancelToken, Control, FacadeError, LegacyCall, LegacyOperation, LegacyOptions, Progress,
+    Response, diagnose_deep, search, verify,
 };
 use serde_json::{Value, json};
 
@@ -84,12 +85,12 @@ fn call(target: &str, operation: LegacyOperation) -> LegacyCall {
     call
 }
 
-type Tool = fn(&Path, &LegacyCall, &dyn Fn(Progress)) -> Result<Response, FacadeError>;
+type Tool = fn(&Path, &LegacyCall, &Control) -> Result<Response, FacadeError>;
 
 fn run(b: &Bridge, tool: Tool, call: &LegacyCall) -> (Result<Response, FacadeError>, Vec<String>) {
     let seen = Mutex::new(Vec::new());
     let sink = |p: Progress| seen.lock().unwrap().push(p.message.unwrap_or_default());
-    let result = tool(b.root(), call, &sink);
+    let result = tool(b.root(), call, &Control::progress_only(&sink));
     (result, seen.into_inner().unwrap())
 }
 
@@ -261,6 +262,54 @@ fn serve_attempt(b: &Bridge, current: &[u8], candidate: &[u8]) {
 }
 
 #[test]
+fn cancelled_search_applies_nothing() {
+    let python = python_or_skip!();
+    let b = bridge(&python, true, true);
+    // a better candidate that `apply` would write, from a search that blocks until cancelled
+    serve_attempt(&b, &wrong_sub(), SUB);
+    b.f.write_obj("A", &[("_add", ADD), ("_sub", SUB)]);
+    b.answer(json!({"block": true, "candidate": {"text": sub_with("found"), "kind": "function"}}));
+    let mut c = call("sub", LegacyOperation::Chain);
+    c.apply = true;
+    let token = CancelToken::new();
+    let block_log = b.shadow().join("block.log");
+    let canceller = {
+        let token = token.clone();
+        std::thread::spawn(move || {
+            let start = Instant::now();
+            while !block_log.exists() && start.elapsed() < Duration::from_secs(30) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            token.cancel();
+        })
+    };
+    let result = search(b.root(), &c, &Control::new(&|_| {}, token));
+    canceller.join().unwrap();
+    let error = result.unwrap_err();
+    assert!(matches!(error, FacadeError::Cancelled), "{error}");
+    assert_eq!(b.requests().len(), 1, "the plugin had the request");
+    // the plugin got `$/cancel` (the real one kills the Decomp subprocess then)
+    let cancel_log = b.shadow().join("cancel.log");
+    let start = Instant::now();
+    while !cancel_log.exists() && start.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        std::fs::read_to_string(&cancel_log)
+            .unwrap_or_default()
+            .trim_end(),
+        "cancelled"
+    );
+    assert_eq!(
+        std::fs::read_to_string(b.root().join("src/a.c")).unwrap(),
+        A_C
+    );
+    assert!(read_rebuild(b.root()).unwrap().is_empty());
+    assert!(!b.root().join("cache/attempts").exists(), "no attempt");
+    assert!(b.f.log("calls.log").is_empty(), "nothing was built");
+}
+
+#[test]
 fn search_candidate_is_built_by_decovery_and_applied_only_when_better() {
     let python = python_or_skip!();
     let b = bridge(&python, true, true);
@@ -403,7 +452,12 @@ fn deep_diagnosis_carries_decoverys_own_diagnosis_after_a_build() {
     b.f.write_obj("A", &[("_add", ADD), ("_sub", &wrong_sub())]);
     let mut request = decovery_facade::BuildRequest::default();
     request.files = vec!["a.c".into()];
-    decovery_facade::build(b.root(), &request, &|_| {}).unwrap();
+    decovery_facade::build(
+        b.root(),
+        &request,
+        &decovery_facade::Control::progress_only(&|_| {}),
+    )
+    .unwrap();
     let response = run(&b, diagnose_deep, &call("sub", LegacyOperation::Joint))
         .0
         .unwrap();

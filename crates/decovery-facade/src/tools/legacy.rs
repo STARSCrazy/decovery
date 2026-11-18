@@ -26,7 +26,7 @@ use super::diagnose::diagnose_tool;
 use super::history::RecordAs;
 use super::variants::Variant;
 use crate::plugins::{PluginConfig, plugin_config, read_user_plugins};
-use crate::{Budget, FacadeError, Handle, Response, Session, resolve, store_handle};
+use crate::{Budget, Control, FacadeError, Handle, Response, Session, resolve, store_handle};
 
 /// Name of the bridge plugin in `[plugins.<name>]`.
 pub const LEGACY_PLUGIN: &str = "decomp-legacy";
@@ -248,8 +248,9 @@ fn call_plugin(
     config: &PluginConfig,
     params: Value,
     timeout: Duration,
-    progress: &dyn Fn(Progress),
+    control: &Control,
 ) -> Result<Value, FacadeError> {
+    let progress = control.progress;
     let sink = |p: Progress| {
         let message = p
             .message
@@ -260,7 +261,7 @@ fn call_plugin(
     };
     let options = || CallOptions {
         timeout,
-        cancel: None,
+        cancel: Some(control.cancel.clone()),
         on_progress: Some(&sink),
     };
     if !KEEP_ALIVE.load(Ordering::SeqCst) {
@@ -330,7 +331,7 @@ fn bridge_error(e: PluginError) -> FacadeError {
             }
             _ => FacadeError::Plugin(format!("{LEGACY_PLUGIN}: {message} (error {code})")),
         },
-        PluginError::Cancelled => FacadeError::Plugin(format!("{LEGACY_PLUGIN}: cancelled")),
+        PluginError::Cancelled => FacadeError::Cancelled,
         PluginError::Timeout => FacadeError::Plugin(format!(
             "{LEGACY_PLUGIN}: no answer in time; the Decomp command was cancelled"
         )),
@@ -555,8 +556,10 @@ fn run_bridge(
     session: &Session,
     function: &Function,
     call: &LegacyCall,
-    progress: &dyn Fn(Progress),
+    control: &Control,
 ) -> Result<Answer, FacadeError> {
+    control.check()?;
+    let progress = control.progress;
     let ws = &session.workspace;
     let options = options_json(root, call.operation, &call.options)?;
     let decomp = decomp_workspace(ws)?;
@@ -590,8 +593,9 @@ fn run_bridge(
         &config,
         params,
         Duration::from_secs(timeout) + HOST_SLACK,
-        progress,
+        control,
     )?;
+    control.check()?;
     parse_answer(result)
 }
 
@@ -693,13 +697,13 @@ fn report_lines(answer: &Answer) -> usize {
 pub fn diagnose_deep(
     root: &Path,
     call: &LegacyCall,
-    progress: &dyn Fn(Progress),
+    control: &Control,
 ) -> Result<Response, FacadeError> {
     check_tool(call, Tool::Diagnose, "a deep diagnosis")?;
     let root = absolute_root(root)?;
     let session = Session::open(&root)?;
     let function = function_of(&session, &call.target)?;
-    let answer = run_bridge(&root, &session, &function, call, progress)?;
+    let answer = run_bridge(&root, &session, &function, call, control)?;
     let mut handles = Vec::new();
     let mut data = answer_data(&root, &answer, &function, call.budget, &mut handles)?;
     data.insert("operation".into(), json!(call.operation.id()));
@@ -737,16 +741,12 @@ pub fn diagnose_deep(
 /// the verdict is decovery's. With `apply`, a candidate whose verdict is better (identical, or fewer differing
 /// instructions) is spliced into the function's file in `src/` and recorded by a normal build; otherwise nothing in
 /// `src/` changes.
-pub fn search(
-    root: &Path,
-    call: &LegacyCall,
-    progress: &dyn Fn(Progress),
-) -> Result<Response, FacadeError> {
+pub fn search(root: &Path, call: &LegacyCall, control: &Control) -> Result<Response, FacadeError> {
     check_tool(call, Tool::Search, "a search strategy")?;
     let root = absolute_root(root)?;
     let session = Session::open(&root)?;
     let function = function_of(&session, &call.target)?;
-    let answer = run_bridge(&root, &session, &function, call, progress)?;
+    let answer = run_bridge(&root, &session, &function, call, control)?;
     let mut handles = Vec::new();
     let mut data = answer_data(&root, &answer, &function, call.budget, &mut handles)?;
     data.insert("strategy".into(), json!(call.operation.id()));
@@ -773,7 +773,7 @@ pub fn search(
         skip_labels: vec!["current".to_string()],
         extra,
     };
-    let judged = judge_candidate(&root, &function, path, kind, call.apply, record, progress)?;
+    let judged = judge_candidate(&root, &function, path, kind, call.apply, record, control)?;
     let summary = format!("{decomp_part}: {}", judged.summary);
     data.insert("candidate".into(), judged.data);
     let mut response = Response::new(summary, Value::Object(data));
@@ -851,7 +851,8 @@ fn verdict_text(v: &Value) -> String {
 
 /// Builds the candidate next to the current source and, with `apply`, writes it when it is better. Only the
 /// candidate is recorded as an attempt (`record`); the follow-up build of an applied candidate repeats that attempt
-/// and appends nothing.
+/// and appends nothing. A cancel before the candidate is written leaves `src/` unchanged and records nothing; once it
+/// is written, its follow-up build is not interrupted.
 fn judge_candidate(
     root: &Path,
     function: &Function,
@@ -859,8 +860,9 @@ fn judge_candidate(
     kind: &str,
     apply: bool,
     record: RecordAs,
-    progress: &dyn Fn(Progress),
+    control: &Control,
 ) -> Result<Judged, FacadeError> {
+    let progress = control.progress;
     let name = function.name.as_str();
     let candidate_text = read_candidate(path)?;
     let file = file_of_function(root, name)?;
@@ -903,7 +905,7 @@ fn judge_candidate(
         None,
         Some(format!("building the candidate for {name}")),
     ));
-    let ranked = build(root, &request, progress)?;
+    let ranked = build(root, &request, control)?;
     let by_label = |label: &str| {
         ranked.data["variants"]
             .as_array()
@@ -941,6 +943,7 @@ fn judge_candidate(
         } else {
             spliced
         };
+        control.check()?;
         write_atomic(&file_path, text.as_bytes()).map_err(|source| FacadeError::Output {
             path: file_path.clone(),
             source,
@@ -951,7 +954,7 @@ fn judge_candidate(
             files: vec![file.clone()],
             ..BuildRequest::default()
         };
-        let built = build(root, &request, progress)?;
+        let built = build(root, &request, &Control::progress_only(progress))?;
         let record = built.data["functions"]
             .as_array()
             .into_iter()
@@ -988,16 +991,12 @@ fn judge_candidate(
 
 /// `verify`: Decomp's equivalence or behaviour check. Its result is reported as `evidence` with
 /// `source = "decomp"`; nothing is recorded as a decovery verdict.
-pub fn verify(
-    root: &Path,
-    call: &LegacyCall,
-    progress: &dyn Fn(Progress),
-) -> Result<Response, FacadeError> {
+pub fn verify(root: &Path, call: &LegacyCall, control: &Control) -> Result<Response, FacadeError> {
     check_tool(call, Tool::Verify, "a check")?;
     let root = absolute_root(root)?;
     let session = Session::open(&root)?;
     let function = function_of(&session, &call.target)?;
-    let answer = run_bridge(&root, &session, &function, call, progress)?;
+    let answer = run_bridge(&root, &session, &function, call, control)?;
     let mut handles = Vec::new();
     let mut data = answer_data(&root, &answer, &function, call.budget, &mut handles)?;
     data.insert("check".into(), json!(call.operation.id()));

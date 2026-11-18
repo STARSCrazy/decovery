@@ -27,7 +27,7 @@ fn case(python: &str, mode: &str, tasks: usize) -> Case {
     decovery_facade::build(
         fixture.root(),
         &decovery_facade::BuildRequest::default(),
-        &|_| {},
+        &decovery_facade::Control::progress_only(&|_| {}),
     )
     .unwrap();
     let dir = tempfile::tempdir().unwrap();

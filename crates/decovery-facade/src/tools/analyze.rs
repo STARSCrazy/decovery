@@ -16,13 +16,15 @@ use decovery_core::{
     read_rebuild, read_references, write_atomic,
 };
 use decovery_plugin::protocol::INLINE_LIMIT;
-use decovery_plugin::{Blob, CallOptions, PluginError, PluginHost, PluginInfo, Progress};
+use decovery_plugin::{
+    Blob, CallOptions, CancelToken, PluginError, PluginHost, PluginInfo, Progress,
+};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::output::safe;
 use crate::plugins::{PluginConfig, plugin_config, read_user_plugins};
-use crate::{FacadeError, Response, Session, resolve, write_all};
+use crate::{Control, FacadeError, Response, Session, resolve, write_all};
 
 const LOCK_WAIT: Duration = Duration::from_secs(10);
 /// Building and analyzing a large program in Ghidra takes long.
@@ -60,10 +62,12 @@ impl Default for AnalyzeOptions {
 ///
 /// The plugin comes from `decovery.toml [plugins.<name>]`, else from the user config. With a selection only the
 /// selected functions' bodies are replaced; functions, calls, strings and data accesses are always refreshed.
+/// Cancellation ([`Control::cancel`]) goes to every plugin call and is checked before storing; a cancelled analysis
+/// stores nothing.
 pub fn analyze(
     root: &Path,
     options: &AnalyzeOptions,
-    progress: &dyn Fn(Progress),
+    control: &Control,
 ) -> Result<Response, FacadeError> {
     let workspace = Workspace::open(root)?;
     let user = if workspace.config.plugins.contains_key(&options.plugin) {
@@ -71,7 +75,7 @@ pub fn analyze(
     } else {
         read_user_plugins()?
     };
-    analyze_with_user_plugins(root, options, &user, progress)
+    analyze_with_user_plugins(root, options, &user, control)
 }
 
 /// [`analyze`] with the user config's plugins given instead of read from the user config file.
@@ -79,8 +83,10 @@ pub fn analyze_with_user_plugins(
     root: &Path,
     options: &AnalyzeOptions,
     user: &BTreeMap<String, PluginConfig>,
-    progress: &dyn Fn(Progress),
+    control: &Control,
 ) -> Result<Response, FacadeError> {
+    control.check()?;
+    let progress = control.progress;
     let name = options.plugin.as_str();
     check_plugin_name(name)?;
     if options.functions.as_ref().is_some_and(Vec::is_empty) {
@@ -132,9 +138,12 @@ pub fn analyze_with_user_plugins(
         apply,
         selection: options.functions.as_deref(),
         progress,
+        cancel: control.cancel.clone(),
     };
     let outcome = drive(&host, &request);
     let shutdown = host.shutdown();
+    // a cancelled plugin call ends in an error; the cancel is what the caller sees
+    control.check()?;
     let mut outcome = outcome?;
     if let Err(e) = shutdown {
         outcome.warnings.push(format!("{name}: shutdown: {e}"));
@@ -161,6 +170,7 @@ struct RunRequest<'a> {
     apply: Value,
     selection: Option<&'a [String]>,
     progress: &'a dyn Fn(Progress),
+    cancel: CancelToken,
 }
 
 /// One decompiled (or failed) function.
@@ -234,7 +244,7 @@ fn drive(host: &PluginHost, r: &RunRequest<'_>) -> Result<Outcome, FacadeError> 
             params,
             CallOptions {
                 timeout,
-                cancel: None,
+                cancel: Some(r.cancel.clone()),
                 on_progress: Some(sink),
             },
         )

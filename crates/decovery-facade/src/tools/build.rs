@@ -26,7 +26,8 @@ use super::history::{
 };
 use super::variants::{Variant, build_variants};
 use crate::{
-    Budget, Change, FacadeError, KnowledgeView, Response, Session, store_handle, write_affected,
+    Budget, Change, Control, FacadeError, KnowledgeView, Response, Session, store_handle,
+    write_affected,
 };
 
 const LOCK_WAIT: Duration = Duration::from_secs(30);
@@ -144,6 +145,19 @@ pub(super) fn toolchain(e: decovery_toolchain::ToolchainError) -> FacadeError {
     FacadeError::Invalid(e.to_string())
 }
 
+/// [`toolchain`], or [`FacadeError::Cancelled`] when `control` was cancelled (a runner request ends in an error then).
+pub(super) fn toolchain_or_cancelled<'c>(
+    control: &'c Control<'_>,
+) -> impl FnOnce(decovery_toolchain::ToolchainError) -> FacadeError + 'c {
+    move |e| {
+        if control.is_cancelled() {
+            FacadeError::Cancelled
+        } else {
+            toolchain(e)
+        }
+    }
+}
+
 pub(super) fn ms(d: Duration) -> u64 {
     u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
 }
@@ -252,15 +266,21 @@ pub(super) fn file_name(path: &Path) -> String {
 /// kept objects and the affected output files. MASM sources (`.asm`) go to the built-in assembler first
 /// ([`assemble_listing`]); one with a line outside its subset is assembled by the profile's assembler when that
 /// toolchain is there, else skipped with the line. Other assembler sources (`.s`) are skipped.
+///
+/// Cancellation ([`Control::cancel`]) is checked before compiling, passed to the runner request, and checked after
+/// compiling and before recording; a cancelled build records nothing (no rebuild records, kept objects, output or
+/// attempts). Recording is never interrupted.
 pub fn build(
     root: &Path,
     request: &BuildRequest,
-    progress: &dyn Fn(Progress),
+    control: &Control,
 ) -> Result<Response, FacadeError> {
     let started = Instant::now();
+    control.check()?;
     if !request.variants.is_empty() {
-        return build_variants(root, request, progress, started);
+        return build_variants(root, request, control, started);
     }
+    let progress = control.progress;
     let stamps = SessionStamps::of(root);
     let ws = Workspace::open(root)?;
     let analysis = Analysis::load(root)?.filter(|a| a.target_sha256 == ws.config.target.sha256);
@@ -364,7 +384,7 @@ pub fn build(
         files: mut compiled,
         mut input_hashes,
         mut warnings,
-    } = compile_jobs(&ws, &profile, &jobs_input, &run_dir.0, progress)?;
+    } = compile_jobs(&ws, &profile, &jobs_input, &run_dir.0, control)?;
     if let Some(Some((asm_ws, asm_profile))) =
         assembler.as_ref().filter(|_| !assembler_jobs.is_empty())
     {
@@ -373,7 +393,7 @@ pub fn build(
             .iter()
             .map(|&i| SourceJob::new(sources[i].dos_name.clone(), String::new()))
             .collect();
-        let more = compile_jobs(asm_ws, asm_profile, &asm_input, &run_dir.0, progress)?;
+        let more = compile_jobs(asm_ws, asm_profile, &asm_input, &run_dir.0, control)?;
         compiled.extend(more.files);
         input_hashes.extend(more.input_hashes);
         warnings.extend(more.warnings);
@@ -393,6 +413,7 @@ pub fn build(
         sources[i].compiled = Some(file);
     }
     drop(run_dir);
+    control.check()?;
     let compile_ms = ms(compile_started.elapsed());
 
     // read objects
@@ -526,7 +547,8 @@ pub fn build(
 
     let fingerprint = fingerprint_of(&ws, &profile);
 
-    // record under the lock
+    // record under the lock; from here on a cancel takes effect after recording
+    control.check()?;
     let record_started = Instant::now();
     let lock = ws.lock(LOCK_WAIT)?;
     let old = read_rebuild(root)?;
@@ -803,14 +825,18 @@ pub(super) struct Compiled {
 }
 
 /// Compiles the staged `jobs_input` in `run_dir`: inputs read once, object cache first, all misses in one runner
-/// request (started only when there are misses). `progress` also gets what the runner reports per finished job.
+/// request (started only when there are misses). `control` also gets what the runner reports per finished job;
+/// its cancel token goes to the runner request, and a cancel before or during compiling ends in
+/// [`FacadeError::Cancelled`].
 pub(super) fn compile_jobs(
     ws: &Workspace,
     profile: &Profile,
     jobs_input: &[SourceJob],
     run_dir: &Path,
-    progress: &dyn Fn(Progress),
+    control: &Control,
 ) -> Result<Compiled, FacadeError> {
+    control.check()?;
+    let progress = control.progress;
     let mut warnings: Vec<String> = Vec::new();
     progress(Progress::new(
         0,
@@ -839,8 +865,19 @@ pub(super) fn compile_jobs(
     };
     let (files, more) = match plan {
         None => (Vec::new(), Vec::new()),
-        Some(plan) => compile_planned(ws, profile, plan, run_dir, &runners, None, progress)
-            .map_err(toolchain)?,
+        Some(plan) => {
+            let compiled = compile_planned(
+                ws,
+                profile,
+                plan,
+                run_dir,
+                &runners,
+                Some(control.cancel.clone()),
+                progress,
+            );
+            control.check()?;
+            compiled.map_err(toolchain)?
+        }
     };
     drop(runners);
     warnings.extend(more);

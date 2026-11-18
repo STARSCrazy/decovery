@@ -241,8 +241,13 @@ fn options(functions: Option<Vec<&str>>) -> AnalyzeOptions {
 fn run(root: &Path, functions: Option<Vec<&str>>) -> (Value, Vec<Progress>) {
     let seen = Mutex::new(Vec::new());
     let sink = |p: Progress| seen.lock().unwrap().push(p);
-    let response =
-        analyze_with_user_plugins(root, &options(functions), &BTreeMap::new(), &sink).unwrap();
+    let response = analyze_with_user_plugins(
+        root,
+        &options(functions),
+        &BTreeMap::new(),
+        &decovery_facade::Control::progress_only(&sink),
+    )
+    .unwrap();
     (response.data, seen.into_inner().unwrap())
 }
 
@@ -477,7 +482,7 @@ fn analyze_selection_replaces_only_selected_bodies() {
         root,
         &options(Some(vec!["nosuchname"])),
         &BTreeMap::new(),
-        &|_| {},
+        &decovery_facade::Control::progress_only(&|_| {}),
     )
     .unwrap_err();
     assert!(matches!(err, FacadeError::NotFound(_)), "{err}");
@@ -492,7 +497,13 @@ fn analyze_without_plugin_config_explains_setup() {
     let opts = AnalyzeOptions::default();
     assert_eq!(opts.plugin, "ghidra");
     assert_eq!(opts.functions, None);
-    let err = analyze_with_user_plugins(root, &opts, &BTreeMap::new(), &|_| {}).unwrap_err();
+    let err = analyze_with_user_plugins(
+        root,
+        &opts,
+        &BTreeMap::new(),
+        &decovery_facade::Control::progress_only(&|_| {}),
+    )
+    .unwrap_err();
     match &err {
         FacadeError::Plugin(message) => {
             assert_eq!(message, "no analyzer configured; run decovery setup ghidra")
@@ -509,7 +520,13 @@ fn analyze_without_plugin_config_explains_setup() {
         "ghidra".to_string(),
         PluginConfig::new(vec!["decovery-no-such-program-xyz".into()]),
     )]);
-    let err = analyze_with_user_plugins(root, &opts, &user, &|_| {}).unwrap_err();
+    let err = analyze_with_user_plugins(
+        root,
+        &opts,
+        &user,
+        &decovery_facade::Control::progress_only(&|_| {}),
+    )
+    .unwrap_err();
     match &err {
         FacadeError::Plugin(message) => assert!(message.starts_with("ghidra: "), "{message}"),
         other => panic!("{other:?}"),
