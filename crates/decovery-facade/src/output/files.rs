@@ -204,10 +204,7 @@ pub(crate) fn file_offset(session: &Session, at: Address) -> Option<u64> {
         .iter()
         .find(|s| in_segment(s, at))?;
     let base = seg.file_offset?;
-    let delta = match (seg.start, at) {
-        (Address::Sel { off: s, .. }, Address::Sel { off, .. }) => u64::from(off - s),
-        (start, at) => at.linear()? - start.linear()?,
-    };
+    let delta = at.bytes_from(seg.start)?;
     let in_file = seg.file_length.map_or(seg.length, |n| n.min(seg.length));
     (delta < in_file).then_some(base + delta)
 }

@@ -721,3 +721,67 @@ fn legacy_flags_are_checked_and_missing_setup_is_named() {
         );
     }
 }
+
+#[test]
+fn overlay_add_list_remove() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path();
+    std::fs::write(
+        ws.join("decovery.toml"),
+        "schema = 1\n\n[target]\nfile = \"main.exe\"\nsha256 = \"aa\"\nformat = \"mz\"\nprocessor = \"x86\"\n",
+    )
+    .unwrap();
+    let ovr = ws.join("vtest.ovr");
+    std::fs::write(&ovr, overlay_fixture()).unwrap();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_decovery"))
+            .args(args)
+            .arg("--workspace")
+            .arg(ws)
+            .output()
+            .expect("run decovery")
+    };
+    let out = run(&["--json", "overlay", "add", ovr.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let config = std::fs::read_to_string(ws.join("decovery.toml")).unwrap();
+    assert!(
+        config.contains("[[overlay]]") && config.contains("name = \"VTEST\""),
+        "{config}"
+    );
+    // adding again replaces the entry
+    assert!(
+        run(&["overlay", "add", ovr.to_str().unwrap()])
+            .status
+            .success()
+    );
+    let out = run(&["--json", "overlay", "list"]);
+    assert!(out.status.success());
+    let list: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let overlays = list["overlays"].as_array().unwrap();
+    assert_eq!(overlays.len(), 1);
+    assert_eq!(overlays[0]["name"], "VTEST");
+    assert_eq!(overlays[0]["format"], "aztec-c86");
+    let out = run(&["overlay", "remove", "nope"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("VTEST"));
+    assert!(run(&["overlay", "remove", "vtest"]).status.success());
+    let config = std::fs::read_to_string(ws.join("decovery.toml")).unwrap();
+    assert!(!config.contains("overlay"), "{config}");
+}
+
+/// A hand-built Aztec overlay: 14-byte header (magic 0xF2), 16 bytes code at 0x5000, 4 bytes data at 0x9000,
+/// 2 bytes BSS, entry at the code start.
+fn overlay_fixture() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for w in [0xF2u16, 0x5000, 16, 0x9000, 4, 2, 0x5000] {
+        bytes.extend_from_slice(&w.to_le_bytes());
+    }
+    bytes.extend_from_slice(&[0x90; 15]);
+    bytes.push(0xC3);
+    bytes.extend_from_slice(&[1, 2, 3, 4]);
+    bytes
+}

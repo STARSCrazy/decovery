@@ -16,7 +16,9 @@ pub mod store;
 pub mod user_config;
 pub mod workspace;
 
-pub use address::{Address, AddressError, AddressInput, address_key};
+pub use address::{
+    Address, AddressError, AddressInput, OVERLAY_NAME_MAX, OverlayName, address_key,
+};
 pub use analysis::{
     ANALYSIS_DIR, AccessKind, Analysis, AnalysisIndex, AnalyzedFunction, CallEdge, DataAccess,
     Provider, StringItem, knowledge_hash, now_utc, today,
@@ -56,7 +58,7 @@ pub use user_config::{
     UserConfig, plugin_config, read_user_config, read_user_config_file, user_config_path,
 };
 pub use workspace::{
-    AnalysisConfig, DetectedFact, LegacyConfig, LinkConfig, OutputConfig, PluginConfig,
-    RebuildConfig, RuntimeBase, RuntimeConfig, SegmentConfig, TargetConfig, TargetFormat,
-    UnpackedConfig, Workspace, WorkspaceConfig, WorkspaceError,
+    AnalysisConfig, DetectedFact, LegacyConfig, LinkConfig, OutputConfig, OverlayConfig,
+    PluginConfig, RebuildConfig, RuntimeBase, RuntimeConfig, SegmentConfig, TargetConfig,
+    TargetFormat, UnpackedConfig, Workspace, WorkspaceConfig, WorkspaceError,
 };

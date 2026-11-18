@@ -30,7 +30,7 @@ fn signed(bytes: &[u8]) -> i64 {
 fn space(at: Address) -> Option<(i64, u32)> {
     match at {
         Address::Flat(a) => Some((i64::from(a), 32)),
-        Address::Seg { off, .. } => Some((i64::from(off), 16)),
+        Address::Seg { off, .. } | Address::Ovl { off, .. } => Some((i64::from(off), 16)),
         Address::Sel { off, .. } => Some((i64::from(off), 32)),
         _ => None,
     }

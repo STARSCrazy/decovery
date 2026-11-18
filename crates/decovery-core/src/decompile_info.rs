@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::address::Address;
+use crate::address::{Address, OverlayName};
 use crate::store::{WorkspaceLock, write_atomic};
 use crate::workspace::WorkspaceError;
 
@@ -110,11 +110,12 @@ pub struct LineHit {
 }
 
 /// Comparable position of an address; addresses of different kinds or static segments never compare.
-fn position(a: Address) -> (u8, u32, u64) {
+fn position(a: Address) -> ((u8, u32, Option<OverlayName>), u64) {
     match a {
-        Address::Flat(x) => (0, 0, u64::from(x)),
-        Address::Seg { .. } => (1, 0, a.linear().unwrap_or(0)),
-        Address::Sel { segment, off } => (2, u32::from(segment), u64::from(off)),
+        Address::Flat(x) => ((0, 0, None), u64::from(x)),
+        Address::Seg { .. } => ((1, 0, None), a.linear().unwrap_or(0)),
+        Address::Sel { segment, off } => ((2, u32::from(segment), None), u64::from(off)),
+        Address::Ovl { overlay, seg, off } => ((3, u32::from(seg), Some(overlay)), u64::from(off)),
     }
 }
 
@@ -127,13 +128,13 @@ impl DecompileInfo {
     /// The C line whose range holds `at`; otherwise the line of the nearest mapped range ending before `at`
     /// (frame setup and temporaries are often unmapped). Ties go to the lower line number.
     pub fn line_of(&self, at: Address) -> Option<LineHit> {
-        let (kind, group, pos) = position(at);
+        let (kind, pos) = position(at);
         let mut before: Option<(u64, u32)> = None;
         for l in self.lines.iter().flatten() {
             for r in &l.ranges {
-                let (sk, sg, start) = position(r.start);
-                let (ek, eg, end) = position(r.end);
-                if (sk, sg) != (kind, group) || (ek, eg) != (kind, group) || start > end {
+                let (sk, start) = position(r.start);
+                let (ek, end) = position(r.end);
+                if sk != kind || ek != kind || start > end {
                     continue;
                 }
                 if (start..=end).contains(&pos) {

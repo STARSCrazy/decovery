@@ -252,7 +252,7 @@ fn file_flags(n: &mut Tbl, cx: &mut Ctx) -> std::collections::BTreeMap<String, S
     out
 }
 
-/// Translates a Decomp address (`va:X`, `rel:S:O`) or an already canonical one.
+/// Translates a Decomp address (`va:X`, `rel:S:O`) or an already canonical one (`ovl:` maps 1:1, ADR 0011).
 fn translate_address(text: &str) -> Option<Address> {
     if let Some(hex) = text.strip_prefix("va:") {
         return Some(Address::Flat(u32::from_str_radix(hex, 16).ok()?));
@@ -809,6 +809,7 @@ fn convert_config(table: toml::Table, cx: &mut Ctx) -> Result<WorkspaceConfig, M
         detected,
         legacy: None,
         plugins: Default::default(),
+        overlays: Vec::new(),
     })
 }
 

@@ -136,3 +136,28 @@ Result through `runner/run` of both plugins (worktree unicorn-dos, `CC -n +b`, t
   "15 fest + 4 Linker" etc.), all identisch; 217/217 main-program verdicts equal Decomp's, 0 disagreements.
   Overlay functions (319 identisch in Decomp) wait for Task 6.
 - Commit `feat(diff): object-against-image verdicts with link gaps`.
+
+## Task 5: overlay addresses (ADR 0011) — done
+
+- `Address::Ovl { overlay: OverlayName, seg, off }`, text `ovl:NAME:SSSS:OOOO`; `OverlayName` = `[A-Za-z0-9_]{1,16}`
+  in a fixed 16-byte array (Address stays `Copy`), stored/printed upper case, lower case input normalised.
+  `linear()` = None, `offset_by` moves `off`, `address_key` = `ovl_NAME_SSSS_OOOO`, sorts after the other kinds.
+  New `Address::bytes_from(start)` (distance within one space) replaces the hand-written Sel/linear matches in
+  facade output (files, header span), find, resolve (`in_segment`, `nearest`). Default names `fun_NAME_SSSS_OOOO`
+  (as Decomp's `standardname`) parse back. Migration: `ovl:` maps 1:1 (also in mixed text fields).
+- Workspace `[[overlay]]` (`name`, `file`, `sha256`, `format`, optional `file_offset`, `size`, optional `entry`);
+  overlay memory segments are `[[target.segment]]` with `ovl:` starts. `Workspace::save_config`.
+  Deviation from the plan's `name, file_offset, size`: overlays of this target are separate files, so `file` and
+  `sha256` are added (as Decomp's entries).
+- `locate`: an `ovl:` address with an unconfigured name → error listing the known overlays; `file:` offsets never
+  map into overlay segments (they are offsets in the main file).
+- CLI `decovery overlay add FILE.. [--format aztec-c86] | list | remove NAME` (Task 5: registers files; Task 6
+  adds header checks and segments).
+- Ghidra plugin: `GhidraAddress.space` (overlay space name, text `NAME::SSSS:OOOO`), `ovl:` mapping for
+  `x86-real-16`, one overlay space per overlay created before its blocks (`createOverlaySpace`), back-mapping of
+  overlay-space addresses through the overlay's blocks (`overlay_address`). Not yet run against a real Ghidra
+  with overlays (needs Task 6 regions); plugin suite 40 passed, 2 skipped.
+- Tests: `tests/address_overlay.rs` (`ovl_address_round_trips`, `ovl_has_no_linear_address`, `overlay_name_rules`,
+  `address_key_of_ovl`, ordering), `address_key_covers_every_address_kind` extended, `overlays_round_trip`,
+  facade `unknown_overlay_name_is_named`, CLI `overlay_add_list_remove`. No schema bump (addresses are text).
+- Commit `feat(core): overlay addresses (ADR 0011)`.

@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from .mapping import GhidraAddress, MemoryBlockSpec
+from .mapping import GhidraAddress, MemoryBlockSpec, overlay_address
 
 EXPECTED_GHIDRA_VERSION = "12.1.4"
 BACKEND_UNAVAILABLE = -32010
@@ -180,6 +180,7 @@ class GhidraBackend(Backend):
         self._program = None
         self._consumer = None
         self._decompiler = None
+        self._overlay_blocks: list[MemoryBlockSpec] = []
         self._location: Path | None = None
 
     # -- startup ---------------------------------------------------------------------------------------------
@@ -220,19 +221,30 @@ class GhidraBackend(Backend):
     # -- addresses -------------------------------------------------------------------------------------------
 
     def _to_g(self, address: GhidraAddress, program=None):
-        space = (program or self._program).getAddressFactory().getDefaultAddressSpace()
+        factory = (program or self._program).getAddressFactory()
+        space = factory.getDefaultAddressSpace()
         if address.segment is None:
-            return space.getAddress(address.offset)
-        from jpype import JInt  # type: ignore[import-not-found]  # else ambiguous with getAddress(long, boolean)
+            base = space.getAddress(address.offset)
+        else:
+            from jpype import JInt  # type: ignore[import-not-found]  # else ambiguous with getAddress(long, boolean)
 
-        return space.getAddress(JInt(address.segment), JInt(address.offset))
+            base = space.getAddress(JInt(address.segment), JInt(address.offset))
+        if address.space is None:
+            return base
+        # ADR 0011: the same processor address in the overlay's own address space
+        overlay = factory.getAddressSpace(address.space)
+        if overlay is None or not overlay.isOverlaySpace():
+            raise BackendError(INVALID_PARAMS, f"overlay {address.space} has no address space in the program")
+        return overlay.getAddressInThisSpaceOnly(base.getOffset())
 
-    @staticmethod
-    def _to_spec(g) -> GhidraAddress | None:
+    def _to_spec(self, g) -> GhidraAddress | None:
         from ghidra.program.model.address import SegmentedAddress  # type: ignore[import-not-found]
 
         if g is None or not g.isMemoryAddress():
             return None
+        space = g.getAddressSpace()
+        if space.isOverlaySpace():
+            return overlay_address(self._overlay_blocks, str(space.getName()), int(g.getOffset()))
         if isinstance(g, SegmentedAddress):
             return GhidraAddress(int(g.getSegment()), int(g.getSegmentOffset()))
         return GhidraAddress(None, int(g.getOffset()))
@@ -243,6 +255,8 @@ class GhidraBackend(Backend):
         pyghidra = self._start()
         self.close()
         from .project import PROJECT_NAME
+
+        self._overlay_blocks = [b for b in blocks if b.overlay]
 
         folder = Path(location)
         folder.mkdir(parents=True, exist_ok=True)
@@ -290,6 +304,8 @@ class GhidraBackend(Backend):
         tx = program.startTransaction("memory")
         try:
             memory = program.getMemory()
+            for name in dict.fromkeys(spec.overlay for spec in blocks if spec.overlay):
+                program.createOverlaySpace(name, program.getAddressFactory().getDefaultAddressSpace())
             for spec in blocks:
                 block = memory.createInitializedBlock(
                     spec.name, self._to_g(spec.start, program), ByteArrayInputStream(spec.data), spec.size, monitor,

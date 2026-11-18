@@ -159,7 +159,9 @@ impl SymbolView for KnowledgeView<'_> {
         match self.by_address.get(&at) {
             Some(&name) => Some(NameAt::new(name, false)),
             None => match at {
-                Address::Flat(_) | Address::Seg { .. } => Some(NameAt::new(default_name(at), true)),
+                Address::Flat(_) | Address::Seg { .. } | Address::Ovl { .. } => {
+                    Some(NameAt::new(default_name(at), true))
+                }
                 _ => None,
             },
         }
@@ -195,7 +197,7 @@ fn check_target(workspace: &Workspace, analysis: &Analysis) -> Result<(), Facade
 }
 
 /// Decomp's `standardname`: `fun_` plus the address text without its prefix, `:` as `_`
-/// (`fun_0001A2B0`, `fun_1234_0010`, `fun_0007_00001234`).
+/// (`fun_0001A2B0`, `fun_1234_0010`, `fun_0007_00001234`, `fun_VINIT_0000_505E`).
 pub(crate) fn default_name(at: Address) -> String {
     let text = at.to_string();
     let short = text.split_once(':').map_or(text.as_str(), |(_, rest)| rest);
@@ -220,6 +222,11 @@ pub(crate) fn parse_default_name(name: &str) -> Option<Address> {
         [s, o] => Some(Address::Sel {
             segment: u16::try_from(hex(s, 4)?).ok()?,
             off: hex(o, 8)?,
+        }),
+        [n, s, o] => Some(Address::Ovl {
+            overlay: decovery_core::OverlayName::new(n).ok()?,
+            seg: u16::try_from(hex(s, 4)?).ok()?,
+            off: u16::try_from(hex(o, 4)?).ok()?,
         }),
         _ => None,
     }

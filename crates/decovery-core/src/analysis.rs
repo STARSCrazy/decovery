@@ -436,6 +436,7 @@ mod tests {
             detected: Vec::new(),
             legacy: None,
             plugins: Default::default(),
+            overlays: Vec::new(),
         };
         std::fs::write(dir.join(CONFIG_FILE), toml::to_string(&config).unwrap()).unwrap();
         Workspace {
