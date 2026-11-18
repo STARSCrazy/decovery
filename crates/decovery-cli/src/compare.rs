@@ -23,6 +23,8 @@ pub struct Outcome {
     pub address: Address,
     pub original_len: Option<u32>,
     pub comparison: Comparison,
+    /// `differs near C line N: <text>` from the analyzer's line map of the original, when it has one.
+    pub near: Option<String>,
 }
 
 /// `path` as given when it exists, otherwise relative to the workspace root.
@@ -85,7 +87,14 @@ pub fn run(request: &Request) -> Result<Outcome, String> {
     let program = decovery_facade::program::load(&ws).map_err(|e| e.to_string())?;
     let options = CompareOptions::new(request.padding, original_len);
     let comparison = compare(&view, address, &program, &knowledge, &decoration, &options);
+    let near = match (&comparison.verdict, comparison.metrics.first_difference) {
+        (Verdict::Differs, Some(offset)) => {
+            decovery_facade::differs_near(&ws.root, address, offset)
+        }
+        _ => None,
+    };
     Ok(Outcome {
+        near,
         function: request.function.clone(),
         address,
         original_len,
@@ -158,6 +167,7 @@ impl Outcome {
                 "instructions_differing": m.instructions_differing,
                 "first_difference": m.first_difference,
             },
+            "near": self.near,
         })
     }
 
@@ -171,6 +181,9 @@ impl Outcome {
         );
         for b in &self.comparison.blockers {
             out.push_str(&format!("  - {}\n", blocker_text(b)));
+        }
+        if let Some(near) = &self.near {
+            out.push_str(&format!("  {near}\n"));
         }
         out.push_str(&format!(
             "  bytes {}, equal {}, gaps {}, padding {}, differing {}; refs ok {}, wrong {}, unchecked {}; \

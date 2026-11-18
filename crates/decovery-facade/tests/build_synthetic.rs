@@ -17,7 +17,12 @@ use serde_json::Value;
 fn run(f: &Fixture, files: &[&str]) -> Response {
     let mut request = BuildRequest::default();
     request.files = files.iter().map(|s| s.to_string()).collect();
-    build(f.root(), &request, &|_| {}).unwrap()
+    build(
+        f.root(),
+        &request,
+        &decovery_facade::Control::progress_only(&|_| {}),
+    )
+    .unwrap()
 }
 
 fn records(f: &Fixture) -> Vec<RebuildRecord> {
@@ -102,6 +107,41 @@ fn differing_function_has_blockers() {
     assert_eq!(shown["verdict"], "differs");
     assert_eq!(shown["blockers"][0]["kind"], "bytes-differ");
     assert_eq!(response.summary, "a.c: 2 functions, 1 identical, 1 differ");
+}
+
+/// The original's line map (as the analyzer stores it) for `sub`: line 3 covers bytes 0..=2, line 4 bytes
+/// 8..=9; byte 6 is unmapped (a temporary), so it takes line 3, the nearest mapped instruction before it.
+#[test]
+fn differing_function_names_the_c_line_near_the_mismatch() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    let dir = f.root().join("knowledge/analysis/decompiled");
+    std::fs::create_dir_all(&dir).unwrap();
+    let stem = SUB_AT.to_string().replace(':', "_");
+    std::fs::write(
+        dir.join(format!("{stem}.c")),
+        "int sub(int a, int b)\n{\n  int t = a;\n  return t - b;\n}\n",
+    )
+    .unwrap();
+    let at = |d: i64| SUB_AT.offset_by(d).unwrap().to_string();
+    let info = serde_json::json!({
+        "lines": [
+            {"line": 1, "ranges": []},
+            {"line": 3, "ranges": [{"start": at(0), "end": at(2)}]},
+            {"line": 4, "ranges": [{"start": at(8), "end": at(9)}]},
+        ],
+    });
+    std::fs::write(dir.join(format!("{stem}.json")), info.to_string()).unwrap();
+    let mut sub = SUB.to_vec();
+    sub[6] = 0x33;
+    f.write_obj("A", &[("_add", ADD), ("_sub", &sub)]);
+    let response = run(&f, &["a.c"]);
+    let functions = response.data["functions"].as_array().unwrap();
+    let shown = functions.iter().find(|v| v["name"] == "sub").unwrap();
+    assert_eq!(shown["c_line"], 3);
+    assert_eq!(shown["near"], "differs near C line 3: int t = a;");
+    let add = functions.iter().find(|v| v["name"] == "add").unwrap();
+    assert_eq!(add.get("near"), None, "identical functions carry no line");
 }
 
 #[test]
@@ -656,7 +696,12 @@ fn variant_request(function: Option<&str>, sources: &[&str]) -> BuildRequest {
 }
 
 fn run_variants(f: &Fixture, function: &str, sources: &[&str]) -> Response {
-    build(f.root(), &variant_request(Some(function), sources), &|_| {}).unwrap()
+    build(
+        f.root(),
+        &variant_request(Some(function), sources),
+        &decovery_facade::Control::progress_only(&|_| {}),
+    )
+    .unwrap()
 }
 
 fn order(response: &Response) -> Vec<u64> {
@@ -723,7 +768,12 @@ fn variant_labels_are_reported() {
     f.write_obj("V001", &[("_sub", SUB)]);
     let mut request = variant_request(Some("sub"), &[SUB_SOURCE]);
     request.variants[0] = Variant::new(SUB_SOURCE).with_label("plain");
-    let response = build(f.root(), &request, &|_| {}).unwrap();
+    let response = build(
+        f.root(),
+        &request,
+        &decovery_facade::Control::progress_only(&|_| {}),
+    )
+    .unwrap();
     assert_eq!(response.data["variants"][0]["label"], "plain");
 }
 
@@ -834,7 +884,12 @@ fn too_many_variants_is_rejected() {
     let python = python_or_skip!();
     let f = fixture(&python, "");
     let many = vec![SUB_SOURCE; 65];
-    let error = build(f.root(), &variant_request(Some("sub"), &many), &|_| {}).unwrap_err();
+    let error = build(
+        f.root(),
+        &variant_request(Some("sub"), &many),
+        &decovery_facade::Control::progress_only(&|_| {}),
+    )
+    .unwrap_err();
     assert!(
         matches!(&error, FacadeError::Invalid(m) if m.contains("at most 64")),
         "{error}"
@@ -854,7 +909,12 @@ fn too_many_variants_is_rejected() {
 fn variants_need_function() {
     let python = python_or_skip!();
     let f = fixture(&python, "");
-    let error = build(f.root(), &variant_request(None, &[SUB_SOURCE]), &|_| {}).unwrap_err();
+    let error = build(
+        f.root(),
+        &variant_request(None, &[SUB_SOURCE]),
+        &decovery_facade::Control::progress_only(&|_| {}),
+    )
+    .unwrap_err();
     assert!(
         matches!(&error, FacadeError::Invalid(m) if m.contains("function")),
         "{error}"
@@ -873,7 +933,7 @@ fn function_without_record_comes_from_the_only_defining_source() {
     let error = build(
         f.root(),
         &variant_request(Some("nosuch"), &[SUB_SOURCE]),
-        &|_| {},
+        &decovery_facade::Control::progress_only(&|_| {}),
     )
     .unwrap_err();
     assert!(error.to_string().contains("nosuch"), "{error}");
@@ -882,7 +942,7 @@ fn function_without_record_comes_from_the_only_defining_source() {
     let error = build(
         f.root(),
         &variant_request(Some("sub"), &[SUB_SOURCE]),
-        &|_| {},
+        &decovery_facade::Control::progress_only(&|_| {}),
     )
     .unwrap_err();
     assert!(
@@ -897,7 +957,12 @@ fn function_selects_its_file_without_variants() {
     let f = fixture(&python, "");
     let mut request = BuildRequest::default();
     request.function = Some("zed".to_string());
-    let response = build(f.root(), &request, &|_| {}).unwrap();
+    let response = build(
+        f.root(),
+        &request,
+        &decovery_facade::Control::progress_only(&|_| {}),
+    )
+    .unwrap();
     assert_eq!(f.log("calls.log"), ["Z.C"]);
     assert_eq!(response.data["files"].as_array().unwrap().len(), 1);
     assert_eq!(record(&f, "zed").verdict, Some(VerdictId::Identical));
@@ -1039,7 +1104,12 @@ fn variant_messages_name_the_variant_and_its_label() {
     let f = fixture(&python, "");
     let mut request = variant_request(Some("sub"), &["int broken("]);
     request.variants[0] = Variant::new("int broken(").with_label("first try");
-    let response = build(f.root(), &request, &|_| {}).unwrap();
+    let response = build(
+        f.root(),
+        &request,
+        &decovery_facade::Control::progress_only(&|_| {}),
+    )
+    .unwrap();
     let message = response.data["variants"][0]["message"].as_str().unwrap();
     assert!(
         message.starts_with("variant 1 (first try): compiler exit code 1"),
@@ -1086,10 +1156,20 @@ fn variants_take_one_file_at_most() {
     let f = fixture(&python, "");
     let mut request = variant_request(Some("sub"), &[SUB_SOURCE]);
     request.files = vec!["a.c".into(), "z.c".into()];
-    let error = build(f.root(), &request, &|_| {}).unwrap_err();
+    let error = build(
+        f.root(),
+        &request,
+        &decovery_facade::Control::progress_only(&|_| {}),
+    )
+    .unwrap_err();
     assert!(error.to_string().contains("at most one file"), "{error}");
     request.files = vec!["nofile.c".into()];
-    let error = build(f.root(), &request, &|_| {}).unwrap_err();
+    let error = build(
+        f.root(),
+        &request,
+        &decovery_facade::Control::progress_only(&|_| {}),
+    )
+    .unwrap_err();
     assert!(error.to_string().contains("nofile.c"), "{error}");
 }
 
@@ -1102,9 +1182,12 @@ fn variant_build_forwards_what_the_runner_reports_per_job() {
         f.write_obj(&format!("V{i:03}"), &[("_sub", SUB)]);
     }
     let seen = std::cell::RefCell::new(Vec::new());
-    build(f.root(), &variant_request(Some("sub"), &refs(&t)), &|p| {
-        seen.borrow_mut().push(p.message.unwrap_or_default())
-    })
+    let sink = |p: decovery_facade::Progress| seen.borrow_mut().push(p.message.unwrap_or_default());
+    build(
+        f.root(),
+        &variant_request(Some("sub"), &refs(&t)),
+        &decovery_facade::Control::progress_only(&sink),
+    )
     .unwrap();
     let seen = seen.into_inner();
     let jobs = seen.iter().filter(|m| m.contains(" of 3 done")).count();
@@ -1182,7 +1265,12 @@ fn function_request(function: &str, sources: &[&str]) -> BuildRequest {
 }
 
 fn run_functions(f: &Fixture, function: &str, sources: &[&str]) -> Response {
-    build(f.root(), &function_request(function, sources), &|_| {}).unwrap()
+    build(
+        f.root(),
+        &function_request(function, sources),
+        &decovery_facade::Control::progress_only(&|_| {}),
+    )
+    .unwrap()
 }
 
 /// The staged source of the job in directory `dir` (the fake runner keeps a copy).
@@ -1332,7 +1420,12 @@ fn function_and_file_variant_rank_alike() {
         ],
     );
     request.variants.insert(0, Variant::new(A_C));
-    let response = build(f.root(), &request, &|_| {}).unwrap();
+    let response = build(
+        f.root(),
+        &request,
+        &decovery_facade::Control::progress_only(&|_| {}),
+    )
+    .unwrap();
     assert_eq!(f.log("requests.log"), ["3"], "equal texts compiled once");
     assert_eq!(order(&response), [1, 2, 3]);
     let v = response.data["variants"].as_array().unwrap();
@@ -1365,7 +1458,12 @@ fn variant_needs_exactly_one_source() {
     for variant in [both, Variant::default()] {
         let mut request = function_request("sub", &[]);
         request.variants = vec![Variant::new(A_C), variant];
-        let error = build(f.root(), &request, &|_| {}).unwrap_err();
+        let error = build(
+            f.root(),
+            &request,
+            &decovery_facade::Control::progress_only(&|_| {}),
+        )
+        .unwrap_err();
         assert!(
             matches!(&error, FacadeError::Invalid(m)
                 if m.contains("variant 2") && m.contains("exactly one of source and function_source")),
@@ -1388,10 +1486,20 @@ fn function_file_is_found_by_its_definition() {
     f.write_source("q.c", "int quick(void) { int x = 0; return x; }\n");
     let mut request = BuildRequest::default();
     request.function = Some("sub".to_string());
-    build(f.root(), &request, &|_| {}).unwrap();
+    build(
+        f.root(),
+        &request,
+        &decovery_facade::Control::progress_only(&|_| {}),
+    )
+    .unwrap();
     assert_eq!(f.log("calls.log"), ["A.C"]);
     request.function = Some("quick".to_string());
-    build(f.root(), &request, &|_| {}).unwrap();
+    build(
+        f.root(),
+        &request,
+        &decovery_facade::Control::progress_only(&|_| {}),
+    )
+    .unwrap();
     assert_eq!(f.log("calls.log"), ["A.C", "Q.C"]);
 }
 
@@ -1541,4 +1649,107 @@ fn diagnose_reports_rules() {
             .unwrap()
             .contains("truncated; full text: detail")
     );
+}
+
+/// Every file below `root` except the staged run directories, as relative paths.
+fn files_below(root: &std::path::Path) -> Vec<String> {
+    fn walk(dir: &std::path::Path, root: &std::path::Path, out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, root, out);
+            } else {
+                let relative = path.strip_prefix(root).unwrap();
+                out.push(relative.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out.sort();
+    out
+}
+
+/// Runs a build on a fixture whose fake runner blocks until cancelled, and cancels once the runner has the request.
+fn cancelled_build(f: &Fixture) -> Result<Response, decovery_facade::FacadeError> {
+    let token = decovery_facade::CancelToken::new();
+    let block_log = f.objects.path().join("block.log");
+    let canceller = {
+        let token = token.clone();
+        std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            while !block_log.exists() && start.elapsed() < Duration::from_secs(30) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            token.cancel();
+        })
+    };
+    let mut request = BuildRequest::default();
+    request.files = vec!["a.c".into()];
+    let result = build(
+        f.root(),
+        &request,
+        &decovery_facade::Control::new(&|_| {}, token),
+    );
+    canceller.join().unwrap();
+    result
+}
+
+#[test]
+fn cancelled_build_writes_nothing() {
+    let python = python_or_skip!();
+    let f = fixture(&python, ", FAKE_OMF_BLOCK = \"1\"");
+    let before = files_below(f.root());
+    let error = cancelled_build(&f).unwrap_err();
+    assert!(
+        matches!(error, decovery_facade::FacadeError::Cancelled),
+        "{error}"
+    );
+    assert_eq!(error.exit_code(), 130);
+    assert_eq!(f.log("block.log"), ["1"], "the runner had the request");
+    let after: Vec<String> = files_below(f.root())
+        .into_iter()
+        // the workspace lock is not taken; only the run directory's parent may stay
+        .filter(|p| !p.starts_with("cache/runs/"))
+        .collect();
+    assert_eq!(
+        after, before,
+        "a cancelled build leaves the workspace unchanged"
+    );
+    assert!(!f.rebuild_path().exists());
+    assert!(!f.root().join("cache/rebuild/obj").exists());
+    assert!(!f.root().join("cache/attempts").exists());
+    assert!(!f.root().join("output").exists());
+
+    // a build that was never started is refused before it compiles
+    let token = decovery_facade::CancelToken::new();
+    token.cancel();
+    let error = build(
+        f.root(),
+        &BuildRequest::default(),
+        &decovery_facade::Control::new(&|_| {}, token),
+    )
+    .unwrap_err();
+    assert!(matches!(error, decovery_facade::FacadeError::Cancelled));
+    assert_eq!(f.log("block.log"), ["1"]);
+}
+
+#[test]
+fn cancel_sends_dollar_cancel_to_runner() {
+    let python = python_or_skip!();
+    let f = fixture(&python, ", FAKE_OMF_BLOCK = \"1\"");
+    let started = std::time::Instant::now();
+    let error = cancelled_build(&f).unwrap_err();
+    assert!(matches!(error, decovery_facade::FacadeError::Cancelled));
+    // the plugin got `$/cancel` and stopped waiting (it waits 60 s otherwise)
+    let start = std::time::Instant::now();
+    while f.log("cancel.log").is_empty() && start.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(f.log("cancel.log"), ["cancelled"]);
+    assert!(started.elapsed() < Duration::from_secs(50));
+    assert!(f.log("calls.log").is_empty(), "no job ran");
 }

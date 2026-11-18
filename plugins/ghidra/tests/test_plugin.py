@@ -57,6 +57,7 @@ class FakeBackend(Backend):
         self.apply_failing = set()
         self.applied = None
         self.export = ExportData([], [], [], [])
+        self.decompiled = {}
 
     def ghidra_version(self):
         return self.version
@@ -86,6 +87,8 @@ class FakeBackend(Backend):
         return self.export
 
     def decompile(self, address):
+        if address in self.decompiled:
+            return self.decompiled[address]
         if address.offset in self.failing:
             raise RuntimeError("decompiler crashed")
         if address.offset == 0x10040:
@@ -525,6 +528,70 @@ class PluginTests(unittest.TestCase):
 
     # -- decompile -------------------------------------------------------------------------------------------------
 
+    def test_decompile_v2_metadata_flat_and_segmented(self):
+        from decovery_ghidra.backend import DecompileLine, DecompileSignature, DecompileVariable
+
+        for arch, start, text in (
+            ("x86-flat-32", flat(0x10010), "flat:00010010"),
+            ("x86-real-16", GhidraAddress(0x1000, 0x10), "seg:1000:0010"),
+        ):
+            with self.subTest(arch=arch):
+                at = lambda offset: GhidraAddress(start.segment, start.offset - 0x10 + offset)
+                prefix = "flat:000100" if start.segment is None else "seg:1000:00"
+                parameter = DecompileVariable("count", "int", "register:AX")
+                self.backend.decompiled[start] = DecompileResult(
+                    "\r\nint f(int count)\r\n{\r\n  return count;\r\n}\r\n", None,
+                    lines=[
+                        DecompileLine(1, []),
+                        DecompileLine(4, [(at(0x14), at(0x15)), (at(0x10), at(0x12)),
+                                          (at(0x12), at(0x13)), (at(0x20), at(0x20))]),
+                    ],
+                    signature=DecompileSignature("__cdecl", "int", [parameter]),
+                    variables=[parameter, DecompileVariable("saved", "int", "stack:-4", at(0x14)),
+                               DecompileVariable("unknown")],
+                )
+                out = run(self.plugin, self.open_msg(arch=arch), req(3, "decompiler/decompile", {
+                    "addresses": [text], "out_dir": str(self.root / "out"),
+                }))
+                result = by_id(out, 3)["result"][0]
+                self.assertEqual(Path(result["path"]).read_bytes(), b"\nint f(int count)\n{\n  return count;\n}\n")
+                self.assertEqual(result["lines"], [
+                    {"line": 1, "ranges": []},
+                    {"line": 4, "ranges": [{"start": prefix + "10", "end": prefix + "15"},
+                                             {"start": prefix + "20", "end": prefix + "20"}]},
+                ])
+                self.assertEqual(result["signature"], {
+                    "calling_convention": "__cdecl", "return_type": "int",
+                    "parameters": [{"name": "count", "type": "int", "storage": "register:AX"}],
+                })
+                self.assertEqual(result["variables"], [
+                    {"name": "count", "type": "int", "storage": "register:AX"},
+                    {"name": "saved", "type": "int", "storage": "stack:-4", "first_use": prefix + "14"},
+                    {"name": "unknown"},
+                ])
+
+    def test_decompile_v2_missing_metadata_is_omitted(self):
+        out = run(self.plugin, self.open_msg(), req(3, "decompiler/decompile", {
+            "addresses": ["flat:00010010", "flat:00010040"], "out_dir": str(self.root / "out"),
+        }))
+        for result in by_id(out, 3)["result"]:
+            for key in ("lines", "signature", "variables"):
+                self.assertNotIn(key, result)
+
+    def test_decompile_v2_known_empty_metadata_is_preserved(self):
+        from decovery_ghidra.backend import DecompileSignature
+
+        self.backend.decompiled[flat(0x10010)] = DecompileResult(
+            "void f(void) {}\n", None, lines=[], signature=DecompileSignature(parameters=[]), variables=[],
+        )
+        out = run(self.plugin, self.open_msg(), req(3, "decompiler/decompile", {
+            "addresses": ["flat:00010010"], "out_dir": str(self.root / "out"),
+        }))
+        result = by_id(out, 3)["result"][0]
+        self.assertEqual(result["lines"], [])
+        self.assertEqual(result["signature"], {"parameters": []})
+        self.assertEqual(result["variables"], [])
+
     def test_decompile_writes_files_and_fallback_disassembly(self):
         self.backend.failing.add(0x10080)
         out_dir = self.root / "out dir"
@@ -570,6 +637,95 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(by_id(out, 3)["error"]["code"], -32602)
 
     # -- Ghidra-free helpers ---------------------------------------------------------------------------------------
+
+    def test_backend_reads_markup_and_high_function_without_starting_ghidra(self):
+        backend = GhidraBackend()
+        backend._program = mock.Mock()
+        backend._pyghidra = mock.Mock()
+        backend._decompiler = mock.Mock()
+        backend._to_g = lambda address: address
+        backend._to_spec = lambda address: address
+        outcome = backend._decompiler.decompileFunction.return_value
+        outcome.decompileCompleted.return_value = True
+        outcome.getDecompiledFunction.return_value.getC.return_value = "\nint f(int count)\n{\n  return count;\n}\n"
+
+        def token(start, end):
+            return mock.Mock(getMinAddress=lambda: start, getMaxAddress=lambda: end)
+
+        lines = [mock.Mock(getAllTokens=lambda: []),
+                 mock.Mock(getAllTokens=lambda: [token(None, None)]),
+                 mock.Mock(getAllTokens=lambda: []),
+                 mock.Mock(getAllTokens=lambda: [token(flat(0x10010), flat(0x10012)),
+                                                token(flat(0x10013), flat(0x10014)),
+                                                token(None, flat(0x10020))]),
+                 mock.Mock(getAllTokens=lambda: [])]
+        printer = mock.Mock()
+        printer.return_value.getLines.return_value = lines
+        register = mock.Mock(getName=lambda: "AX")
+        storage = mock.Mock(isBadStorage=lambda: False, isUnassignedStorage=lambda: False,
+                            isVoidStorage=lambda: False, isRegisterStorage=lambda: True,
+                            getRegisters=lambda: [register])
+        parameter = mock.Mock(getName=lambda: "count", getDataType=lambda: mock.Mock(getDisplayName=lambda: "int"),
+                              getStorage=lambda: storage, getPCAddress=lambda: None, isGlobal=lambda: False)
+        local = mock.Mock(getName=lambda: "saved", getDataType=lambda: None, getStorage=lambda: None,
+                          getPCAddress=lambda: flat(0x10014), isGlobal=lambda: False)
+        high = outcome.getHighFunction.return_value
+        proto = high.getFunctionPrototype.return_value
+        proto.getModelName.return_value = "__cdecl"
+        proto.getReturnType.return_value.getDisplayName.return_value = "int"
+        proto.getNumParams.return_value = 1
+        proto.getParam.return_value = parameter
+        high.getLocalSymbolMap.return_value.getSymbols.return_value = iter([parameter, local])
+        with mock.patch.dict(sys.modules, {"ghidra.app.decompiler": mock.Mock(PrettyPrinter=printer)}):
+            result = backend.decompile(flat(0x10010))
+        self.assertEqual(result.code, "\nint f(int count)\n{\n  return count;\n}\n")
+        self.assertEqual([(line.line, line.ranges) for line in result.lines], [
+            (1, []), (2, []), (3, []),
+            (4, [(flat(0x10010), flat(0x10012)), (flat(0x10013), flat(0x10014))]), (5, []),
+        ])
+        self.assertEqual(result.signature.calling_convention, "__cdecl")
+        self.assertEqual(result.signature.return_type, "int")
+        self.assertEqual(result.signature.parameters[0].storage, "register:AX")
+        self.assertEqual([v.name for v in result.variables], ["count", "saved"])
+        self.assertEqual(result.variables[1].first_use, flat(0x10014))
+        self.assertIsNone(result.variables[1].storage)
+        self.assertIsNone(result.variables[1].data_type)
+
+        outcome.getCCodeMarkup.return_value = None
+        outcome.getHighFunction.return_value = None
+        result = backend.decompile(flat(0x10010))
+        self.assertIsNone(result.lines)
+        self.assertIsNone(result.signature)
+        self.assertIsNone(result.variables)
+
+    def test_backend_storage_signed_stack_and_unknown(self):
+        from decovery_ghidra.backend import GhidraBackend
+
+        for offset in (4, -4, 0):
+            storage = mock.Mock(isBadStorage=lambda: False, isUnassignedStorage=lambda: False,
+                                isVoidStorage=lambda: False, isRegisterStorage=lambda: False,
+                                isStackStorage=lambda: True, getStackOffset=lambda: offset)
+            self.assertEqual(GhidraBackend._storage(storage), f"stack:{offset:+d}")
+        self.assertIsNone(GhidraBackend._storage(None))
+        self.assertIsNone(GhidraBackend._storage(mock.Mock(isBadStorage=lambda: True)))
+
+    def test_ranges_keep_segments_and_gaps_and_drop_unmappable_bounds(self):
+        from decovery_ghidra.mapping import merged_ranges
+
+        a = lambda segment, offset: GhidraAddress(segment, offset)
+        self.assertEqual(merged_ranges([
+            (a(0x1001, 0), a(0x1001, 1)),
+            (a(0x1000, 0x10), a(0x1000, 0x11)),  # aliases must retain their own segment
+            (a(0x1000, 0x13), a(0x1000, 0x14)),  # a gap must stay a gap
+            (a(0x1000, 0x14), a(0x1000, 0x14)),
+            (a(0x1000, 0x20), a(0x1001, 0x21)),  # incompatible bounds
+            (a(0x1000, 0x30), a(0x1000, 0x20)),  # reversed bounds
+            (flat(0x10010), flat(0x10011)),  # wrong architecture
+        ], "x86-real-16"), [
+            {"start": "seg:1000:0010", "end": "seg:1000:0011"},
+            {"start": "seg:1000:0013", "end": "seg:1000:0014"},
+            {"start": "seg:1001:0000", "end": "seg:1001:0001"},
+        ])
 
     def test_open_without_ghidra_install_dir_errors_cleanly(self):
         saved = os.environ.pop("GHIDRA_INSTALL_DIR", None)

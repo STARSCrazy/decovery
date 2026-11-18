@@ -11,11 +11,11 @@ const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 mod compare;
 mod setup;
 
-use decovery_core::{ClaimSource, Confidence};
+use decovery_core::{CallRecord, ClaimSource, Confidence, append_call};
 use decovery_facade::{
-    AnalyzeOptions, AnnotateAction, Annotation, Budget, BuildRequest, DEFAULT_LIMIT, FacadeError,
-    FindQuery, FindWhat, FunctionFilter, FunctionSort, LegacyCall, LegacyOperation, Progress,
-    Response, Session, Variant,
+    AnalyzeOptions, AnnotateAction, Annotation, Budget, BuildRequest, DEFAULT_HISTORY_LIMIT,
+    DEFAULT_LIMIT, DEFAULT_SIMILAR_LIMIT, FacadeError, FindQuery, FindWhat, FunctionFilter,
+    FunctionSort, JobOperation, LegacyCall, LegacyOperation, Progress, Response, Session, Variant,
 };
 
 /// Recover source code from old executables.
@@ -45,6 +45,12 @@ enum Command {
         /// Directory for the new decovery workspace.
         to: PathBuf,
     },
+    /// Import Decomp's attempt memory and archive into the existing workspace (safe to repeat).
+    MigrateAttempts {
+        /// Source Decomp workspace; default: [legacy] decomp_workspace in decovery.toml.
+        #[arg(long)]
+        from: Option<PathBuf>,
+    },
     /// Compare one rebuilt function of an object file with the original. Exit code 0 when identical,
     /// 1 when not, 2 on errors.
     Compare {
@@ -65,6 +71,9 @@ enum Command {
     Show {
         /// Function name or address.
         target: String,
+        /// Print the instruction address ranges each pseudo-C line came from in front of it.
+        #[arg(long)]
+        lines: bool,
     },
     /// Why a rebuilt function differs from the original and what to try: findings of the diagnosis rules, the
     /// kind of deviation and the instructions side by side. Reads the object of the last `build`.
@@ -128,11 +137,11 @@ enum Command {
     },
     /// Counts of named and rebuilt functions and the next thing to do.
     Status,
-    /// Search functions, names, strings, generated code or cross references.
+    /// Search functions, names, strings, generated code, cross references or similar identical functions.
     Find {
         /// What to search.
         what: What,
-        /// Case-insensitive text, `*` matches any run; for `xrefs` the target (name or address).
+        /// Case-insensitive text, `*` matches any run; for `xrefs` and `similar` the target (name or address).
         pattern: Option<String>,
         /// Restrict the function list (repeatable, all must hold); `functions` only.
         #[arg(long = "filter", value_enum)]
@@ -140,9 +149,9 @@ enum Command {
         /// Order of the function list.
         #[arg(long, value_enum, default_value = "address")]
         sort: Sort,
-        /// Maximum number of rows; the rest is stored as a handle.
-        #[arg(long, default_value_t = DEFAULT_LIMIT)]
-        limit: usize,
+        /// Maximum number of rows (default 100; `similar`: 3); the rest is stored as a handle.
+        #[arg(long)]
+        limit: Option<usize>,
     },
     /// Record knowledge: a name, comment, signature, type, local, refutation or type definition.
     ///
@@ -228,6 +237,19 @@ enum Command {
     /// base lacks are recorded from the linker map (`source = link`). Exit code 0 when identical, 1 when
     /// it differs, 2 when the link failed or on errors. Progress goes to stderr.
     Link,
+    /// What was tried on a function: its recorded attempts (builds, variants, search candidates) newest first with
+    /// decovery's verdict, the best one, the attempt budget (parked when it is spent without reaching identical) and
+    /// the failures grouped by message. With `--archive`: the archived definition and comparison of one attempt.
+    History {
+        /// Function name or address.
+        function: String,
+        /// Most attempts listed; all of them go into a handle when there are more.
+        #[arg(long, default_value_t = DEFAULT_HISTORY_LIMIT)]
+        limit: usize,
+        /// Id of an archived attempt (the `archive` an attempt names).
+        #[arg(long, value_name = "ID")]
+        archive: Option<String>,
+    },
     /// Page the content of a handle returned by another command.
     Detail {
         /// Handle id (`h_` plus 12 hex characters).
@@ -240,12 +262,108 @@ enum Command {
         limit: usize,
     },
     /// Serve the tools to AI agents over MCP on stdin/stdout (stdout carries only MCP frames).
-    Mcp,
+    Mcp {
+        /// Benchmark limits file (schema one); no limits are applied without it.
+        #[arg(long)]
+        limits: Option<PathBuf>,
+        /// Most background jobs run at once (the bridge plugin's `max_parallel`).
+        #[arg(long, default_value_t = decovery_facade::DEFAULT_MAX_JOBS, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
+        max_jobs: usize,
+    },
+    /// The workspace's jobs: long commands of the CLI and of an MCP server (`build`, `link`, `analyze`,
+    /// `diagnose --deep`, `search`, `verify`). A job's full result is a handle (`decovery detail`).
+    Job {
+        #[command(subcommand)]
+        what: JobCommand,
+    },
     /// Install tools into `extern/` and register them in the user config.
     Setup {
         #[command(subcommand)]
         what: SetupCommand,
     },
+    /// Agent benchmarks over solution-free copies of solved functions (ADR 0009).
+    Bench {
+        #[command(subcommand)]
+        what: BenchCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum JobCommand {
+    /// Every job, newest first.
+    List,
+    /// One job's state, progress, summary and result handle.
+    Poll {
+        /// Job id (`j_` plus 12 hex characters).
+        id: String,
+    },
+    /// Ask a job to stop at its next cancellation point (a cancel during recording lets it complete).
+    Cancel {
+        /// Job id (`j_` plus 12 hex characters).
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum BenchCommand {
+    /// Run a suite with a driver from the user config (`[bench.drivers.<name>]`); writes the run record to
+    /// `<suite dir>/bench/<run-id>.json`. Exit code 0 when the run is done, 1 when it is paused or stopped at
+    /// a limit, 2 on errors. Progress goes to stderr.
+    Run {
+        /// Suite file (`suite.toml`).
+        suite: PathBuf,
+        /// Driver name in the user config.
+        #[arg(long)]
+        driver: String,
+        /// Tasks run at a time.
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
+        parallel: u32,
+        /// Seed passed to the driver.
+        #[arg(long, default_value_t = 0)]
+        seed: u64,
+        /// Runs of every task.
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
+        repeat: u32,
+        /// Run only these task ids.
+        #[arg(long, num_args = 1..)]
+        only: Vec<String>,
+        /// Start no further task once the finished tasks used this many tokens.
+        #[arg(long)]
+        max_total_tokens: Option<u64>,
+        /// Start no further task once the finished tasks cost this many US dollars.
+        #[arg(long)]
+        max_total_cost_usd: Option<f64>,
+        /// Continue a paused or stopped run with this id.
+        #[arg(long, value_name = "RUN")]
+        resume: Option<String>,
+        /// Keep the task copies.
+        #[arg(long)]
+        keep: bool,
+    },
+    /// Success rate with a 95 % Wilson interval and cost medians/means of one run record. Exit code 0, 2 on
+    /// errors.
+    Report {
+        /// Run record (`<suite dir>/bench/<run-id>.json`).
+        run: PathBuf,
+        /// Group the tasks by workspace, profile or tag (a task counts in each of its tags).
+        #[arg(long, value_enum)]
+        group_by: Option<BenchGroupBy>,
+    },
+    /// Compare two run records metric by metric with 95 % intervals (difference = B minus A); paired by task
+    /// when both hold the same tasks. Exit code 0, 2 on errors.
+    Compare {
+        /// Run record A (the baseline).
+        a: PathBuf,
+        /// Run record B.
+        b: PathBuf,
+    },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum BenchGroupBy {
+    Workspace,
+    Profile,
+    Tag,
 }
 
 #[derive(Subcommand)]
@@ -357,6 +475,7 @@ enum What {
     Strings,
     Code,
     Xrefs,
+    Similar,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -368,6 +487,8 @@ enum Filter {
     NotTried,
     Identical,
     Differs,
+    /// The attempt budget is spent without reaching identical.
+    Parked,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -382,8 +503,123 @@ fn main() -> ExitCode {
     if let Some(jobs) = cli.jobs {
         decovery_toolchain::set_global_jobs(jobs);
     }
+    decovery_facade::set_actor("cli");
+    let started = std::time::Instant::now();
+    let record = call_record(&cli.command);
+    let workspace = cli.workspace.clone();
+    let code = run(cli);
+    if let Some(mut record) = record {
+        log_call(&workspace, &mut record, started, code);
+    }
+    code
+}
+
+/// The call-log record of a workspace command (`None` for `migrate`, `mcp` and `setup`, which log nothing or
+/// log themselves): the command, its target and operation, and the builds and searches it runs.
+fn call_record(command: &Command) -> Option<CallRecord> {
+    let (tool, target, operation): (&str, Option<&str>, Option<&str>) = match command {
+        Command::Migrate { .. }
+        | Command::MigrateAttempts { .. }
+        | Command::Mcp { .. }
+        | Command::Setup { .. }
+        | Command::Bench { .. } => return None,
+        Command::Compare { function, .. } => ("compare", Some(function), None),
+        Command::Show { target, .. } => ("show", Some(target), None),
+        Command::Diagnose { target, deep, .. } => (
+            "diagnose",
+            Some(target),
+            deep.map(|d| match d {
+                Deep::Context => "context",
+                Deep::Structure => "structure",
+                Deep::Registers => "registers",
+                Deep::Slots => "slots",
+                Deep::Joint => "joint",
+            }),
+        ),
+        Command::Search {
+            target, strategy, ..
+        } => (
+            "search",
+            Some(target),
+            Some(match strategy {
+                Strategy::Chain => "chain",
+                Strategy::Permute => "permute",
+                Strategy::Beam => "beam",
+                Strategy::Forms => "forms",
+            }),
+        ),
+        Command::Verify { target, check, .. } => (
+            "verify",
+            Some(target),
+            Some(match check {
+                Check::Equivalence => "equivalence",
+                Check::Behavior => "behavior",
+            }),
+        ),
+        Command::Status => ("status", None, None),
+        Command::Find { pattern, .. } => ("find", pattern.as_deref(), None),
+        Command::Annotate { target, .. } => ("annotate", target.as_deref(), None),
+        Command::Analyze { .. } => ("analyze", None, None),
+        Command::Build { function, .. } => ("build", function.as_deref(), None),
+        Command::Link => ("link", None, None),
+        Command::History { function, .. } => ("history", Some(function), None),
+        Command::Detail { handle, .. } => ("detail", Some(handle), None),
+        Command::Job { what } => match what {
+            JobCommand::List => ("job", None, Some("list")),
+            JobCommand::Poll { id } => ("job", Some(id), Some("poll")),
+            JobCommand::Cancel { id } => ("job", Some(id), Some("cancel")),
+        },
+    };
+    let mut record = CallRecord::new(tool);
+    record.actor = Some(decovery_facade::actor());
+    record.target = target.map(str::to_string);
+    record.operation = operation.map(str::to_string);
+    match command {
+        Command::Build {
+            variant,
+            function_source,
+            ..
+        } => {
+            let variants = variant.len() + function_source.len();
+            record.builds = decovery_core::calls::requested_builds(variants);
+        }
+        Command::Search { .. } => record.searches = 1,
+        _ => {}
+    }
+    Some(record)
+}
+
+/// Appends `record` to the workspace's call log (exit code 2 = `error`); a directory that is no workspace gets no
+/// log, and a log that cannot be written is only a warning.
+fn log_call(
+    workspace: &Path,
+    record: &mut CallRecord,
+    started: std::time::Instant,
+    code: ExitCode,
+) {
+    if !workspace
+        .join(decovery_core::workspace::CONFIG_FILE)
+        .is_file()
+    {
+        return;
+    }
+    record.seconds = started.elapsed().as_secs_f64();
+    if code == ExitCode::from(2) {
+        record.outcome = "error".into();
+    } else if code == ExitCode::from(130) {
+        record.outcome = "cancelled".into();
+    }
+    if let Err(e) = append_call(workspace, record) {
+        eprintln!("warning: the call was not logged: {e}");
+    }
+}
+
+fn run(cli: Cli) -> ExitCode {
     match cli.command {
         Command::Migrate { from, to } => finish(migrate(&from, &to, cli.json)),
+        Command::MigrateAttempts { from } => {
+            finish(migrate_attempts(&cli.workspace, from.as_deref(), cli.json))
+        }
         Command::Compare {
             object,
             function,
@@ -416,7 +652,7 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Command::Show { target } => finish(show(&cli.workspace, &target, cli.json)),
+        Command::Show { target, lines } => finish(show(&cli.workspace, &target, lines, cli.json)),
         Command::Diagnose {
             target, deep: None, ..
         } => finish(diagnose(&cli.workspace, &target, cli.json)),
@@ -484,14 +720,16 @@ fn main() -> ExitCode {
             sort,
             limit,
         } => {
+            let what = match what {
+                What::Functions => FindWhat::Functions,
+                What::Names => FindWhat::Names,
+                What::Strings => FindWhat::Strings,
+                What::Code => FindWhat::Code,
+                What::Xrefs => FindWhat::Xrefs,
+                What::Similar => FindWhat::Similar,
+            };
             let query = FindQuery {
-                what: match what {
-                    What::Functions => FindWhat::Functions,
-                    What::Names => FindWhat::Names,
-                    What::Strings => FindWhat::Strings,
-                    What::Code => FindWhat::Code,
-                    What::Xrefs => FindWhat::Xrefs,
-                },
+                what,
                 pattern,
                 filter: filter
                     .into_iter()
@@ -503,6 +741,7 @@ fn main() -> ExitCode {
                         Filter::NotTried => FunctionFilter::NotTried,
                         Filter::Identical => FunctionFilter::Identical,
                         Filter::Differs => FunctionFilter::Differs,
+                        Filter::Parked => FunctionFilter::Parked,
                     })
                     .collect(),
                 sort: match sort {
@@ -510,7 +749,11 @@ fn main() -> ExitCode {
                     Sort::Callers => FunctionSort::Callers,
                     Sort::Size => FunctionSort::Size,
                 },
-                limit,
+                limit: limit.unwrap_or(if what == FindWhat::Similar {
+                    DEFAULT_SIMILAR_LIMIT
+                } else {
+                    DEFAULT_LIMIT
+                }),
             };
             finish(find(&cli.workspace, &query, cli.json))
         }
@@ -603,12 +846,73 @@ fn main() -> ExitCode {
                 ExitCode::from(e.exit_code())
             }
         },
+        Command::History {
+            function,
+            limit,
+            archive,
+        } => finish(history(
+            &cli.workspace,
+            &function,
+            limit,
+            archive.as_deref(),
+            cli.json,
+        )),
         Command::Detail {
             handle,
             offset,
             limit,
         } => finish(detail(&cli.workspace, &handle, offset, limit, cli.json)),
-        Command::Mcp => finish(decovery_mcp::serve_stdio(cli.workspace)),
+        Command::Bench {
+            what:
+                BenchCommand::Run {
+                    suite,
+                    driver,
+                    parallel,
+                    seed,
+                    repeat,
+                    only,
+                    max_total_tokens,
+                    max_total_cost_usd,
+                    resume,
+                    keep,
+                },
+        } => {
+            let mut options = match std::env::current_exe() {
+                Ok(exe) => decovery_bench::RunOptions::new(driver, exe),
+                Err(e) => {
+                    eprintln!("error: cannot locate the decovery executable: {e}");
+                    return ExitCode::from(2);
+                }
+            };
+            options.parallel = parallel as usize;
+            options.seed = seed;
+            options.repeat = repeat;
+            options.only = only;
+            options.max_total_tokens = max_total_tokens;
+            options.max_total_cost_usd = max_total_cost_usd;
+            options.resume = resume;
+            options.keep = keep;
+            bench_run(&suite, &options, cli.json)
+        }
+        Command::Bench {
+            what: BenchCommand::Report { run, group_by },
+        } => bench_report(&run, group_by, cli.json),
+        Command::Bench {
+            what: BenchCommand::Compare { a, b },
+        } => bench_compare(&a, &b, cli.json),
+        Command::Mcp { limits, max_jobs } => finish(decovery_mcp::serve_stdio_with_options(
+            cli.workspace,
+            limits,
+            max_jobs,
+        )),
+        Command::Job { what } => {
+            let action = match what {
+                JobCommand::List => decovery_facade::JobAction::List,
+                JobCommand::Poll { id } => decovery_facade::JobAction::Poll(id),
+                JobCommand::Cancel { id } => decovery_facade::JobAction::Cancel(id),
+            };
+            finish(job(&cli.workspace, action, cli.json))
+        }
         Command::Setup {
             what:
                 SetupCommand::Ghidra {
@@ -660,6 +964,108 @@ fn main() -> ExitCode {
     }
 }
 
+/// Print the JSON or the text form of a result; errors exit 2.
+fn bench_print(result: Result<(String, String), String>, json: bool) -> ExitCode {
+    match result {
+        Ok((j, t)) => {
+            println!("{}", if json { &j } else { &t }.trim_end());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// `bench report`.
+fn bench_report(run: &Path, group_by: Option<BenchGroupBy>, json: bool) -> ExitCode {
+    let group = match group_by {
+        None => decovery_bench::GroupBy::None,
+        Some(BenchGroupBy::Workspace) => decovery_bench::GroupBy::Workspace,
+        Some(BenchGroupBy::Profile) => decovery_bench::GroupBy::Profile,
+        Some(BenchGroupBy::Tag) => decovery_bench::GroupBy::Tag,
+    };
+    let result = decovery_bench::RunRecord::read(run)
+        .map_err(|e| e.to_string())
+        .and_then(|record| {
+            let report = decovery_bench::report(&record, group);
+            let json = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
+            Ok((json, report.to_text()))
+        });
+    bench_print(result, json)
+}
+
+/// `bench compare`.
+fn bench_compare(a: &Path, b: &Path, json: bool) -> ExitCode {
+    let result = (|| {
+        let a = decovery_bench::RunRecord::read(a).map_err(|e| e.to_string())?;
+        let b = decovery_bench::RunRecord::read(b).map_err(|e| e.to_string())?;
+        let comparison = decovery_bench::compare(&a, &b);
+        let json = serde_json::to_string_pretty(&comparison).map_err(|e| e.to_string())?;
+        Ok((json, comparison.to_text()))
+    })();
+    bench_print(result, json)
+}
+
+/// `bench run`: the record as JSON or one line per task, exit 0 only for a finished run.
+fn bench_run(suite: &Path, options: &decovery_bench::RunOptions, json: bool) -> ExitCode {
+    let result = (|| -> Result<decovery_bench::RunRecord, String> {
+        let suite = decovery_bench::read_suite(suite).map_err(|e| e.to_string())?;
+        let user = decovery_core::read_user_config().map_err(|e| e.to_string())?;
+        let driver = user.bench.drivers.get(&options.driver).ok_or_else(|| {
+            format!(
+                "unknown driver `{}`: add [bench.drivers.{}] to the user config",
+                options.driver, options.driver
+            )
+        })?;
+        decovery_bench::run_suite(&suite, driver, options, &|p: Progress| {
+            if let Some(message) = &p.message {
+                eprintln!("{} of {}: {message}", p.done, p.total.unwrap_or(0));
+            }
+        })
+        .map_err(|e| e.to_string())
+    })();
+    let run = match result {
+        Ok(run) => run,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    if json {
+        match serde_json::to_string_pretty(&run) {
+            Ok(text) => println!("{text}"),
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    } else {
+        for t in &run.tasks {
+            println!(
+                "{} #{}: {} ({}), builds {}, calls {}, best distance {}",
+                t.id,
+                t.repeat,
+                if t.solved { "solved" } else { "unsolved" },
+                t.exit,
+                t.builds,
+                t.tool_calls,
+                t.best_distance.map_or("-".into(), |d| d.to_string())
+            );
+        }
+        println!(
+            "run {}: {}, {} of {} solved",
+            run.id, run.state, run.totals.solved, run.totals.tasks
+        );
+    }
+    if run.state == "done" {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
 /// Prints the failure on stderr and maps it to its exit code.
 fn finish(result: Result<(), FacadeError>) -> ExitCode {
     match result {
@@ -696,6 +1102,7 @@ fn migrate(from: &Path, to: &Path, json: bool) -> Result<(), FacadeError> {
         println!("  {}", path.display());
     }
     println!("Untranslated free texts: {}", report.untranslated_texts);
+    print_attempt_counts(&report.attempt_memory);
     if !report.skipped.is_empty() {
         println!("Skipped ({}):", report.skipped.len());
         for entry in &report.skipped {
@@ -716,6 +1123,58 @@ fn migrate(from: &Path, to: &Path, json: bool) -> Result<(), FacadeError> {
             report.analysis_functions
         ),
         None => println!("No analysis imported; run `decovery analyze` to generate the output"),
+    }
+    Ok(())
+}
+
+fn print_attempt_counts(report: &decovery_core::AttemptMigrationReport) {
+    println!(
+        "Attempt memory: {} imported, {} archive entries, {} already present, {} lines and {} archives skipped",
+        report.attempts,
+        report.archive_entries,
+        report.already_present,
+        report.skipped_lines,
+        report.skipped_archives
+    );
+    for issue in &report.skipped {
+        println!("  {issue}");
+    }
+    for warning in &report.warnings {
+        println!("  warning: {warning}");
+    }
+}
+
+fn migrate_attempts(root: &Path, from: Option<&Path>, json: bool) -> Result<(), FacadeError> {
+    let workspace = decovery_core::Workspace::open(root)?;
+    let configured;
+    let source = match from {
+        Some(path) => path,
+        None => {
+            let legacy = workspace
+                .config
+                .legacy
+                .as_ref()
+                .and_then(|legacy| legacy.decomp_workspace.as_deref())
+                .filter(|path| !path.is_empty())
+                .ok_or_else(|| {
+                    FacadeError::Invalid(
+                        "no [legacy] decomp_workspace configured; pass --from".into(),
+                    )
+                })?;
+            configured = workspace.root.join(legacy);
+            &configured
+        }
+    };
+    let report = decovery_core::migrate_attempts(source, root)
+        .map_err(|e| FacadeError::Invalid(e.to_string()))?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report)
+                .map_err(|e| FacadeError::Invalid(e.to_string()))?
+        );
+    } else {
+        print_attempt_counts(&report);
     }
     Ok(())
 }
@@ -945,12 +1404,22 @@ fn print_json(response: &Response) -> Result<(), FacadeError> {
     Ok(())
 }
 
-fn show(workspace: &Path, target: &str, json: bool) -> Result<(), FacadeError> {
+fn show(workspace: &Path, target: &str, lines: bool, json: bool) -> Result<(), FacadeError> {
     let session = Session::open(workspace)?;
+    let run = |budget| {
+        if lines {
+            decovery_facade::show_with_lines(&session, target, budget)
+        } else {
+            decovery_facade::show(&session, target, budget)
+        }
+    };
     if json {
-        return print_json(&decovery_facade::show(&session, target, Budget::default())?);
+        return print_json(&run(Budget::default())?);
     }
-    let response = decovery_facade::show(&session, target, Budget { chars: usize::MAX })?;
+    let response = run(Budget { chars: usize::MAX })?;
+    if let Some(signature) = response.data["signature"].as_str() {
+        println!("/* decompiler signature: {signature} */");
+    }
     if let Some(text) = response.data["text"].as_str() {
         print!("{text}");
     }
@@ -1013,16 +1482,7 @@ fn legacy(workspace: &Path, call: &LegacyCall, json: bool) -> Result<(), FacadeE
     if !json {
         call.budget = Budget { chars: usize::MAX };
     }
-    let response = match call.operation {
-        LegacyOperation::Chain
-        | LegacyOperation::Permute
-        | LegacyOperation::Beam
-        | LegacyOperation::Forms => decovery_facade::search(workspace, &call, &progress)?,
-        LegacyOperation::Equivalence | LegacyOperation::Behavior => {
-            decovery_facade::verify(workspace, &call, &progress)?
-        }
-        _ => decovery_facade::diagnose_deep(workspace, &call, &progress)?,
-    };
+    let response = decovery_facade::run_as_job(workspace, &JobOperation::legacy(call), &progress)?;
     if json {
         return print_json(&response);
     }
@@ -1089,7 +1549,11 @@ fn analyze(workspace: &Path, options: &AnalyzeOptions, json: bool) -> Result<(),
             None => eprintln!("{message}"),
         }
     };
-    let response = decovery_facade::analyze(workspace, options, &progress)?;
+    let response = decovery_facade::run_as_job(
+        workspace,
+        &JobOperation::Analyze(options.clone()),
+        &progress,
+    )?;
     print_summary(&response, json)
 }
 
@@ -1130,8 +1594,10 @@ fn build(
             .variants
             .push(Variant::function(read(path)?).with_label(path.display().to_string()));
     }
-    let response = decovery_facade::build(workspace, &request, &progress)?;
-    if !request.variants.is_empty() {
+    let has_variants = !request.variants.is_empty();
+    let response =
+        decovery_facade::run_as_job(workspace, &JobOperation::Build(request), &progress)?;
+    if has_variants {
         return print_variants(&response, json);
     }
     let d = &response.data;
@@ -1166,6 +1632,9 @@ fn build(
                 f["verdict"].as_str().unwrap_or(""),
                 blockers.join(" ")
             );
+            if let Some(near) = f["near"].as_str() {
+                println!("  {near}");
+            }
         }
     }
     for hint in d["hints"].as_array().into_iter().flatten() {
@@ -1183,7 +1652,7 @@ fn link(workspace: &Path, json: bool) -> Result<ExitCode, FacadeError> {
             eprintln!("{message}");
         }
     };
-    let response = decovery_facade::link(workspace, &progress)?;
+    let response = decovery_facade::run_as_job(workspace, &JobOperation::Link, &progress)?;
     let d = &response.data;
     let code = match d["result"].as_str() {
         Some("identical") => ExitCode::SUCCESS,
@@ -1254,6 +1723,34 @@ fn print_variants(response: &Response, json: bool) -> Result<bool, FacadeError> 
 }
 
 /// The JSON envelope, or the summary on stdout and `data.warnings` on stderr.
+/// `job list | poll | cancel`: the summary, and for `list` one line per job.
+fn job(
+    workspace: &Path,
+    action: decovery_facade::JobAction,
+    json: bool,
+) -> Result<(), FacadeError> {
+    let response = decovery_facade::job_tool(workspace, action)?;
+    if json {
+        return print_json(&response);
+    }
+    println!("{}", response.summary);
+    for j in response.data["jobs"].as_array().into_iter().flatten() {
+        let text = |key: &str| j[key].as_str().unwrap_or("").to_string();
+        let note = match j["state"].as_str() {
+            Some("failed" | "interrupted") => text("error"),
+            _ => text("summary"),
+        };
+        println!(
+            "{}\t{}\t{}\t{}\t{note}",
+            text("id"),
+            text("kind"),
+            text("state"),
+            text("created")
+        );
+    }
+    Ok(())
+}
+
 fn print_summary(response: &Response, json: bool) -> Result<(), FacadeError> {
     if json {
         return print_json(response);
@@ -1263,6 +1760,63 @@ fn print_summary(response: &Response, json: bool) -> Result<(), FacadeError> {
         if let Some(text) = warning.as_str() {
             eprintln!("warning: {text}");
         }
+    }
+    Ok(())
+}
+
+fn history(
+    workspace: &Path,
+    function: &str,
+    limit: usize,
+    archive: Option<&str>,
+    json: bool,
+) -> Result<(), FacadeError> {
+    let budget = if json {
+        Budget::default()
+    } else {
+        Budget { chars: usize::MAX }
+    };
+    let response = match archive {
+        Some(id) => decovery_facade::history_archive(workspace, function, id, budget)?,
+        None => decovery_facade::history(workspace, function, limit, budget)?,
+    };
+    if json {
+        return print_json(&response);
+    }
+    let d = &response.data;
+    println!("{}", response.summary);
+    if archive.is_some() {
+        for key in ["function_c", "comparison"] {
+            if let Some(text) = d[key].as_str() {
+                println!();
+                print!("{text}");
+            }
+        }
+        return Ok(());
+    }
+    for a in d["attempts"].as_array().into_iter().flatten() {
+        println!(
+            "{}",
+            cells(
+                a,
+                &[
+                    "time",
+                    "origin",
+                    "label",
+                    "actor",
+                    "verdict",
+                    "instructions_differing",
+                    "archive"
+                ]
+            )
+        );
+    }
+    for f in d["failures"].as_array().into_iter().flatten() {
+        println!(
+            "failed {}x: {}",
+            f["count"],
+            f["message"].as_str().unwrap_or("")
+        );
     }
     Ok(())
 }
@@ -1344,6 +1898,21 @@ fn find(workspace: &Path, query: &FindQuery, json: bool) -> Result<(), FacadeErr
         for (kind, list, keys) in sections {
             for item in d[list].as_array().into_iter().flatten() {
                 println!("{kind}\t{}", cells(item, keys));
+            }
+        }
+        return Ok(());
+    }
+    if query.what == FindWhat::Similar {
+        for item in d["items"].as_array().into_iter().flatten() {
+            println!(
+                "{}",
+                cells(item, &["address", "name", "file", "flags", "reason"])
+            );
+            if let Some(source) = item["source"].as_str() {
+                print!("{source}");
+                if !source.ends_with('\n') {
+                    println!();
+                }
             }
         }
         return Ok(());

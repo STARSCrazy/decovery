@@ -191,7 +191,7 @@ fn envelope(result: &Value) -> Value {
 }
 
 #[test]
-fn lists_eleven_tools() {
+fn lists_thirteen_tools() {
     let dir = workspace();
     let mut server = Server::start(&dir);
     let response = server.request(2, "tools/list", json!({}));
@@ -201,8 +201,8 @@ fn lists_eleven_tools() {
     assert_eq!(
         names,
         [
-            "analyze", "annotate", "build", "detail", "diagnose", "find", "link", "search", "show",
-            "status", "verify"
+            "analyze", "annotate", "build", "detail", "diagnose", "find", "history", "job", "link",
+            "search", "show", "status", "verify"
         ]
     );
     for tool in tools {
@@ -228,7 +228,10 @@ fn lists_eleven_tools() {
     let props = build["inputSchema"]["properties"].as_object().unwrap();
     let mut keys: Vec<&String> = props.keys().collect();
     keys.sort_unstable();
-    assert_eq!(keys, ["budget", "files", "function", "variants"]);
+    assert_eq!(
+        keys,
+        ["background", "budget", "files", "function", "variants"]
+    );
     assert!(
         build["inputSchema"]["required"]
             .as_array()
@@ -253,11 +256,19 @@ fn lists_eleven_tools() {
     let diagnose = tool("diagnose");
     assert_eq!(diagnose["inputSchema"]["required"], json!(["target"]));
     assert!(diagnose["inputSchema"]["properties"]["budget"].is_object());
-    assert!(
-        tool("link")["inputSchema"]["properties"]
-            .as_object()
-            .is_none_or(serde_json::Map::is_empty)
-    );
+    let link_keys: Vec<&String> = tool("link")["inputSchema"]["properties"]
+        .as_object()
+        .map(|p| p.keys().collect())
+        .unwrap_or_default();
+    assert_eq!(link_keys, ["background"]);
+    for name in ["analyze", "diagnose", "search", "verify"] {
+        assert!(
+            tool(name)["inputSchema"]["properties"]["background"].is_object(),
+            "{name} lacks background"
+        );
+    }
+    let job = tool("job");
+    assert_eq!(job["inputSchema"]["required"], json!(["action"]));
     let annotate = tools.iter().find(|t| t["name"] == "annotate").unwrap();
     let props = annotate["inputSchema"]["properties"].as_object().unwrap();
     for key in [
@@ -280,6 +291,80 @@ fn lists_eleven_tools() {
             .as_array()
             .is_none_or(Vec::is_empty)
     );
+}
+
+/// The lines of the workspace's tool-call log, oldest first.
+fn call_log(root: &Path) -> Vec<Value> {
+    let dir = root.join("cache/calls");
+    let mut lines = Vec::new();
+    let mut files: Vec<_> = std::fs::read_dir(&dir)
+        .map(|d| d.flatten().map(|e| e.path()).collect())
+        .unwrap_or_default();
+    files.sort();
+    for file in files
+        .iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
+    {
+        for line in std::fs::read_to_string(file).unwrap().lines() {
+            lines.push(serde_json::from_str(line).unwrap());
+        }
+    }
+    lines
+}
+
+#[test]
+fn every_mcp_call_is_logged() {
+    let dir = workspace();
+    let mut server = Server::start(&dir);
+    assert_eq!(server.call(2, "status", json!({}))["isError"], false);
+    assert_eq!(
+        server.call(3, "show", json!({"target": "nosuch"}))["isError"],
+        true
+    );
+    let history = server.call(4, "history", json!({"target": "alpha"}));
+    assert_eq!(history["isError"], false, "{history}");
+    assert_eq!(
+        envelope(&history)["summary"],
+        "alpha: 0 attempts, best none compared, not parked"
+    );
+    // refused by the parameter check, and by the tool's own check (the marker does not leak)
+    let response = server.request(
+        5,
+        "tools/call",
+        json!({"name": "show", "arguments": {"target": "alpha", "bogus": 1}}),
+    );
+    assert_eq!(response["result"]["isError"], true, "{response}");
+    let bad = server.call(
+        6,
+        "build",
+        json!({"function": "alpha", "variants": [{"label": "none"}]}),
+    );
+    assert_eq!(bad["isError"], true);
+    assert!(bad.get("_meta").is_none(), "{bad}");
+
+    let log = call_log(dir.path());
+    let seen: Vec<(&str, &str)> = log
+        .iter()
+        .map(|r| (r["tool"].as_str().unwrap(), r["outcome"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            ("status", "ok"),
+            ("show", "error"),
+            ("history", "ok"),
+            ("show", "refused"),
+            ("build", "refused"),
+        ]
+    );
+    for r in &log {
+        assert_eq!(r["schema"], 1);
+        assert_eq!(r["actor"], "mcp");
+        assert!(r["seconds"].as_f64().is_some());
+        assert!(r["time"].as_str().unwrap().ends_with('Z'));
+    }
+    assert_eq!(log[1]["target"], "nosuch");
+    assert_eq!(log[4]["builds"], 0, "a refused build runs nothing");
 }
 
 #[test]
@@ -690,4 +775,50 @@ fn build_over_stdio_builds_files() {
     assert!(f.root().join("knowledge/rebuild.toml").is_file());
     let result = server.call(3, "build", json!({"files": ["nosuch.c"]}));
     assert_eq!(result["isError"], true, "{result}");
+}
+
+#[test]
+fn background_build_over_stdio_is_polled_until_done() {
+    let python = python_or_skip!();
+    let f = build_fixture::fixture(&python, "");
+    let mut server = Server::start_at(f.root());
+    let result = server.call(2, "build", json!({"files": ["a.c"], "background": true}));
+    assert_eq!(result["isError"], false, "{result}");
+    let started = envelope(&result);
+    let id = started["data"]["job"]["id"].as_str().unwrap().to_string();
+    assert_eq!(started["summary"], format!("job {id} started (build)"));
+    let start = std::time::Instant::now();
+    let mut request = 3;
+    let job = loop {
+        let poll = server.call(request, "job", json!({"action": "poll", "id": id}));
+        request += 1;
+        assert_eq!(poll["isError"], false, "{poll}");
+        let job = envelope(&poll)["data"]["job"].clone();
+        if job["state"] != "queued" && job["state"] != "running" {
+            break job;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(90),
+            "the job did not end: {job}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(job["state"], "done", "{job}");
+    assert_eq!(job["summary"], "a.c: 2 functions, 2 identical");
+    let handle = job["result"].as_str().unwrap();
+    let page = server.call(
+        request,
+        "detail",
+        json!({"handle": handle, "limit": 1_000_000}),
+    );
+    let text = envelope(&page)["data"]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let response: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(response["summary"], "a.c: 2 functions, 2 identical");
+    let list = envelope(&server.call(request + 1, "job", json!({"action": "list"})));
+    assert_eq!(list["data"]["jobs"][0]["id"], id.as_str());
+    let refused = server.call(request + 2, "job", json!({"action": "poll"}));
+    assert_eq!(refused["isError"], true, "{refused}");
 }

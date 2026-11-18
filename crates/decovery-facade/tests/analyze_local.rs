@@ -92,8 +92,13 @@ fn ghidra_bodies_match_decomp() {
             p.message.unwrap_or_default()
         )
     };
-    let response =
-        analyze_with_user_plugins(root, &AnalyzeOptions::default(), &user, &progress).unwrap();
+    let response = analyze_with_user_plugins(
+        root,
+        &AnalyzeOptions::default(),
+        &user,
+        &decovery_facade::Control::progress_only(&progress),
+    )
+    .unwrap();
     eprintln!("{}", response.summary);
     let fresh = Analysis::load(root).unwrap().unwrap();
     let index = fresh.index();

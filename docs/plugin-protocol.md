@@ -194,6 +194,12 @@ instruction, ...). `stdout` is the console output as text. The plugin does not r
 the host notes the expected files of drive `C:` (paths relative to it, subdirectories included) before the call and
 derives that itself, and for a `timeout` it deletes the expected files that did not exist before.
 
+A job result may also carry its times, each an optional non-negative integer: `started_ms` and `ended_ms` (wall
+clock, milliseconds since the plugin received the request; `ended_ms` >= `started_ms`) and `cpu_ms` (the CPU time
+the job's worker spent on it). The host puts them into the build's `timing.timeline` and computes the throughput
+figures from them; a job without `started_ms` and `ended_ms` is left out of the timeline. `unicorn-dos` reports all
+three, `dosbox-lab` the wall times (from its job markers; DOSBox is one process, so no CPU time per job).
+
 **Time contract.** The host gives up on a call that has not answered within `timeout_s x ceil(jobs / share) + 30 s`
 (`share` = `options.jobs`, the number of jobs the plugin may run at once), kills the plugin's process tree and
 treats the call as failed for all its jobs. A plugin therefore keeps every part of its work inside that bound: it

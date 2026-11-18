@@ -4,7 +4,8 @@ For a job whose last command line ends with `X.C` (any extension) it copies `X.O
 FAKE_OMF_DIR into the C mount (after a `CD D` line: `D.OBJ` into the directory D of the C mount, as `X.OBJ`) and exits 0; without that file it prints an error and exits 1. Every compiled job
 appends its source name to `calls.log` and its `SET TMP=` directory (and whether it exists) to `tmp.log`, every
 call appends its job count to `requests.log` (all in FAKE_OMF_DIR). The staged source of every job is copied to
-`sources/<D>/<X.C>` (`sources/<X.C>` without a `CD` line) in FAKE_OMF_DIR.
+`sources/<D>/<X.C>` (`sources/<X.C>` without a `CD` line) in FAKE_OMF_DIR. With FAKE_OMF_REQUIRED_TEXT set, a
+staged source holding that text is served `X.OBJ` (also in a variant directory) and any other `FALLBACK.OBJ`.
 
 A job whose last command runs TLINK is a link job: its command line is appended to `link.log`, it fails when an
 object of the line is missing in the C mount, else copies `REBUILD.EXE` from FAKE_OMF_DIR into the C mount (exit 0),
@@ -13,6 +14,12 @@ with `REBUILD.MAP` beside it when FAKE_OMF_DIR has one, or, without the EXE, pri
 A job whose last command runs WLINK is an LE link job: its command line goes to `link.log`, the files it links
 (`NB.OBJ`, `NB.LNK`, `STUB.EXE`) are copied to `linked/` in FAKE_OMF_DIR, and `REBUILD.EXE` from FAKE_OMF_DIR is
 copied into the C mount as the program `NB.LNK` names (exit 0); without it the job prints an error and exits 1.
+
+With FAKE_OMF_BLOCK=1 a call appends its job count to `block.log` and waits (up to 60 s) for `$/cancel`; when
+cancelled it appends `cancelled` to `cancel.log` and answers -32002.
+
+With FAKE_JOB_TIMES=<start>:<end>:<cpu> every job result carries `started_ms`, `ended_ms` and `cpu_ms` with these
+values.
 
 With FAKE_NOT_RUN_ONCE=1 the first call with more than one job answers only its first job; the others come back
 `failed` with "job not run: ..." like the dosbox-lab runner after a hang.
@@ -90,6 +97,11 @@ def run_job(job, c_root):
         shutil.copyfile(staged, os.path.join(copy_dir, source))
     # a job in a directory (a variant) is served the object named like the directory: V001.OBJ
     obj = os.path.join(OBJECTS, (cd or stem) + ".OBJ")
+    if os.environ.get("FAKE_OMF_REQUIRED_TEXT") and os.path.isfile(staged):
+        with open(staged, encoding="utf-8") as f:
+            # the stem's object when the source holds the text (variants too), else FALLBACK.OBJ
+            found = os.environ["FAKE_OMF_REQUIRED_TEXT"] in f.read()
+            obj = os.path.join(OBJECTS, (stem if found else "FALLBACK") + ".OBJ")
     if not os.path.isfile(obj):
         return {"status": "done", "exit_code": 1, "stdout": f"{source}(1): Error: no object\r\n"}
     shutil.copyfile(obj, os.path.join(c_root, cd or "", stem + ".OBJ"))
@@ -100,6 +112,11 @@ def run_job(job, c_root):
 def run(params, ctx):
     jobs = params["jobs"]
     append("requests.log", str(len(jobs)))
+    if os.environ.get("FAKE_OMF_BLOCK") == "1":
+        append("block.log", str(len(jobs)))
+        if ctx.wait_cancelled(60):
+            append("cancel.log", "cancelled")
+            ctx.check_cancelled()
     c_root = {m["drive"]: m["path"] for m in params["mounts"]}["C"]
     marker = os.path.join(OBJECTS, "not-run.marker")
     cut = os.environ.get("FAKE_NOT_RUN_ONCE") == "1" and len(jobs) > 1 and not os.path.exists(marker)
@@ -110,6 +127,9 @@ def run(params, ctx):
                             "message": "job not run: an earlier job ended the batch"})
         else:
             results.append(run_job(job, c_root))
+            if os.environ.get("FAKE_JOB_TIMES"):
+                start, end, cpu = (int(x) for x in os.environ["FAKE_JOB_TIMES"].split(":"))
+                results[-1].update(started_ms=start, ended_ms=end, cpu_ms=cpu)
             ctx.progress(i + 1, len(jobs), f"job {i + 1} of {len(jobs)} done")
     if cut:
         open(marker, "w").close()

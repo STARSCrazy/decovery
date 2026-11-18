@@ -330,6 +330,24 @@ class ShadowTest(unittest.TestCase):
             self.assertEqual(folder.parent, local / "decomp" / "ghidra")
             self.assertEqual(S.ghidra_project_dir(self.ws.shadow / "cache"), (self.ws.shadow / "cache" / "ghidra").resolve())
 
+    def test_explicit_project_link_in_dot_path_is_used(self):
+        cache = self.ws.root / ".task-view" / "cache"
+        link = cache / "ghidra"
+        S.make_link(link, self.ws.source / "cache" / "ghidra")
+        self.assertEqual(S.ghidra_project_dir(cache), link)
+
+    def test_explicit_project_link_is_never_replaced(self):
+        shadow = self.ws.root / ".task-shadow"
+        link = shadow / "cache" / "ghidra"
+        target = self.ws.root / "protected-project"
+        target.mkdir()
+        (target / "keep").write_text("original", encoding="utf-8")
+        S.make_link(link, target)
+        with mock.patch.dict(os.environ, {"LOCALAPPDATA": str(self.ws.root / "local")}):
+            with self.assertRaises(OSError):
+                S.copy_ghidra(self.ws.source, shadow)
+        self.assertEqual((target / "keep").read_text(encoding="utf-8"), "original")
+
     def test_link_recreated_when_target_moves(self):
         self.refresh()
         other = self.ws.root / "other-recordings"

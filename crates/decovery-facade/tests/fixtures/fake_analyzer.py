@@ -112,7 +112,25 @@ def decompile(params, ctx):
         stem = address.replace(":", "_")
         path = out / f"{stem}.c"
         path.write_bytes(f"\r\nvoid {stem}(void)\r\n{{\r\n  /* run {run} */\r\n}}\r\n".encode("utf-8"))
-        results.append({"address": address, "path": str(path)})
+        entry = {"address": address, "path": str(path)}
+        if address == "flat:00010010":  # decompiler v2 metadata; the other functions answer like an older plugin
+            entry["lines"] = [
+                {"line": 1, "ranges": []},
+                {"line": 2, "ranges": [{"start": "flat:00010010", "end": "flat:00010012"}]},
+                {"line": 3, "ranges": []},
+                {"line": 4, "ranges": [{"start": "flat:00010020", "end": "flat:0001002F"}]},
+                {"line": 5, "ranges": [{"start": "flat:000100F0", "end": "flat:000100F0"}]},
+            ]
+            entry["signature"] = {
+                "calling_convention": "__watcall",
+                "return_type": "void",
+                "parameters": [{"name": "count", "type": "int", "storage": "register:EAX"}],
+            }
+            entry["variables"] = [
+                {"name": "count", "type": "int", "storage": "register:EAX"},
+                {"name": "local_8", "type": "int", "storage": "stack:-8", "first_use": "flat:00010020"},
+            ]
+        results.append(entry)
     ctx.progress(len(params["addresses"]), len(params["addresses"]))
     return results
 

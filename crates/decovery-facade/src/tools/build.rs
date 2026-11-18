@@ -14,16 +14,20 @@ use decovery_diff::{Blocker, Comparison, ModuleOptions, Placement, SymbolView, V
 use decovery_objects::{FunctionView, ObjectFile, functions, read_omf};
 use decovery_plugin::Progress;
 use decovery_toolchain::{
-    AssembleError, BUILTIN_ASSEMBLER, CheatFinding, CompiledFile, Profile, SourceJob, SourceSet,
-    assemble_listing, assembler_profile, compile_planned, definitions, find_cheats, find_sources,
-    open_runners, plan_compile, rebuild_profile, stage_text, startup_object, tool_dir,
-    tool_fingerprint,
+    AssembleError, BUILTIN_ASSEMBLER, CheatFinding, CompiledFile, JobSpan, Profile, Runner,
+    SourceJob, SourceSet, assemble_listing, assembler_profile, compile_planned, definitions,
+    find_cheats, find_sources, open_runners, plan_compile, rebuild_profile, stage_text,
+    startup_object, tool_dir, tool_fingerprint,
 };
 use serde_json::{Value, json};
 
+use super::history::{
+    AttemptSource, RecordAs, Tried, fingerprint_of, mark_archived, record_attempts,
+};
 use super::variants::{Variant, build_variants};
 use crate::{
-    Budget, Change, FacadeError, KnowledgeView, Response, Session, store_handle, write_affected,
+    Budget, Change, Control, FacadeError, KnowledgeView, Response, Session, store_handle,
+    write_affected,
 };
 
 const LOCK_WAIT: Duration = Duration::from_secs(30);
@@ -41,7 +45,7 @@ static BUILD_COUNTER: AtomicU32 = AtomicU32::new(0);
 /// What to build: `files` (names in `src/`; empty = all sources), optionally reported for one `function` only
 /// (a name or an address; without `files` its file is the one its rebuild record names, else the only source that
 /// defines it). With `variants` the request compiles those candidates (whole files or definitions of `function`)
-/// for `function` and ranks them instead; nothing is recorded then.
+/// for `function` and ranks them instead; only their attempts are recorded then (`history`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct BuildRequest {
@@ -50,6 +54,8 @@ pub struct BuildRequest {
     pub variants: Vec<Variant>,
     /// Characters of the function list returned inline (default [`Budget::default`]); the rest is a handle.
     pub budget: Option<usize>,
+    /// How the attempts of this build are recorded when the caller is not the agent (the bridge's `search`).
+    pub(crate) record: RecordAs,
 }
 
 /// The build directory; removed when dropped.
@@ -139,8 +145,76 @@ pub(super) fn toolchain(e: decovery_toolchain::ToolchainError) -> FacadeError {
     FacadeError::Invalid(e.to_string())
 }
 
+/// [`toolchain`], or [`FacadeError::Cancelled`] when `control` was cancelled (a runner request ends in an error then).
+pub(super) fn toolchain_or_cancelled<'c>(
+    control: &'c Control<'_>,
+) -> impl FnOnce(decovery_toolchain::ToolchainError) -> FacadeError + 'c {
+    move |e| {
+        if control.is_cancelled() {
+            FacadeError::Cancelled
+        } else {
+            toolchain(e)
+        }
+    }
+}
+
 pub(super) fn ms(d: Duration) -> u64 {
     u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Adds `timeline` (phases and compile jobs in ms since `started`), `slots`, `lower_bound_ms`, `saturation` and
+/// `efficiency` (plan decision 5) to `timing`. Jobs without reported times are left out of the timeline.
+fn add_timeline(
+    timing: &mut Value,
+    started: Instant,
+    phases: &[(&str, Instant, Instant)],
+    sources: &[Source],
+) {
+    let at = |t: Instant| ms(t.saturating_duration_since(started));
+    let mut slots = 1;
+    let mut spans: Vec<JobSpan> = Vec::new();
+    let mut jobs: Vec<Value> = Vec::new();
+    for source in sources {
+        let Some(times) = source.compiled.as_ref().and_then(|c| c.times) else {
+            continue;
+        };
+        let (Some(start), Some(end)) = (times.started_ms, times.ended_ms) else {
+            continue;
+        };
+        let queued = at(times.submitted);
+        slots = slots.max(times.slots);
+        let span = JobSpan {
+            queued_ms: queued,
+            start_ms: queued + start,
+            end_ms: queued + end,
+        };
+        spans.push(span);
+        jobs.push(json!({
+            "file": source.name,
+            "queued_ms": span.queued_ms,
+            "start_ms": span.start_ms,
+            "end_ms": span.end_ms,
+            "cpu_ms": times.cpu_ms,
+        }));
+    }
+    jobs.sort_by_key(|j| j["start_ms"].as_u64());
+    let wall = phases.last().map_or(0, |p| at(p.2));
+    let compile = phases
+        .iter()
+        .find(|p| p.0 == "compile")
+        .map_or(0, |p| ms(p.2.saturating_duration_since(p.1)));
+    let throughput = decovery_toolchain::throughput(&spans, slots, wall, compile);
+    let round = |x: f64| (x * 1000.0).round() / 1000.0;
+    timing["timeline"] = json!({
+        "phases": phases.iter().map(|(name, from, to)| json!({
+            "name": name, "start_ms": at(*from), "end_ms": at(*to),
+        })).collect::<Vec<_>>(),
+        "jobs": jobs,
+    });
+    timing["slots"] = json!(slots);
+    timing["lower_bound_ms"] = json!(throughput.lower_bound_ms);
+    timing["saturation"] = json!(throughput.saturation.map(round));
+    timing["efficiency"] = json!(round(throughput.efficiency));
 }
 
 /// One source of the build.
@@ -153,7 +227,7 @@ struct Source {
     /// What builds the source, as recorded in `compiler`: the profile, [`BUILTIN_ASSEMBLER`] or the profile that
     /// runs the assembler.
     compiler: String,
-    /// Source text with LF line ends, for the inline-assembly check.
+    /// Source text with LF line ends, for the inline-assembly check (C) and the attempt records.
     text: String,
     compiled: Option<CompiledFile>,
     /// Why the source has no object.
@@ -247,15 +321,21 @@ pub(super) fn file_name(path: &Path) -> String {
 /// kept objects and the affected output files. MASM sources (`.asm`) go to the built-in assembler first
 /// ([`assemble_listing`]); one with a line outside its subset is assembled by the profile's assembler when that
 /// toolchain is there, else skipped with the line. Other assembler sources (`.s`) are skipped.
+///
+/// Cancellation ([`Control::cancel`]) is checked before compiling, passed to the runner request, and checked after
+/// compiling and before recording; a cancelled build records nothing (no rebuild records, kept objects, output or
+/// attempts). Recording is never interrupted.
 pub fn build(
     root: &Path,
     request: &BuildRequest,
-    progress: &dyn Fn(Progress),
+    control: &Control,
 ) -> Result<Response, FacadeError> {
     let started = Instant::now();
+    control.check()?;
     if !request.variants.is_empty() {
-        return build_variants(root, request, progress, started);
+        return build_variants(root, request, control, started);
     }
+    let progress = control.progress;
     let stamps = SessionStamps::of(root);
     let ws = Workspace::open(root)?;
     let analysis = Analysis::load(root)?.filter(|a| a.target_sha256 == ws.config.target.sha256);
@@ -269,9 +349,12 @@ pub fn build(
     let set = find_sources(&root.join(SOURCE_DIR), &files).map_err(toolchain)?;
     let existing_files: Vec<String> = set.sources.iter().map(|p| file_name(p)).collect();
 
+    // the runners start while the sources are staged
+    let opening = Some(Opening::start(&ws, &profile)?);
+
     // stage; the built-in assembler builds what it can right here
     let run_dir = new_run_dir(root)?;
-    stage_headers(&set, &run_dir.0)?;
+    let headers = stage_headers(&set, &run_dir.0)?;
     let mut sources: Vec<Source> = Vec::new();
     let mut assembler: Option<Option<(Workspace, Profile)>> = None;
     let mut assembler_jobs: Vec<usize> = Vec::new();
@@ -297,6 +380,7 @@ pub fn build(
                 Err(e) => source.error = Some(e.to_string()),
                 Ok((text, hash)) => {
                     source.flags = String::new();
+                    source.text = text.replace("\r\n", "\n");
                     match assemble_listing(&source.dos_name, &text) {
                         Ok(object) => {
                             source.compiler = BUILTIN_ASSEMBLER.to_string();
@@ -358,7 +442,8 @@ pub fn build(
         files: mut compiled,
         mut input_hashes,
         mut warnings,
-    } = compile_jobs(&ws, &profile, &jobs_input, &run_dir.0, progress)?;
+        closing,
+    } = compile_jobs(&ws, &profile, &jobs_input, &run_dir.0, control, opening)?;
     if let Some(Some((asm_ws, asm_profile))) =
         assembler.as_ref().filter(|_| !assembler_jobs.is_empty())
     {
@@ -367,7 +452,7 @@ pub fn build(
             .iter()
             .map(|&i| SourceJob::new(sources[i].dos_name.clone(), String::new()))
             .collect();
-        let more = compile_jobs(asm_ws, asm_profile, &asm_input, &run_dir.0, progress)?;
+        let more = compile_jobs(asm_ws, asm_profile, &asm_input, &run_dir.0, control, None)?;
         compiled.extend(more.files);
         input_hashes.extend(more.input_hashes);
         warnings.extend(more.warnings);
@@ -387,7 +472,9 @@ pub fn build(
         sources[i].compiled = Some(file);
     }
     drop(run_dir);
-    let compile_ms = ms(compile_started.elapsed());
+    control.check()?;
+    let compile_ended = Instant::now();
+    let compile_ms = ms(compile_ended - compile_started);
 
     // read objects
     let compare_started = Instant::now();
@@ -420,6 +507,7 @@ pub fn build(
         &mut hints,
     );
     drop(refs);
+    let mut originals: HashMap<Address, String> = HashMap::new();
     progress(Progress::new(
         0,
         Some(placements.len() as u64),
@@ -429,6 +517,14 @@ pub fn build(
         Vec::new()
     } else {
         let program = crate::program::load(&ws)?;
+        for p in &placements {
+            if let Some(bytes) = p
+                .original_len
+                .and_then(|len| program.read(p.at, len as usize))
+            {
+                originals.insert(p.at, super::history::hex(bytes));
+            }
+        }
         // the diagnosis reads the instruction pairs of the comparison: no second decode
         let compiled: Vec<&ObjectFile> = objects
             .iter()
@@ -474,7 +570,8 @@ pub fn build(
         }
         cheats.push(findings);
     }
-    let compare_ms = ms(compare_started.elapsed());
+    let compare_ended = Instant::now();
+    let compare_ms = ms(compare_ended - compare_started);
 
     // records of this build
     let date = today();
@@ -509,7 +606,10 @@ pub fn build(
         new_records.push(r);
     }
 
-    // record under the lock
+    let fingerprint = fingerprint_of(&ws, &profile);
+
+    // record under the lock; from here on a cancel takes effect after recording
+    control.check()?;
     let record_started = Instant::now();
     let lock = ws.lock(LOCK_WAIT)?;
     let old = read_rebuild(root)?;
@@ -575,19 +675,46 @@ pub fn build(
             },
             &lock,
         )?;
+        // the exemplar index is cache data: a failure to refresh it does not fail the build
+        if let Err(e) = crate::exemplar_index(&session) {
+            warnings.push(format!("exemplar index not refreshed: {e}"));
+        }
     }
     drop(lock);
-    let record_ms = ms(record_started.elapsed());
+    let record_ended = Instant::now();
+    let record_ms = ms(record_ended - record_started);
 
-    let timing = json!({
+    // attempts, outside the workspace lock
+    let tried = attempts_of(
+        &sources,
+        &new_records,
+        &headers,
+        &fingerprint,
+        &originals,
+        &request.record,
+    );
+    warnings.extend(record_attempts(root, tried));
+
+    // the runners have stopped before the build answers
+    drop(closing);
+    let ended = Instant::now();
+    let mut timing = json!({
         "compile_ms": compile_ms,
         "compare_ms": compare_ms,
         "record_ms": record_ms,
-        "total_ms": ms(started.elapsed()),
+        "total_ms": ms(ended - started),
         "jobs": jobs,
         "cached": cached,
         "assembled": assembled,
     });
+    let phases = [
+        ("stage", started, compile_started),
+        ("compile", compile_started, compile_ended),
+        ("compare", compare_started, compare_ended),
+        ("record", record_started, record_ended),
+        ("attempts", record_ended, ended),
+    ];
+    add_timeline(&mut timing, started, &phases, &sources);
     respond(
         root,
         request,
@@ -768,18 +895,72 @@ pub(super) struct Compiled {
     pub(super) files: Vec<CompiledFile>,
     pub(super) input_hashes: BTreeMap<String, String>,
     pub(super) warnings: Vec<String>,
+    /// The runners, shutting down; the build keeps this until it answers.
+    pub(super) closing: Closing,
+}
+
+type Opened = (Vec<Box<dyn Runner>>, Vec<String>);
+
+/// Runners started in the background while the build stages its sources, so a plugin's start-up overlaps the
+/// staging.
+pub(super) struct Opening(std::thread::JoinHandle<Opened>);
+
+impl Opening {
+    pub(super) fn start(ws: &Workspace, profile: &Profile) -> Result<Self, FacadeError> {
+        let user = read_user_config()?;
+        let names = runner_names(ws, profile);
+        let ws = ws.clone();
+        Ok(Opening(std::thread::spawn(move || {
+            open_runners(&names, &ws, &user)
+        })))
+    }
+
+    fn wait(self) -> Opened {
+        self.0
+            .join()
+            .unwrap_or_else(|_| (Vec::new(), vec!["runners: start-up failed".to_string()]))
+    }
+}
+
+/// Runners shutting down in a thread of their own (a plugin may take a while to stop its workers); dropping it
+/// waits for them, so no plugin outlives the build.
+#[derive(Default)]
+pub(super) struct Closing(Vec<std::thread::JoinHandle<()>>);
+
+impl Closing {
+    fn close(&mut self, runners: Vec<Box<dyn Runner>>) {
+        if !runners.is_empty() {
+            self.0.push(std::thread::spawn(move || drop(runners)));
+        }
+    }
+}
+
+impl Drop for Closing {
+    fn drop(&mut self) {
+        for handle in self.0.drain(..) {
+            let _ = handle.join();
+        }
+    }
 }
 
 /// Compiles the staged `jobs_input` in `run_dir`: inputs read once, object cache first, all misses in one runner
-/// request (started only when there are misses). `progress` also gets what the runner reports per finished job.
+/// request (started only when there are misses). `control` also gets what the runner reports per finished job;
+/// its cancel token goes to the runner request, and a cancel before or during compiling ends in
+/// [`FacadeError::Cancelled`].
 pub(super) fn compile_jobs(
     ws: &Workspace,
     profile: &Profile,
     jobs_input: &[SourceJob],
     run_dir: &Path,
-    progress: &dyn Fn(Progress),
+    control: &Control,
+    opening: Option<Opening>,
 ) -> Result<Compiled, FacadeError> {
+    // on an early return the runners started early are dropped (shut down) here
+    let opened = opening.map(Opening::wait);
+    control.check()?;
+    let mut closing = Closing::default();
     let mut warnings: Vec<String> = Vec::new();
+    let progress = control.progress;
     progress(Progress::new(
         0,
         Some(jobs_input.len() as u64),
@@ -798,24 +979,47 @@ pub(super) fn compile_jobs(
         .map(|p| p.input_hashes().clone())
         .unwrap_or_default();
     let needs_runner = plan.as_ref().is_some_and(|p| p.misses() > 0);
-    let runners = if needs_runner {
-        let (runners, more) = open_runners(&runner_names, ws, &user);
-        warnings.extend(more);
-        runners
-    } else {
-        Vec::new()
+    let runners = match opened {
+        Some((runners, more)) => {
+            warnings.extend(more);
+            if needs_runner {
+                runners
+            } else {
+                closing.close(runners);
+                Vec::new()
+            }
+        }
+        None if needs_runner => {
+            let (runners, more) = open_runners(&runner_names, ws, &user);
+            warnings.extend(more);
+            runners
+        }
+        None => Vec::new(),
     };
     let (files, more) = match plan {
         None => (Vec::new(), Vec::new()),
-        Some(plan) => compile_planned(ws, profile, plan, run_dir, &runners, None, progress)
-            .map_err(toolchain)?,
+        Some(plan) => {
+            let compiled = compile_planned(
+                ws,
+                profile,
+                plan,
+                run_dir,
+                &runners,
+                Some(control.cancel.clone()),
+                progress,
+            );
+            control.check()?;
+            compiled.map_err(toolchain)?
+        }
     };
-    drop(runners);
+    // a plugin stopping its workers takes a while: that overlaps the comparison
+    closing.close(runners);
     warnings.extend(more);
     Ok(Compiled {
         files,
         input_hashes,
         warnings,
+        closing,
     })
 }
 
@@ -925,6 +1129,81 @@ fn record(built: &Built, c: &Comparison, source: &Source, date: &str) -> Rebuild
     r
 }
 
+/// The attempts of a full or file build: one per recorded function (compared, or failed with its file), with
+/// origin `build`; identical ones and the compared others are archived (one attempt per function and call).
+fn attempts_of(
+    sources: &[Source],
+    records: &[RebuildRecord],
+    headers: &BTreeMap<String, String>,
+    fingerprint: &str,
+    originals: &HashMap<Address, String>,
+    record_as: &RecordAs,
+) -> Vec<Tried> {
+    let attempt_sources: Vec<AttemptSource> = sources
+        .iter()
+        .map(|s| {
+            AttemptSource::new(
+                &s.name,
+                &s.text,
+                &s.compiler,
+                &s.flags,
+                headers,
+                fingerprint,
+            )
+        })
+        .collect();
+    let mut tried = Vec::new();
+    for r in records {
+        let Some(i) = sources
+            .iter()
+            .position(|s| r.file.as_deref() == Some(s.name.as_str()))
+        else {
+            continue;
+        };
+        let (source, attempt_source) = (&sources[i], &attempt_sources[i]);
+        let original = originals.get(&r.address).map_or("", String::as_str);
+        let mut a = attempt_source.attempt(
+            r.address,
+            &r.name,
+            decovery_core::AttemptOrigin::Build,
+            r.result,
+            original,
+        );
+        a.verdict = r.verdict;
+        if r.result != RebuildResult::Error {
+            a.instructions_differing = Some(r.instructions_differing);
+            a.bytes_differing = Some(r.differing);
+        }
+        a.blockers = r.blockers.iter().map(|b| b.kind.clone()).collect();
+        a.diagnosis = r.diagnoses.clone();
+        if let Some(message) = &r.message {
+            a.extra.insert("message".into(), json!(message));
+        }
+        record_as.apply(&mut a);
+        let compiled = source.compiled.as_ref();
+        let object = compiled
+            .and_then(|c| c.object.as_deref())
+            .filter(|_| source.error.is_none())
+            .map(|bytes| (object_name(&source.dos_name), bytes));
+        let message = compiled.map(|c| c.message.as_str());
+        let files =
+            attempt_source.files(&a, object.as_ref().map(|(n, b)| (n.as_str(), *b)), message);
+        tried.push(Tried {
+            record: a,
+            files,
+            archive: false,
+        });
+    }
+    mark_archived(&mut tried);
+    tried
+}
+
+/// `A.OBJ` for the staged source `A.C`.
+pub(super) fn object_name(dos_name: &str) -> String {
+    let stem = dos_name.rsplit_once('.').map_or(dos_name, |(s, _)| s);
+    format!("{stem}.OBJ")
+}
+
 /// Copies each object built in this run to `cache/rebuild/obj/<stem>.obj` with `<stem>.json` (inputs, identical
 /// functions). A source without a new object (skipped, or failed this time) keeps whatever is kept there.
 fn keep_objects(
@@ -978,7 +1257,9 @@ fn keep_objects(
     Ok(())
 }
 
-fn function_json(r: &RebuildRecord) -> Value {
+/// One function of the response; a differing one with a first difference and line metadata also carries the
+/// pseudo-C line of the original it is near (`c_line`, `near`).
+fn function_json(root: &Path, r: &RebuildRecord) -> Value {
     let mut v = json!({
         "address": r.address.to_string(),
         "name": r.name,
@@ -992,6 +1273,13 @@ fn function_json(r: &RebuildRecord) -> Value {
     });
     if !r.diagnoses.is_empty() {
         v["diagnoses"] = json!(r.diagnoses);
+    }
+    if r.result == RebuildResult::Differs
+        && let Some(offset) = r.first_difference
+        && let Some((line, text)) = super::c_line_near(root, r.address, offset)
+    {
+        v["c_line"] = json!(line);
+        v["near"] = json!(format!("differs near C line {line}: {text}"));
     }
     v
 }
@@ -1077,7 +1365,7 @@ fn respond(
     let mut used = 0usize;
     let mut shown = Vec::new();
     for r in &ordered {
-        let v = function_json(r);
+        let v = function_json(root, r);
         let n = v.to_string().len();
         if used + n > budget {
             break;
@@ -1089,7 +1377,7 @@ fn respond(
     if shown.len() < records.len() {
         let text: String = records
             .iter()
-            .map(|r| format!("{}\n", function_json(r)))
+            .map(|r| format!("{}\n", function_json(root, r)))
             .collect();
         let mut handle = store_handle(root, "build-functions", &text)?;
         handle.description = format!(

@@ -13,6 +13,7 @@ decovery-objects.workspace = true
 decovery-loaders.workspace = true
 decovery-x86.workspace = true
 rayon.workspace = true
+blake3.workspace = true
 
 [dev-dependencies]
 toml.workspace = true

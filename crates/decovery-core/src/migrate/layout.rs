@@ -83,11 +83,11 @@ pub(super) fn plan_trees(
         for entry in sorted_names(&rebuild_cache)? {
             if entry == "obj" {
                 plan_objects(&rebuild_cache.join("obj"), copies, cx)?;
-            } else {
+            } else if !matches!(entry.as_str(), "versuche.jsonl" | "archiv") {
                 skip(
                     cx,
                     &format!("{}/{}/{entry}", dirs::CACHE, dirs::REBUILD),
-                    "Decomp rebuild cache (attempts, archive, logbook); decovery keeps its own",
+                    "Decomp compile cache and method logbook; the bridge shadow keeps its own logbook",
                 );
             }
         }

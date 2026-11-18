@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use decovery_core::{Address, WorkspaceError};
 
-/// Why a facade operation failed. Every variant maps to exit code 2 at the CLI.
+/// Why a facade operation failed. Every variant maps to exit code 2 at the CLI, [`FacadeError::Cancelled`] to 130.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum FacadeError {
@@ -33,6 +33,9 @@ pub enum FacadeError {
     Plugin(String),
     #[error("workspace is locked by pid {pid}")]
     Locked { pid: u32 },
+    /// The operation stopped at a cancellation point; it left the workspace unchanged or recorded completely.
+    #[error("cancelled")]
+    Cancelled,
     #[error("cannot write {}: {source}", path.display())]
     Output {
         path: PathBuf,
@@ -50,7 +53,10 @@ fn nearest_text(nearest: &Option<(Address, String)>) -> String {
 impl FacadeError {
     /// Process exit code for this error.
     pub fn exit_code(&self) -> u8 {
-        2
+        match self {
+            FacadeError::Cancelled => 130,
+            _ => 2,
+        }
     }
 }
 

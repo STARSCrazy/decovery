@@ -193,7 +193,9 @@ class PluginRunTest(unittest.TestCase):
         self.assertIsNone(jobs[1]["exit_code"])
         self.assertTrue(jobs[1]["message"].startswith("unsupported INT 21h AH=99h at 000C:00001002"))
         self.assertEqual(jobs[1]["stdout"], "C:\\>SET PATH=D:\\BINW\r\nbefore\r\n")
+        times = {k: jobs[2].pop(k) for k in ("started_ms", "ended_ms", "cpu_ms")}
         self.assertEqual(jobs[2], {"status": "done", "exit_code": 0, "stdout": "16", "message": None})
+        self.assertTrue(all(isinstance(v, int) and v >= 0 for v in times.values()), times)
         self.assertEqual((ws.c / "REAL.TXT").read_bytes(), b"16")
 
     def test_machine_is_reused_between_jobs(self):
@@ -346,6 +348,18 @@ class JobPoolTest(unittest.TestCase):
         progress = [m["params"] for m in messages if m.get("method") == "$/progress"]
         self.assertEqual([p["done"] for p in progress], [1, 2, 3])
         self.assertTrue(all(p["total"] == 3 and " of 3 done after " in p["message"] for p in progress), progress)
+
+    def test_plugin_reports_job_times(self):
+        ws = Workspace(self)
+        from decovery_unicorn_dos.pool import new_machine
+
+        for plugin in (build_plugin(), build_plugin(machine_factory=new_machine)):
+            answers = run(plugin, request(1, "runner/run", ws.params(["ECHO a"], ["ECHO b"])))
+            for job in answers[1]["result"]["jobs"]:
+                self.assertIsInstance(job["started_ms"], int)
+                self.assertIsInstance(job["cpu_ms"], int)
+                self.assertGreaterEqual(job["ended_ms"], job["started_ms"])
+                self.assertGreaterEqual(job["started_ms"], 0)
 
     def test_in_flight_jobs_stay_within_request_share(self):
         pool = JobPool(workers=4, worker=timed)

@@ -81,6 +81,22 @@ impl fmt::Display for Address {
     }
 }
 
+/// A file-name-safe key of any address kind: the canonical text with every character outside `[A-Za-z0-9_-]`
+/// replaced by `_` (`flat_00012340`, `seg_0000_01FA`).
+pub fn address_key(address: Address) -> String {
+    address
+        .to_string()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 fn hex<T: TryFrom<u64>>(text: &str, max_digits: usize, whole: &str) -> Result<T, AddressError> {
     let syntax = || AddressError::Syntax(whole.to_string());
     if text.is_empty() || text.len() > max_digits || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -153,6 +169,32 @@ impl<'de> Deserialize<'de> for Address {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn address_key_covers_every_address_kind() {
+        // An exhaustive match: a new address kind fails to compile here until it gets a sample and a key.
+        let sample = |kind: &Address| match kind {
+            Address::Flat(_) => Address::Flat(0x12340),
+            Address::Seg { .. } => Address::Seg { seg: 0, off: 0x1FA },
+            Address::Sel { .. } => Address::Sel {
+                segment: 7,
+                off: 0x1234,
+            },
+        };
+        let kinds = [
+            Address::Flat(0),
+            Address::Seg { seg: 0, off: 0 },
+            Address::Sel { segment: 0, off: 0 },
+        ];
+        let keys: Vec<String> = kinds
+            .iter()
+            .map(|k| super::address_key(sample(k)))
+            .collect();
+        assert_eq!(
+            keys,
+            ["flat_00012340", "seg_0000_01FA", "sel_0007_00001234"]
+        );
+    }
+
     use super::*;
 
     #[test]

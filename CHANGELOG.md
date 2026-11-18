@@ -6,6 +6,15 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Phase-3 acceptance: benchmark of 30 tasks, two runs of the reference driver, 19 of 30 solved each
+  (`docs/parity/phase-3.md`).
+- Attempt memory: `history`, `migrate-attempts` (66 299 attempts and 4 049 archive entries of the first target
+  migrated), persistent `job`s, exemplars in `show` and `find similar` (parity with Decomp 18/20 top 1, 20/20 top 3),
+  the tool-call log `cache/calls/`, and `bench run|report|compare` with the reference Claude Code driver.
+- Phase-3 extra runs (`docs/parity/phase-3.md`): one `core+legacy` task (copy 60 MB, 75 MB after the first bridge call,
+  first bridge call 45 s, no leak), cost extrapolation of the full acceptance, and 4 previously unsolved probe tasks
+  with line mapping (2 of 4 solved now). Open in phase 3: the exemplar effect on the bench (no switch hides
+  exemplars), bridge use in a task that really searches, and the full probe re-run for line mapping.
 - Decomp legacy bridge (ADR 0007), Rust side: `diagnose --deep <context|structure|registers|slots|joint>`, the new
   tools `search` (`chain`, `permute`, `beam`, `forms`; `--apply`) and `verify` (`equivalence`, `behavior`) in the CLI
   and the MCP server, run through the `decomp-legacy` plugin (capability `legacy` v1). Decomp's reports pass through

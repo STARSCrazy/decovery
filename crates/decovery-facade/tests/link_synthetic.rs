@@ -70,7 +70,7 @@ fn mz(image: &[u8], min_alloc: u16) -> Vec<u8> {
 }
 
 fn run(f: &Fixture) -> Response {
-    link(f.root(), &|_| {}).unwrap()
+    link(f.root(), &decovery_facade::Control::progress_only(&|_| {})).unwrap()
 }
 
 fn record(f: &Fixture) -> ProgramRecord {

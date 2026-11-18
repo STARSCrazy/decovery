@@ -8,13 +8,13 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use decovery_core::{
-    Address, Analysis, AnalyzedFunction, ArchMode, ClaimSource, Confidence, ExecutableFormat,
-    Permissions, Program, Provider, Region, Workspace, knowledge_hash,
+    Address, Analysis, AnalyzedFunction, ArchMode, ClaimSource, Confidence, DecompileInfo,
+    ExecutableFormat, Permissions, Program, Provider, Region, Workspace, knowledge_hash,
 };
 use decovery_facade::plugins::PluginConfig;
 use decovery_facade::{
     AnalyzeOptions, AnnotateAction, Annotation, Budget, FacadeError, Progress, Session,
-    analyze_with_user_plugins, annotate, program_description, show,
+    analyze_with_user_plugins, annotate, program_description, show, show_with_lines,
 };
 use serde_json::{Value, json};
 
@@ -241,8 +241,13 @@ fn options(functions: Option<Vec<&str>>) -> AnalyzeOptions {
 fn run(root: &Path, functions: Option<Vec<&str>>) -> (Value, Vec<Progress>) {
     let seen = Mutex::new(Vec::new());
     let sink = |p: Progress| seen.lock().unwrap().push(p);
-    let response =
-        analyze_with_user_plugins(root, &options(functions), &BTreeMap::new(), &sink).unwrap();
+    let response = analyze_with_user_plugins(
+        root,
+        &options(functions),
+        &BTreeMap::new(),
+        &decovery_facade::Control::progress_only(&sink),
+    )
+    .unwrap();
     (response.data, seen.into_inner().unwrap())
 }
 
@@ -380,6 +385,44 @@ fn analyze_with_fake_plugin_writes_analysis_and_output() {
     );
     assert_eq!(body(root, 0x10300), None, "body of a vanished function");
 
+    // decompiler v2 metadata: decoded where the plugin sent it, absent (no error) where it did not
+    let info = DecompileInfo::load(root, flat(0x10010)).unwrap().unwrap();
+    assert_eq!(info.lines.as_ref().unwrap().len(), 5);
+    assert_eq!(info.line_of(flat(0x10025)).unwrap().line, 4);
+    assert_eq!(
+        info.signature.as_ref().unwrap().text(),
+        "__watcall void (int count [register:EAX])"
+    );
+    assert_eq!(
+        info.variables.as_ref().unwrap()[1].first_use,
+        Some(flat(0x10020))
+    );
+    assert_eq!(DecompileInfo::load(root, flat(0x10100)).unwrap(), None);
+    assert_eq!(DecompileInfo::load(root, flat(0x10200)).unwrap(), None);
+    let session = Session::open(root).unwrap();
+    let shown = show(&session, "alpha", Budget::default()).unwrap();
+    assert_eq!(
+        shown.data["signature"],
+        "__watcall void (int count [register:EAX])"
+    );
+    assert!(
+        shown.summary.contains("; signature: __watcall void"),
+        "{}",
+        shown.summary
+    );
+    let lined = show_with_lines(&session, "alpha", Budget::default()).unwrap();
+    let text = lined.data["text"].as_str().unwrap();
+    assert!(
+        text.contains("flat:00010020..0001002F |   /* run 1 */"),
+        "{text}"
+    );
+    assert!(
+        text.contains("                        | {\n"),
+        "unmapped lines are indented: {text}"
+    );
+    let helper = show(&session, "flat:00010100", Budget::default()).unwrap();
+    assert_eq!(helper.data["signature"], Value::Null);
+
     // output
     let alpha = root.join("output/functions/code/flat_00010010_alpha.c");
     let text = std::fs::read_to_string(&alpha).unwrap();
@@ -477,7 +520,7 @@ fn analyze_selection_replaces_only_selected_bodies() {
         root,
         &options(Some(vec!["nosuchname"])),
         &BTreeMap::new(),
-        &|_| {},
+        &decovery_facade::Control::progress_only(&|_| {}),
     )
     .unwrap_err();
     assert!(matches!(err, FacadeError::NotFound(_)), "{err}");
@@ -492,7 +535,13 @@ fn analyze_without_plugin_config_explains_setup() {
     let opts = AnalyzeOptions::default();
     assert_eq!(opts.plugin, "ghidra");
     assert_eq!(opts.functions, None);
-    let err = analyze_with_user_plugins(root, &opts, &BTreeMap::new(), &|_| {}).unwrap_err();
+    let err = analyze_with_user_plugins(
+        root,
+        &opts,
+        &BTreeMap::new(),
+        &decovery_facade::Control::progress_only(&|_| {}),
+    )
+    .unwrap_err();
     match &err {
         FacadeError::Plugin(message) => {
             assert_eq!(message, "no analyzer configured; run decovery setup ghidra")
@@ -509,7 +558,13 @@ fn analyze_without_plugin_config_explains_setup() {
         "ghidra".to_string(),
         PluginConfig::new(vec!["decovery-no-such-program-xyz".into()]),
     )]);
-    let err = analyze_with_user_plugins(root, &opts, &user, &|_| {}).unwrap_err();
+    let err = analyze_with_user_plugins(
+        root,
+        &opts,
+        &user,
+        &decovery_facade::Control::progress_only(&|_| {}),
+    )
+    .unwrap_err();
     match &err {
         FacadeError::Plugin(message) => assert!(message.starts_with("ghidra: "), "{message}"),
         other => panic!("{other:?}"),

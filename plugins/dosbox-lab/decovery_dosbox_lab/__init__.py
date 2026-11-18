@@ -280,16 +280,38 @@ def _parse(params: Any) -> tuple[list[MountSpec], str, float, list[list[str]], l
 
 class _Watch:
     """Called by the backend with the session's output so far: notes when each job's begin marker appears and stops
-    the session when the running job has run longer than `timeout_s`, or when the request is cancelled."""
+    the session when the running job has run longer than `timeout_s`, or when the request is cancelled. `times` gets
+    each job's `started_ms` and `ended_ms` (milliseconds since `epoch` on `clock`, as seen in the output; without
+    `epoch`, since the first marker)."""
 
-    def __init__(self, timeout_s: float, clock: Callable[[], float], ctx: Context):
+    def __init__(self, timeout_s: float, clock: Callable[[], float], ctx: Context, epoch: float | None = None):
         self.timeout_s = timeout_s
         self.clock = clock
         self.ctx = ctx
+        self.epoch = epoch
+        self.times: dict[int, dict[str, int]] = {}
         self.position = 0
         self.running: int | None = None
         self.since = 0.0
         self.ended = 0
+
+    def _ms(self, now: float) -> int:
+        if self.epoch is None:
+            self.epoch = now
+        return max(0, round((now - self.epoch) * 1000))
+
+    def close(self, stdout: str) -> None:
+        """Notes the times of the markers the watch did not see before the session ended (at the session's end)."""
+        now = self.clock()
+        for match in _MARKER.finditer(stdout, self.position):
+            if match.group(3) is not None:
+                self.running = int(match.group(3))
+                self.times.setdefault(self.running, {"started_ms": self._ms(now)})
+            else:
+                ended = int(match.group(2)) if match.group(2) is not None else self.running
+                if ended in self.times and "ended_ms" not in self.times[ended]:
+                    self.times[ended]["ended_ms"] = max(self.times[ended]["started_ms"], self._ms(now))
+                self.running = None
 
     def __call__(self, stdout: str) -> bool:
         now = self.clock()
@@ -297,7 +319,12 @@ class _Watch:
         for match in _MARKER.finditer(stdout, self.position, complete):
             if match.group(3) is not None:
                 self.running, self.since = int(match.group(3)), now
+                self.times[self.running] = {"started_ms": self._ms(now)}
             else:
+                # an end marker, or a failure marker of the running job
+                ended = int(match.group(2)) if match.group(2) is not None else self.running
+                if ended in self.times:
+                    self.times[ended]["ended_ms"] = max(self.times[ended]["started_ms"], self._ms(now))
                 if match.group(2) is not None:
                     # one event per ended job: a hang is told from a slow compile by the events that stop coming
                     self.ended += 1
@@ -356,6 +383,7 @@ class _Instance:
         jobs: list[tuple[int, list[str]]],
         clock: Callable[[], float],
         ctx: Context,
+        epoch: float | None = None,
     ) -> dict:
         """Outcomes by job number, from one DOSBox session. Each job may run `timeout_s` from its begin marker; the
         session as a whole is bounded by `timeout_s` x its jobs + `SESSION_SLACK_S` (DOSBox start-up); `split_jobs`
@@ -366,14 +394,19 @@ class _Instance:
         self.script.write_bytes(text.encode("cp437"))
         limit = self.timeout_s * len(jobs) + SESSION_SLACK_S
         try:
-            watch = _Watch(self.timeout_s, clock, ctx)
+            watch = _Watch(self.timeout_s, clock, ctx, epoch)
             batch = backend_factory().run_batch(self.mounts, self.script_name, limit, watch)
         except BackendError as exc:
             raise RpcError(exc.code, exc.message) from exc
         finally:
             self.script.unlink(missing_ok=True)
+        watch.close(batch.stdout)
         parsed = parse_output(batch.stdout, max(numbers) + 1)
-        return {n: _outcome(parsed[n], batch, self.timeout_s) for n in numbers}
+        outcomes = {n: _outcome(parsed[n], batch, self.timeout_s) for n in numbers}
+        for n, times in watch.times.items():
+            if n in outcomes and "ended_ms" in times:
+                outcomes[n].update(times)
+        return outcomes
 
 
 def build_plugin(
@@ -390,6 +423,9 @@ def build_plugin(
         mounts, current, timeout_s, commands, costs, share = _parse(params)
         if not commands:
             return {"jobs": []}
+        # the jobs' times are relative to the request's start; a test clock may be per thread, then each session
+        # counts from its first marker
+        epoch = clock() if clock is time.monotonic else None
         split = split_jobs(costs, min(instances, share or instances))
         workers = [_Instance(k, mounts, current, timeout_s) for k in range(len(split))]
         claimed: list[_Instance] = []
@@ -399,7 +435,7 @@ def build_plugin(
                 claimed.append(worker)
             with ThreadPoolExecutor(len(workers)) as threads:  # each thread waits for its DOSBox process
                 futures = [
-                    threads.submit(worker.run, backend_factory, [(i, commands[i]) for i in part], clock, ctx)
+                    threads.submit(worker.run, backend_factory, [(i, commands[i]) for i in part], clock, ctx, epoch)
                     for worker, part in zip(workers, split)
                 ]
                 merged: dict[int, dict] = {}

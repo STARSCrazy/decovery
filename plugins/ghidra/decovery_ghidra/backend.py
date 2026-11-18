@@ -44,10 +44,34 @@ class GhidraFunction:
 
 
 @dataclass(frozen=True)
+class DecompileLine:
+    line: int  # 1-based line of getC(), including blank lines
+    ranges: list[tuple[GhidraAddress, GhidraAddress]]  # inclusive token bounds
+
+
+@dataclass(frozen=True)
+class DecompileVariable:
+    name: str | None = None
+    data_type: str | None = None
+    storage: str | None = None
+    first_use: GhidraAddress | None = None
+
+
+@dataclass(frozen=True)
+class DecompileSignature:
+    calling_convention: str | None = None
+    return_type: str | None = None
+    parameters: list[DecompileVariable] | None = None
+
+
+@dataclass(frozen=True)
 class DecompileResult:
     code: str | None
     error: str | None
     disassembly: list[tuple[GhidraAddress, str]] = field(default_factory=list)  # filled when decompiling failed
+    lines: list[DecompileLine] | None = None
+    signature: DecompileSignature | None = None
+    variables: list[DecompileVariable] | None = None
 
 
 @dataclass(frozen=True)
@@ -350,13 +374,78 @@ class GhidraBackend(Backend):
         outcome = self._decompiler.decompileFunction(function, DECOMPILE_TIMEOUT_SECONDS, self._pyghidra.task_monitor())
         decompiled = outcome.getDecompiledFunction() if outcome.decompileCompleted() else None
         if decompiled is not None:
-            return DecompileResult(str(decompiled.getC()), None)
+            code = str(decompiled.getC())
+            lines = self._decompile_lines(function, outcome.getCCodeMarkup())
+            signature, variables = self._high_metadata(outcome.getHighFunction())
+            return DecompileResult(code, None, lines=lines, signature=signature, variables=variables)
         error = str(outcome.getErrorMessage() or "").strip() or "decompilation did not complete"
         disassembly = []
         for ins in program.getListing().getInstructions(function.getBody(), True):
             if (at := self._to_spec(ins.getAddress())) is not None:
                 disassembly.append((at, str(ins)))
         return DecompileResult(None, error, disassembly)
+
+    def _decompile_lines(self, function, markup) -> list[DecompileLine] | None:
+        if markup is None:
+            return None
+        from ghidra.app.decompiler import PrettyPrinter  # type: ignore[import-not-found]
+
+        # getDecompiledFunction().getC() uses this same printer. Enumerating its lines preserves blank lines
+        # and avoids matching text (identical C statements may have different instruction origins).
+        result = []
+        for number, line in enumerate(PrettyPrinter(function, markup, None).getLines(), 1):
+            ranges = []
+            for token in line.getAllTokens():
+                start = self._to_spec(token.getMinAddress())
+                end = self._to_spec(token.getMaxAddress())
+                if start is not None and end is not None:
+                    ranges.append((start, end))
+            result.append(DecompileLine(number, ranges))
+        return result
+
+    @staticmethod
+    def _storage(storage) -> str | None:
+        if storage is None or storage.isBadStorage() or storage.isUnassignedStorage() or storage.isVoidStorage():
+            return None
+        if storage.isRegisterStorage():
+            registers = [str(register.getName()) for register in storage.getRegisters()]
+            return "register:" + ":".join(registers) if registers else None
+        if storage.isStackStorage():
+            return f"stack:{int(storage.getStackOffset()):+d}"
+        # Ghidra's own readable representation retains compound, memory and unique storage locations.
+        return str(storage) or None
+
+    @staticmethod
+    def _data_type(data_type) -> str | None:
+        return str(data_type.getDisplayName()) if data_type is not None else None
+
+    def _variable(self, symbol, first_use: bool = False) -> DecompileVariable:
+        name = symbol.getName()
+        return DecompileVariable(
+            str(name) if name else None,
+            self._data_type(symbol.getDataType()),
+            self._storage(symbol.getStorage()),
+            self._to_spec(symbol.getPCAddress()) if first_use else None,
+        )
+
+    def _high_metadata(self, high) -> tuple[DecompileSignature | None, list[DecompileVariable] | None]:
+        if high is None:
+            return None, None
+        prototype = high.getFunctionPrototype()
+        signature = None
+        if prototype is not None:
+            convention = prototype.getModelName()
+            parameters = [prototype.getParam(index) for index in range(prototype.getNumParams())]
+            signature = DecompileSignature(
+                str(convention) if convention else None,
+                self._data_type(prototype.getReturnType()),
+                [self._variable(symbol) for symbol in parameters if symbol is not None],
+            )
+        symbols = high.getLocalSymbolMap()
+        variables = None if symbols is None else [
+            self._variable(symbol, first_use=True) for symbol in symbols.getSymbols() if not symbol.isGlobal()
+        ]
+        return signature, variables
 
     # -- shutdown --------------------------------------------------------------------------------------------
 

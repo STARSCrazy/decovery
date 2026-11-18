@@ -164,7 +164,7 @@ env = {{ FAKE_OMF_DIR = {} }}
 }
 
 fn run(f: &LeFixture) -> Response {
-    link(f.root(), &|_| {}).unwrap()
+    link(f.root(), &decovery_facade::Control::progress_only(&|_| {})).unwrap()
 }
 
 fn strings(v: &serde_json::Value) -> Vec<String> {
@@ -266,7 +266,12 @@ fn le_link_inserts_function_of_assembler_source() {
     // an asm-only build: no compile job, the built-in assembler keeps the object
     let mut request = BuildRequest::default();
     request.files = vec!["a.asm".to_string()];
-    let built = build(root, &request, &|_| {}).unwrap();
+    let built = build(
+        root,
+        &request,
+        &decovery_facade::Control::progress_only(&|_| {}),
+    )
+    .unwrap();
     assert_eq!(
         built.summary, "a.asm: 1 functions, 1 identical",
         "{:#}",

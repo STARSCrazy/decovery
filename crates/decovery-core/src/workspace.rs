@@ -246,6 +246,9 @@ pub struct RebuildConfig {
     pub tool_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_s: Option<u32>,
+    /// Own attempts without progress after which a function counts as parked (default 30).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_budget: Option<u32>,
     /// Extra compiler flags per source file name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub file_flags: BTreeMap<String, String>,

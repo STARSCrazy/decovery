@@ -196,6 +196,44 @@ fn detail_pages_a_handle() {
 }
 
 #[test]
+fn history_runs_and_commands_are_logged() {
+    let dir = workspace();
+    let out = run(&dir, &["history", "alpha"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "alpha: 0 attempts, best none compared, not parked\n"
+    );
+    let out = run(&dir, &["show", "nosuch"]);
+    assert_eq!(out.status.code(), Some(2));
+    let calls = dir.path().join("cache/calls");
+    let file = std::fs::read_dir(&calls)
+        .unwrap()
+        .flatten()
+        .find(|e| e.path().extension().is_some_and(|x| x == "jsonl"));
+    let text = std::fs::read_to_string(file.expect("a month file").path()).unwrap();
+    let log: Vec<serde_json::Value> = text
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let seen: Vec<(&str, &str, &str)> = log
+        .iter()
+        .map(|r| {
+            (
+                r["tool"].as_str().unwrap(),
+                r["outcome"].as_str().unwrap(),
+                r["actor"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(seen, [("history", "ok", "cli"), ("show", "error", "cli")]);
+}
+
+#[test]
 fn status_prints_counts_and_json() {
     let dir = workspace();
     let out = run(&dir, &["status"]);

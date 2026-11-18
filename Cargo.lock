@@ -283,10 +283,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "decovery-bench"
+version = "0.2.0"
+dependencies = [
+ "decovery-core",
+ "decovery-facade",
+ "decovery-toolchain",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
 name = "decovery-cli"
 version = "0.2.0"
 dependencies = [
  "clap",
+ "decovery-bench",
  "decovery-core",
  "decovery-diff",
  "decovery-facade",
@@ -307,6 +323,7 @@ dependencies = [
  "blake3",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
  "toml",
@@ -316,6 +333,7 @@ dependencies = [
 name = "decovery-diff"
 version = "0.2.0"
 dependencies = [
+ "blake3",
  "decovery-core",
  "decovery-loaders",
  "decovery-objects",
@@ -394,6 +412,7 @@ dependencies = [
  "decovery-loaders",
  "decovery-objects",
  "decovery-plugin",
+ "rayon",
  "serde",
  "serde_json",
  "tempfile",

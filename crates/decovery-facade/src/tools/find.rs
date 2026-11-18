@@ -3,7 +3,10 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-use decovery_core::{AccessKind, Address, AnalysisIndex, Confidence, RebuildResult};
+use decovery_core::{
+    AccessKind, Address, AnalysisIndex, Confidence, DEFAULT_ATTEMPT_BUDGET, RebuildResult,
+    attempt_budget, read_attempts,
+};
 use serde_json::{Value, json};
 
 use crate::output::{FUNCTIONS_DIR, OUTPUT_DIR};
@@ -13,6 +16,10 @@ use crate::{Budget, FacadeError, Response, Session, resolve, store_handle};
 const CODE_TEXT_CHARS: usize = 200;
 /// Default number of rows.
 pub const DEFAULT_LIMIT: usize = 100;
+/// Default number of exemplars of `find similar`.
+pub const DEFAULT_SIMILAR_LIMIT: usize = 3;
+/// The answer when the exemplar index has no other member.
+const NO_EXEMPLARS: &str = "no solved functions to compare with";
 const OUTPUT_MISSING: &str = "output/ not generated; run `decovery show` or analyze";
 
 /// What to search.
@@ -24,6 +31,8 @@ pub enum FindWhat {
     Strings,
     Code,
     Xrefs,
+    /// The most similar identical functions (exemplars) of the target, with their source.
+    Similar,
 }
 
 /// Restricts the function list; all given filters must hold.
@@ -37,6 +46,8 @@ pub enum FunctionFilter {
     NotTried,
     Identical,
     Differs,
+    /// The function's attempt budget is spent without reaching identical (`[rebuild] attempt_budget`, default 30).
+    Parked,
 }
 
 /// Order of the function list.
@@ -66,14 +77,19 @@ pub struct FindQuery {
 }
 
 impl FindQuery {
-    /// A query for `what` without pattern or filters and the default limit.
+    /// A query for `what` without pattern or filters and the default limit ([`DEFAULT_SIMILAR_LIMIT`] for
+    /// `Similar`).
     pub fn new(what: FindWhat) -> Self {
         FindQuery {
             what,
             pattern: None,
             filter: Vec::new(),
             sort: FunctionSort::Address,
-            limit: DEFAULT_LIMIT,
+            limit: if what == FindWhat::Similar {
+                DEFAULT_SIMILAR_LIMIT
+            } else {
+                DEFAULT_LIMIT
+            },
         }
     }
 }
@@ -90,13 +106,15 @@ pub fn find(session: &Session, query: &FindQuery, budget: Budget) -> Result<Resp
     }
     let pattern = query.pattern.as_deref().map(Pattern::new);
     match query.what {
-        FindWhat::Functions => finish(
-            session,
-            "functions",
-            functions(session, query, pattern),
-            query,
-            budget,
-        ),
+        FindWhat::Functions => {
+            let mut warnings = Vec::new();
+            let rows = functions(session, query, pattern, &mut warnings)?;
+            let mut response = finish(session, "functions", rows, query, budget)?;
+            if !warnings.is_empty() {
+                response.data["warnings"] = json!(warnings);
+            }
+            Ok(response)
+        }
         FindWhat::Names => finish(session, "names", names(session, pattern), query, budget),
         FindWhat::Strings => finish(session, "strings", strings(session, pattern), query, budget),
         FindWhat::Code => {
@@ -127,7 +145,93 @@ pub fn find(session: &Session, query: &FindQuery, budget: Budget) -> Result<Resp
             };
             xrefs(session, target, query.limit, budget)
         }
+        FindWhat::Similar => {
+            let Some(target) = query.pattern.as_deref() else {
+                return Err(FacadeError::Invalid("find similar needs a target".into()));
+            };
+            similar(session, target, query.limit, budget)
+        }
     }
+}
+
+/// The `limit` exemplars of `target` with source, flags and reason. Sources that do not fit `budget` are left
+/// out of `data.items` (`source` null); the full result is then stored as a handle of kind `find-results`.
+fn similar(
+    session: &Session,
+    target: &str,
+    limit: usize,
+    budget: Budget,
+) -> Result<Response, FacadeError> {
+    let start = resolve(session, target)?.function;
+    let name = session.name_of(start).name;
+    let index = crate::exemplar_index(session)?;
+    let exemplars = index.similar(session, start, limit)?;
+    if exemplars.is_empty() {
+        return Ok(Response::new(
+            format!("{name} at {start}: {NO_EXEMPLARS}"),
+            json!({ "address": start.to_string(), "name": name, "total": 0, "items": [] }),
+        ));
+    }
+    let items: Vec<Value> = exemplars
+        .iter()
+        .map(|e| {
+            json!({
+                "address": e.address.to_string(),
+                "name": e.name,
+                "file": e.file,
+                "flags": e.flags,
+                "similarity": e.similarity,
+                "coverage": e.coverage,
+                "score": e.score,
+                "twin": e.twin,
+                "reason": e.reason(),
+                "source": e.source,
+            })
+        })
+        .collect();
+    let mut summary = format!(
+        "{} exemplars of {name} at {start}: {}",
+        exemplars.len(),
+        exemplars
+            .iter()
+            .map(|e| format!("{} ({:.2})", e.name, e.score))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let mut shown = items.clone();
+    let mut used = 0usize;
+    let mut cut = false;
+    for item in &mut shown {
+        used += item.to_string().chars().count();
+        if used > budget.chars {
+            item["source"] = Value::Null;
+            cut = true;
+        }
+    }
+    let mut handles = Vec::new();
+    if cut {
+        let text = serde_json::to_string_pretty(&json!({ "items": items }))
+            .map_err(|e| FacadeError::Invalid(format!("cannot serialize result: {e}")))?
+            + "\n";
+        let mut handle = store_handle(&session.workspace.root, "find-results", &text)?;
+        handle.description = format!("exemplars of {name} with their sources");
+        summary.push_str(&format!(
+            "; sources beyond the budget: detail {}",
+            handle.id
+        ));
+        handles.push(handle);
+    }
+    let mut response = Response::new(
+        summary,
+        json!({
+            "address": start.to_string(),
+            "name": name,
+            "total": exemplars.len(),
+            "items": shown,
+        }),
+    );
+    response.handles = handles;
+    Ok(response)
 }
 
 struct Row {
@@ -185,6 +289,24 @@ fn finish(
     Ok(response)
 }
 
+/// Whether the function at `start` has spent its attempt budget. Report damaged lines and propagate I/O errors.
+fn is_parked(
+    session: &Session,
+    start: Address,
+    warnings: &mut Vec<String>,
+) -> Result<bool, FacadeError> {
+    let limit = session
+        .workspace
+        .config
+        .rebuild
+        .as_ref()
+        .and_then(|r| r.attempt_budget)
+        .unwrap_or(DEFAULT_ATTEMPT_BUDGET);
+    let (records, issues) = read_attempts(&session.workspace.root, start)?;
+    warnings.extend(issues);
+    Ok(!records.is_empty() && attempt_budget(&records, limit).parked())
+}
+
 fn kebab_confidence(c: Confidence) -> &'static str {
     match c {
         Confidence::Confirmed => "confirmed",
@@ -201,7 +323,12 @@ struct Entry {
     rebuild: &'static str,
 }
 
-fn functions(session: &Session, query: &FindQuery, pattern: Option<Pattern>) -> Vec<Row> {
+fn functions(
+    session: &Session,
+    query: &FindQuery,
+    pattern: Option<Pattern>,
+    warnings: &mut Vec<String>,
+) -> Result<Vec<Row>, FacadeError> {
     let index = session.analysis.index();
     let rebuild: HashMap<Address, RebuildResult> = session
         .rebuild
@@ -224,6 +351,8 @@ fn functions(session: &Session, query: &FindQuery, pattern: Option<Pattern>) -> 
             Some(RebuildResult::Error) => "error",
             Some(_) => "other",
         };
+        let parked = query.filter.contains(&FunctionFilter::Parked)
+            && is_parked(session, f.start, warnings)?;
         let keep = query.filter.iter().all(|flt| match flt {
             FunctionFilter::Named => status != "unnamed",
             FunctionFilter::Unnamed => status == "unnamed",
@@ -232,6 +361,7 @@ fn functions(session: &Session, query: &FindQuery, pattern: Option<Pattern>) -> 
             FunctionFilter::NotTried => rebuild == "not-tried",
             FunctionFilter::Identical => rebuild == "identical",
             FunctionFilter::Differs => rebuild == "differs",
+            FunctionFilter::Parked => parked,
         });
         if !keep {
             continue;
@@ -250,7 +380,7 @@ fn functions(session: &Session, query: &FindQuery, pattern: Option<Pattern>) -> 
         FunctionSort::Callers => entries.sort_by_key(|e| (std::cmp::Reverse(e.callers), e.start)),
         FunctionSort::Size => entries.sort_by_key(|e| (std::cmp::Reverse(e.size), e.start)),
     }
-    entries
+    Ok(entries
         .into_iter()
         .map(|e| {
             row(
@@ -272,7 +402,7 @@ fn functions(session: &Session, query: &FindQuery, pattern: Option<Pattern>) -> 
                 ],
             )
         })
-        .collect()
+        .collect())
 }
 
 pub(crate) fn distinct_callers(index: &AnalysisIndex<'_>, f: Address) -> usize {

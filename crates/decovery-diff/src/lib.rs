@@ -65,6 +65,7 @@ mod pairs;
 mod program_le;
 mod program_mz;
 mod sequence;
+mod similar;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -81,6 +82,10 @@ pub use diagnose::{Finding, diagnose};
 pub use pairs::{Pair, PairKind, instruction_pairs, pairs_text};
 pub use program_le::compare_le;
 pub use program_mz::{Place, PlaceKind, diagnose_mz_link, load_image};
+pub use similar::{
+    BANDS, HASHES, PRESELECT, Ranked, Stretch, WINDOW, coarse_forms, coverage, indel_similarity,
+    instruction_forms, lsh_keys, minhash, rank, shared_stretches,
+};
 
 /// The name of an address in the original, and whether it is only a default name (`fun_0001A2B0`).
 #[derive(Debug, Clone, PartialEq, Eq)]

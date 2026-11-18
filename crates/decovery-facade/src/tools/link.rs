@@ -30,11 +30,11 @@ use serde_json::{Value, json};
 
 use super::build::{
     OBJECT_FORMAT, OBJECTS_DIR, failure_text, file_flags, file_name, is_asm, is_c, ms, new_run_dir,
-    read_text, runner_names, stage_headers, toolchain,
+    read_text, runner_names, stage_headers, toolchain, toolchain_or_cancelled,
 };
 use super::link_symbols::{Candidate, additions, candidates};
 use crate::session::{default_name, parse_default_name, parse_flat_default_name};
-use crate::{FacadeError, KnowledgeView, Response};
+use crate::{Control, FacadeError, KnowledgeView, Response};
 
 const LOCK_WAIT: Duration = Duration::from_secs(30);
 /// The linked program of the last `link`, relative to the workspace root.
@@ -51,22 +51,23 @@ const LE_DIAGNOSIS_LINES: usize = 20;
 
 /// Links the whole program and records the comparison with the original in `knowledge/rebuild-program.toml`
 /// (MZ and LE; other formats are refused).
-pub fn link(root: &Path, progress: &dyn Fn(Progress)) -> Result<Response, FacadeError> {
+///
+/// Cancellation ([`Control::cancel`]) is checked at the start, passed to the runner requests and checked before
+/// recording; a cancelled link records nothing.
+pub fn link(root: &Path, control: &Control) -> Result<Response, FacadeError> {
+    control.check()?;
     let ws = Workspace::open(root)?;
     match ws.config.target.format {
-        TargetFormat::Mz => link_mz(root, ws, progress),
-        TargetFormat::Le => link_le_program(root, ws, progress),
+        TargetFormat::Mz => link_mz(root, ws, control),
+        TargetFormat::Le => link_le_program(root, ws, control),
         format => Err(FacadeError::Invalid(format!(
             "link supports MZ and LE, not {format:?}"
         ))),
     }
 }
 
-fn link_mz(
-    root: &Path,
-    mut ws: Workspace,
-    progress: &dyn Fn(Progress),
-) -> Result<Response, FacadeError> {
+fn link_mz(root: &Path, mut ws: Workspace, control: &Control) -> Result<Response, FacadeError> {
+    let progress = control.progress;
     let started = Instant::now();
     let (profile, default_flags) = rebuild_profile(&ws).map_err(toolchain)?;
     let rebuild = ws.config.rebuild.clone().unwrap_or_default();
@@ -124,9 +125,17 @@ fn link_mz(
             Some(format!("compiling {} sources", jobs.len())),
         ));
         let plan = plan_compile(&ws, &profile, &jobs, &run_dir.0).map_err(toolchain)?;
-        let (files, more) =
-            compile_planned(&ws, &profile, plan, &run_dir.0, &runners, None, progress)
-                .map_err(toolchain)?;
+        let (files, more) = compile_planned(
+            &ws,
+            &profile,
+            plan,
+            &run_dir.0,
+            &runners,
+            Some(control.cancel.clone()),
+            progress,
+        )
+        .map_err(toolchain_or_cancelled(control))?;
+        control.check()?;
         warnings.extend(more);
         let failed = files.iter().zip(&names).find(|(f, _)| f.object.is_none());
         if let Some((file, name)) = failed {
@@ -148,10 +157,10 @@ fn link_mz(
                 OUTPUT,
                 &run_dir.0,
                 &runners,
-                None,
+                Some(control.cancel.clone()),
                 progress,
             )
-            .map_err(toolchain)?;
+            .map_err(toolchain_or_cancelled(control))?;
             warnings.extend(more);
             if result.program.is_none() {
                 message = Some(result.message.clone());
@@ -196,6 +205,8 @@ fn link_mz(
         )),
         _ => None,
     };
+    // record; from here on a cancel takes effect after recording
+    control.check()?;
     let added = store(
         &mut ws,
         &mut record,
@@ -318,8 +329,9 @@ fn store(
 fn link_le_program(
     root: &Path,
     mut ws: Workspace,
-    progress: &dyn Fn(Progress),
+    control: &Control,
 ) -> Result<Response, FacadeError> {
+    let progress = control.progress;
     let started = Instant::now();
     let (compiler, default_flags) = rebuild_profile(&ws).map_err(toolchain)?;
     let rebuild = ws.config.rebuild.clone().unwrap_or_default();
@@ -379,9 +391,17 @@ fn link_le_program(
     warnings.extend(more);
     progress(Progress::new(0, Some(1), Some("linking".to_string())));
     let (linked, more): (Linked, Vec<String>) = link_le(
-        &ws, &profile, &module, stub, &name, &run_dir.0, &runners, None, progress,
+        &ws,
+        &profile,
+        &module,
+        stub,
+        &name,
+        &run_dir.0,
+        &runners,
+        Some(control.cancel.clone()),
+        progress,
     )
-    .map_err(toolchain)?;
+    .map_err(toolchain_or_cancelled(control))?;
     warnings.extend(more);
     drop(runners);
     drop(run_dir);
@@ -417,6 +437,8 @@ fn link_le_program(
         record.diagnosis = compare_le(&original, exe, &place, LE_DIAGNOSIS_LINES);
     }
     let compare_ms = ms(compare_started.elapsed());
+    // record; from here on a cancel takes effect after recording
+    control.check()?;
     let added = store(
         &mut ws,
         &mut record,

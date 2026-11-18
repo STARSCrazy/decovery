@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/STARSCrazy/decovery/schemas/bench-run.schema.json",
+  "title": "decovery bench run record",
+  "description": "One run of a bench suite: <suite dir>/bench/<run-id>.json (ADR 0009). Unknown keys are preserved.",
+  "type": "object",
+  "required": ["schema", "id", "suite", "started", "finished", "state", "tool_version", "config_hash", "driver",
+    "model", "tools", "seed", "totals", "tasks"],
+  "properties": {
+    "schema": { "const": 1 },
+    "id": { "type": "string", "pattern": "^[0-9]{8}-[0-9]{6}-[0-9a-f]{6}$" },
+    "suite": { "type": "string" },
+    "started": { "type": "string" },
+    "finished": { "type": ["string", "null"] },
+    "state": { "enum": ["running", "done", "paused", "stopped-at-limit"] },
+    "tool_version": { "type": "string" },
+    "config_hash": { "type": "string" },
+    "driver": { "type": "string" },
+    "model": { "type": ["string", "null"] },
+    "tools": { "enum": ["core", "core-legacy"] },
+    "seed": { "type": "integer", "minimum": 0 },
+    "totals": {
+      "type": "object",
+      "required": ["tasks", "solved", "builds", "tool_calls", "searches", "wall_s"],
+      "properties": {
+        "tasks": { "type": "integer", "minimum": 0 },
+        "solved": { "type": "integer", "minimum": 0 },
+        "builds": { "type": "integer", "minimum": 0 },
+        "tool_calls": { "type": "integer", "minimum": 0 },
+        "searches": { "type": "integer", "minimum": 0 },
+        "input_tokens": { "type": ["integer", "null"], "minimum": 0 },
+        "output_tokens": { "type": ["integer", "null"], "minimum": 0 },
+        "cache_read_tokens": { "type": ["integer", "null"], "minimum": 0 },
+        "cache_write_tokens": { "type": ["integer", "null"], "minimum": 0 },
+        "cost_usd": { "type": ["number", "null"], "minimum": 0 },
+        "wall_s": { "type": "number", "minimum": 0 }
+      }
+    },
+    "tasks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "repeat", "workspace", "profile", "tags", "solved", "verdict", "start_distance",
+          "best_distance", "builds", "tool_calls", "searches", "calls_by_tool", "input_tokens", "output_tokens",
+          "cache_read_tokens", "cache_write_tokens", "cost_usd", "cost_kind", "wall_s", "exit", "log"],
+        "properties": {
+          "id": { "type": "string" },
+          "repeat": { "type": "integer", "minimum": 1 },
+          "workspace": { "type": "string" },
+          "profile": { "type": "string" },
+          "tags": { "type": "array", "items": { "type": "string" } },
+          "solved": { "type": "boolean" },
+          "verdict": { "type": "string" },
+          "start_distance": { "type": ["integer", "null"], "minimum": 0 },
+          "best_distance": { "type": ["integer", "null"], "minimum": 0 },
+          "builds": { "type": "integer", "minimum": 0 },
+          "tool_calls": { "type": "integer", "minimum": 0 },
+          "searches": { "type": "integer", "minimum": 0 },
+          "calls_by_tool": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
+          "input_tokens": { "type": ["integer", "null"], "minimum": 0 },
+          "output_tokens": { "type": ["integer", "null"], "minimum": 0 },
+          "cache_read_tokens": { "type": ["integer", "null"], "minimum": 0 },
+          "cache_write_tokens": { "type": ["integer", "null"], "minimum": 0 },
+          "cost_usd": { "type": ["number", "null"], "minimum": 0 },
+          "cost_kind": { "type": ["string", "null"] },
+          "wall_s": { "type": "number", "minimum": 0 },
+          "exit": { "enum": ["ok", "timeout", "driver-error", "call-limit", "token-limit", "cost-limit", "quota",
+            "not-run"] },
+          "log": { "type": ["string", "null"] },
+          "continuations": { "type": "integer", "minimum": 0 }
+        }
+      }
+    }
+  }
+}
