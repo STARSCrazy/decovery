@@ -1,17 +1,30 @@
 //! `status`: how far the naming and rebuilding of the analyzed functions is.
 
-use decovery_core::Address;
+use decovery_core::{Address, JobState, job_list};
 use serde_json::json;
 
 use super::find::distinct_callers;
+use super::job::job_view;
 use crate::output::{STALE_ANALYSIS, analysis_stale, status_counts};
 use crate::{FacadeError, Response, Session};
 
-/// Counts over all functions, the analysis' origin and the next thing to do.
+/// Counts over all functions, the analysis' origin, the queued and running jobs and the next thing to do (a
+/// running job first).
 pub fn status(session: &Session) -> Result<Response, FacadeError> {
     let c = status_counts(session);
     let stale = analysis_stale(session)?;
-    let next_step = next_step(session);
+    let jobs: Vec<_> = job_list(&session.workspace.root)?
+        .into_iter()
+        .filter(|j| !j.state.is_final())
+        .collect();
+    let next_step = match jobs.iter().find(|j| j.state == JobState::Running) {
+        Some(job) => format!(
+            "job {} ({}) is running: decovery job poll {}",
+            job.id, job.kind, job.id
+        ),
+        None => next_step(session),
+    };
+    let jobs: Vec<serde_json::Value> = jobs.iter().map(job_view).collect();
     let mut summary = format!(
         "{}/{} functions named ({} confirmed, {} assumed)",
         c.named, c.functions, c.confirmed, c.assumed
@@ -41,6 +54,7 @@ pub fn status(session: &Session) -> Result<Response, FacadeError> {
                 "error": c.rebuild_error,
                 "not_tried": c.rebuild_not_tried,
             },
+            "jobs": jobs,
             "next_step": next_step,
         }),
     ))

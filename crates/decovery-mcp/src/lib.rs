@@ -1,5 +1,10 @@
-//! MCP server of decovery: the twelve facade tools (`status`, `find`, `show`, `annotate`, `analyze`, `build`,
-//! `link`, `diagnose`, `search`, `verify`, `history`, `detail`) over stdio.
+//! MCP server of decovery: the thirteen facade tools (`status`, `find`, `show`, `annotate`, `analyze`, `build`,
+//! `link`, `diagnose`, `search`, `verify`, `history`, `detail`, `job`) over stdio.
+//!
+//! Long calls (`analyze`, `build`, `link`, `diagnose` with `deep`, `search`, `verify`) are jobs (design 5.13,
+//! ADR 0010). With `background` (default true for `search` and `verify`) they return at once with the job; the
+//! server's [`JobRunner`] runs them and `job` polls or cancels them. In the foreground the call waits but is
+//! registered as a job too, so `status` and `job` see it.
 //!
 //! `diagnose` with `deep`, `search` and `verify` run Decomp's tools through the `decomp-legacy` plugin (ADR 0007);
 //! the server keeps that plugin running between calls, so its Decomp server and Ghidra project stay open.
@@ -17,10 +22,10 @@ use std::time::Instant;
 
 use decovery_core::{CallRecord, ClaimSource, Confidence, append_call};
 use decovery_facade::{
-    AnalyzeOptions, AnnotateAction, Annotation, Budget, BuildRequest, Control,
-    DEFAULT_HISTORY_LIMIT, DEFAULT_LIMIT, DEFAULT_SIMILAR_LIMIT, FacadeError, FindQuery, FindWhat,
-    FunctionFilter, FunctionSort, LegacyCall, LegacyOperation, Progress, Response, Session,
-    Variant,
+    AnalyzeOptions, AnnotateAction, Annotation, Budget, BuildRequest, DEFAULT_HISTORY_LIMIT,
+    DEFAULT_LIMIT, DEFAULT_MAX_JOBS, DEFAULT_SIMILAR_LIMIT, FacadeError, FindQuery, FindWhat,
+    FunctionFilter, FunctionSort, JobAction, JobOperation, JobRunner, LegacyCall, LegacyOperation,
+    Progress, Response, Session, Variant, background_by_default,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
@@ -37,11 +42,12 @@ use rmcp::{
 };
 use serde::Deserialize;
 
-const INSTRUCTIONS: &str = "Twelve tools over one decovery workspace (a reverse-engineered executable). Rebuild \
+const INSTRUCTIONS: &str = "Thirteen tools over one decovery workspace (a reverse-engineered executable). Rebuild \
 verdicts (`build`, `link`) are tool findings; names, types and comments are claims with a source and confidence. \
 `diagnose` with `deep`, `search` and `verify` use Decomp through the decomp-legacy bridge: its reports are German \
 (`report_language`), its findings are evidence, and only decovery's own build sets verdicts. `history` lists what \
-was tried on a function.";
+was tried on a function. Long calls take `background: true` (`search` and `verify` run in the background by \
+default) and return a job id at once; `job` polls or cancels it and `detail` pages its result handle.";
 
 /// The marker a handler puts into a tool error's `_meta` when it refused the call (bad parameters) instead of
 /// running it; the call log records `refused` and the marker is removed before the answer goes out.
@@ -49,7 +55,7 @@ const REFUSED: &str = "decovery/refused";
 /// How rmcp starts the tool error for arguments that do not deserialize into the tool's parameters.
 const ARGUMENTS_REJECTED: &str = "failed to deserialize parameters:";
 
-/// Serves the twelve tools for the workspace at `root` on stdin/stdout until the client disconnects.
+/// Serves the thirteen tools for the workspace at `root` on stdin/stdout until the client disconnects.
 pub fn serve_stdio(root: PathBuf) -> Result<(), FacadeError> {
     serve_stdio_with_limits(root, None)
 }
@@ -58,6 +64,15 @@ pub fn serve_stdio(root: PathBuf) -> Result<(), FacadeError> {
 pub fn serve_stdio_with_limits(
     root: PathBuf,
     limits_path: Option<PathBuf>,
+) -> Result<(), FacadeError> {
+    serve_stdio_with_options(root, limits_path, DEFAULT_MAX_JOBS)
+}
+
+/// [`serve_stdio_with_limits`] running at most `max_jobs` background jobs at once (`decovery mcp --max-jobs`).
+pub fn serve_stdio_with_options(
+    root: PathBuf,
+    limits_path: Option<PathBuf>,
+    max_jobs: usize,
 ) -> Result<(), FacadeError> {
     let bench = limits_path
         .map(|path| -> Result<_, FacadeError> {
@@ -74,8 +89,10 @@ pub fn serve_stdio_with_limits(
         .build()
         .map_err(|e| FacadeError::Invalid(format!("cannot start the MCP server: {e}")))?;
     runtime.block_on(async move {
-        let mut server = Server::new(root);
+        let mut server = Server::new(root.clone());
         server.bench = bench;
+        // jobs a stopped server left are resumed before the first call
+        server.runner = Some(Arc::new(JobRunner::start(root, max_jobs)));
         let service = server
             .serve(rmcp::transport::stdio())
             .await
@@ -93,6 +110,7 @@ struct Server {
     root: PathBuf,
     tool_router: ToolRouter<Self>,
     bench: Option<Arc<Mutex<LimitState>>>,
+    runner: Option<Arc<JobRunner>>,
 }
 
 struct LimitState {
@@ -226,6 +244,9 @@ struct AnalyzeParams {
     plugin: Option<String>,
     /// Decompile only these functions again (names, addresses or `file:0x…`); default: all.
     functions: Option<Vec<String>>,
+    /// Run as a background job and return at once with its id (`job` polls it, `detail` pages its result);
+    /// default false.
+    background: Option<bool>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -257,6 +278,9 @@ struct BuildParams {
     /// Characters of the function list returned inline (default 8000); the rest is stored as a handle.
     /// Not used with `variants`.
     budget: Option<usize>,
+    /// Run as a background job and return at once with its id (`job` polls it, `detail` pages its result);
+    /// default false.
+    background: Option<bool>,
 }
 
 #[derive(Clone, Copy, Deserialize, JsonSchema)]
@@ -307,6 +331,9 @@ struct DiagnoseParams {
     all: Option<bool>,
     /// With `deep = slots`: time budget in minutes.
     minutes: Option<f64>,
+    /// With `deep`: run as a background job and return at once with its id (`job` polls it, `detail` pages its
+    /// result); default false.
+    background: Option<bool>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -328,6 +355,9 @@ struct SearchParams {
     apply: Option<bool>,
     /// Characters of Decomp's report returned inline (default 8000); the rest is stored as a handle.
     budget: Option<usize>,
+    /// Run as a background job and return at once with its id (`job` polls it, `detail` pages its result);
+    /// default true: a search runs minutes to hours.
+    background: Option<bool>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -344,6 +374,38 @@ struct VerifyParams {
     minutes: Option<f64>,
     /// Characters of Decomp's report returned inline (default 8000); the rest is stored as a handle.
     budget: Option<usize>,
+    /// Run as a background job and return at once with its id (`job` polls it, `detail` pages its result);
+    /// default true: a check runs minutes to hours.
+    background: Option<bool>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(deny_unknown_fields)]
+struct LinkParams {
+    /// Run as a background job and return at once with its id (`job` polls it, `detail` pages its result);
+    /// default false.
+    background: Option<bool>,
+}
+
+#[derive(Clone, Copy, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(rename_all = "kebab-case")]
+enum JobVerb {
+    List,
+    Poll,
+    Cancel,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(deny_unknown_fields)]
+struct JobParams {
+    /// `list` (every job, newest first), `poll` (one job's state, progress, summary and result handle) or
+    /// `cancel` (ask it to stop at its next cancellation point; a cancel during recording lets it complete).
+    action: JobVerb,
+    /// Job id (`j_` plus 12 hex characters) for `poll` and `cancel`.
+    id: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -377,6 +439,7 @@ impl Server {
             root,
             tool_router: Self::tool_router(),
             bench: None,
+            runner: None,
         }
     }
 
@@ -468,10 +531,8 @@ impl Server {
             plugin: p.plugin.unwrap_or_else(|| "ghidra".into()),
             functions: p.functions,
         };
-        self.with_progress(meta, peer, move |root, progress| {
-            decovery_facade::analyze(root, &options, progress)
-        })
-        .await
+        self.long(meta, peer, JobOperation::Analyze(options), p.background)
+            .await
     }
 
     #[tool(
@@ -500,20 +561,21 @@ impl Server {
                 None => variant,
             });
         }
-        self.with_progress(meta, peer, move |root, progress| {
-            decovery_facade::build(root, &request, progress)
-        })
-        .await
+        self.long(meta, peer, JobOperation::Build(request), p.background)
+            .await
     }
 
     #[tool(
         description = "Link the whole program with the original linker and compare it with the original file (MZ: all rebuild sources are compiled and linked; LE: identical rebuilds are inserted into the original image). Records the result; `data.result` is identical, differs or a link failure. After an identical MZ link the public symbols the knowledge base lacks are recorded from the linker map (`data.symbols_added`). Slow; reports progress."
     )]
-    async fn link(&self, meta: RequestMetaObject, peer: Peer<RoleServer>) -> CallToolResult {
-        self.with_progress(meta, peer, |root, progress| {
-            decovery_facade::link(root, progress)
-        })
-        .await
+    async fn link(
+        &self,
+        Parameters(p): Parameters<LinkParams>,
+        meta: RequestMetaObject,
+        peer: Peer<RoleServer>,
+    ) -> CallToolResult {
+        self.long(meta, peer, JobOperation::Link, p.background)
+            .await
     }
 
     #[tool(
@@ -527,8 +589,12 @@ impl Server {
     ) -> CallToolResult {
         let budget = budget(p.budget);
         let Some(deep) = p.deep else {
-            if p.source.is_some() || p.all.is_some() || p.minutes.is_some() {
-                return refused("source, all and minutes need deep");
+            if p.source.is_some()
+                || p.all.is_some()
+                || p.minutes.is_some()
+                || p.background.is_some()
+            {
+                return refused("source, all, minutes and background need deep");
             }
             return self
                 .blocking(move |root| {
@@ -548,10 +614,8 @@ impl Server {
         call.options.source = p.source.map(PathBuf::from);
         call.options.all = p.all.unwrap_or(false);
         call.options.minutes = p.minutes;
-        self.with_progress(meta, peer, move |root, progress| {
-            decovery_facade::diagnose_deep(root, &call, progress)
-        })
-        .await
+        self.long(meta, peer, JobOperation::DiagnoseDeep(call), p.background)
+            .await
     }
 
     #[tool(
@@ -575,10 +639,8 @@ impl Server {
         call.options.rounds = p.rounds;
         call.options.source = p.source.map(PathBuf::from);
         call.apply = p.apply.unwrap_or(false);
-        self.with_progress(meta, peer, move |root, progress| {
-            decovery_facade::search(root, &call, progress)
-        })
-        .await
+        self.long(meta, peer, JobOperation::Search(call), p.background)
+            .await
     }
 
     #[tool(
@@ -598,10 +660,8 @@ impl Server {
         call.budget = budget(p.budget);
         call.options.run = p.run;
         call.options.minutes = p.minutes;
-        self.with_progress(meta, peer, move |root, progress| {
-            decovery_facade::verify(root, &call, progress)
-        })
-        .await
+        self.long(meta, peer, JobOperation::Verify(call), p.background)
+            .await
     }
 
     #[tool(
@@ -631,6 +691,21 @@ impl Server {
             )
         })
         .await
+    }
+
+    #[tool(
+        description = "The workspace's jobs (long calls): `list` them, `poll` one (state queued, running, done, failed, cancelled or interrupted; progress; summary; `result`, a handle to page with `detail`) or `cancel` one."
+    )]
+    async fn job(&self, Parameters(p): Parameters<JobParams>) -> CallToolResult {
+        let action = match (p.action, p.id) {
+            (JobVerb::List, None) => JobAction::List,
+            (JobVerb::Poll, Some(id)) => JobAction::Poll(id),
+            (JobVerb::Cancel, Some(id)) => JobAction::Cancel(id),
+            (JobVerb::List, Some(_)) => return refused("list takes no id"),
+            (_, None) => return refused("poll and cancel need id"),
+        };
+        self.blocking(move |root| decovery_facade::job_tool(root, action))
+            .await
     }
 }
 
@@ -725,17 +800,39 @@ impl Server {
         }
         (denial.is_none(), denial)
     }
-    /// Runs the long facade call `op` on the blocking pool and forwards its progress as MCP progress
-    /// notifications when the client sent a progress token.
-    async fn with_progress<F>(
+    /// Runs the long operation `op`: in the background (`background`, default per kind) it is queued on the job
+    /// runner and the answer is the job at once; otherwise it runs as a registered job on the blocking pool and
+    /// its progress goes out as MCP progress notifications when the client sent a progress token.
+    async fn long(
         &self,
         meta: RequestMetaObject,
         peer: Peer<RoleServer>,
-        op: F,
-    ) -> CallToolResult
-    where
-        F: FnOnce(&Path, &Control) -> Result<Response, FacadeError> + Send + 'static,
-    {
+        op: JobOperation,
+        background: Option<bool>,
+    ) -> CallToolResult {
+        if background.unwrap_or_else(|| background_by_default(op.kind())) {
+            let Some(runner) = self.runner.clone() else {
+                return CallToolResult::error(vec![ContentBlock::text(
+                    "this server runs no background jobs",
+                )]);
+            };
+            return tool_result(
+                tokio::task::spawn_blocking(move || {
+                    let kind = op.kind();
+                    let job = runner.submit(kind, op.spec())?;
+                    Ok(Response::new(
+                        format!("job {} started ({kind})", job.id),
+                        serde_json::json!({ "job": {
+                            "id": job.id,
+                            "kind": job.kind,
+                            "state": job.state.id(),
+                            "created": job.created,
+                        }}),
+                    ))
+                })
+                .await,
+            );
+        }
         let root = self.root.clone();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Progress>();
         let forward = meta.get_progress_token().map(|token| {
@@ -757,7 +854,7 @@ impl Server {
             let progress = |p: Progress| {
                 let _ = tx.send(p);
             };
-            op(&root, &Control::progress_only(&progress))
+            decovery_facade::run_as_job(&root, &op, &progress)
         })
         .await;
         if let Some(forward) = forward {

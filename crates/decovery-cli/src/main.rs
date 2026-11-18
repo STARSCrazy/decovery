@@ -13,10 +13,9 @@ mod setup;
 
 use decovery_core::{CallRecord, ClaimSource, Confidence, append_call};
 use decovery_facade::{
-    AnalyzeOptions, AnnotateAction, Annotation, Budget, BuildRequest, Control,
-    DEFAULT_HISTORY_LIMIT, DEFAULT_LIMIT, DEFAULT_SIMILAR_LIMIT, FacadeError, FindQuery, FindWhat,
-    FunctionFilter, FunctionSort, LegacyCall, LegacyOperation, Progress, Response, Session,
-    Variant,
+    AnalyzeOptions, AnnotateAction, Annotation, Budget, BuildRequest, DEFAULT_HISTORY_LIMIT,
+    DEFAULT_LIMIT, DEFAULT_SIMILAR_LIMIT, FacadeError, FindQuery, FindWhat, FunctionFilter,
+    FunctionSort, JobOperation, LegacyCall, LegacyOperation, Progress, Response, Session, Variant,
 };
 
 /// Recover source code from old executables.
@@ -264,6 +263,15 @@ enum Command {
         /// Benchmark limits file (schema one); no limits are applied without it.
         #[arg(long)]
         limits: Option<PathBuf>,
+        /// Most background jobs run at once (the bridge plugin's `max_parallel`).
+        #[arg(long, default_value_t = decovery_facade::DEFAULT_MAX_JOBS, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
+        max_jobs: usize,
+    },
+    /// The workspace's jobs: long commands of the CLI and of an MCP server (`build`, `link`, `analyze`,
+    /// `diagnose --deep`, `search`, `verify`). A job's full result is a handle (`decovery detail`).
+    Job {
+        #[command(subcommand)]
+        what: JobCommand,
     },
     /// Install tools into `extern/` and register them in the user config.
     Setup {
@@ -274,6 +282,22 @@ enum Command {
     Bench {
         #[command(subcommand)]
         what: BenchCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum JobCommand {
+    /// Every job, newest first.
+    List,
+    /// One job's state, progress, summary and result handle.
+    Poll {
+        /// Job id (`j_` plus 12 hex characters).
+        id: String,
+    },
+    /// Ask a job to stop at its next cancellation point (a cancel during recording lets it complete).
+    Cancel {
+        /// Job id (`j_` plus 12 hex characters).
+        id: String,
     },
 }
 
@@ -537,6 +561,11 @@ fn call_record(command: &Command) -> Option<CallRecord> {
         Command::Link => ("link", None, None),
         Command::History { function, .. } => ("history", Some(function), None),
         Command::Detail { handle, .. } => ("detail", Some(handle), None),
+        Command::Job { what } => match what {
+            JobCommand::List => ("job", None, Some("list")),
+            JobCommand::Poll { id } => ("job", Some(id), Some("poll")),
+            JobCommand::Cancel { id } => ("job", Some(id), Some("cancel")),
+        },
     };
     let mut record = CallRecord::new(tool);
     record.actor = Some(decovery_facade::actor());
@@ -868,8 +897,18 @@ fn run(cli: Cli) -> ExitCode {
         Command::Bench {
             what: BenchCommand::Compare { a, b },
         } => bench_compare(&a, &b, cli.json),
-        Command::Mcp { limits } => {
-            finish(decovery_mcp::serve_stdio_with_limits(cli.workspace, limits))
+        Command::Mcp { limits, max_jobs } => finish(decovery_mcp::serve_stdio_with_options(
+            cli.workspace,
+            limits,
+            max_jobs,
+        )),
+        Command::Job { what } => {
+            let action = match what {
+                JobCommand::List => decovery_facade::JobAction::List,
+                JobCommand::Poll { id } => decovery_facade::JobAction::Poll(id),
+                JobCommand::Cancel { id } => decovery_facade::JobAction::Cancel(id),
+            };
+            finish(job(&cli.workspace, action, cli.json))
         }
         Command::Setup {
             what:
@@ -1430,18 +1469,7 @@ fn legacy(workspace: &Path, call: &LegacyCall, json: bool) -> Result<(), FacadeE
     if !json {
         call.budget = Budget { chars: usize::MAX };
     }
-    let response = match call.operation {
-        LegacyOperation::Chain
-        | LegacyOperation::Permute
-        | LegacyOperation::Beam
-        | LegacyOperation::Forms => {
-            decovery_facade::search(workspace, &call, &Control::progress_only(&progress))?
-        }
-        LegacyOperation::Equivalence | LegacyOperation::Behavior => {
-            decovery_facade::verify(workspace, &call, &Control::progress_only(&progress))?
-        }
-        _ => decovery_facade::diagnose_deep(workspace, &call, &Control::progress_only(&progress))?,
-    };
+    let response = decovery_facade::run_as_job(workspace, &JobOperation::legacy(call), &progress)?;
     if json {
         return print_json(&response);
     }
@@ -1508,8 +1536,11 @@ fn analyze(workspace: &Path, options: &AnalyzeOptions, json: bool) -> Result<(),
             None => eprintln!("{message}"),
         }
     };
-    let response =
-        decovery_facade::analyze(workspace, options, &Control::progress_only(&progress))?;
+    let response = decovery_facade::run_as_job(
+        workspace,
+        &JobOperation::Analyze(options.clone()),
+        &progress,
+    )?;
     print_summary(&response, json)
 }
 
@@ -1550,8 +1581,10 @@ fn build(
             .variants
             .push(Variant::function(read(path)?).with_label(path.display().to_string()));
     }
-    let response = decovery_facade::build(workspace, &request, &Control::progress_only(&progress))?;
-    if !request.variants.is_empty() {
+    let has_variants = !request.variants.is_empty();
+    let response =
+        decovery_facade::run_as_job(workspace, &JobOperation::Build(request), &progress)?;
+    if has_variants {
         return print_variants(&response, json);
     }
     let d = &response.data;
@@ -1603,7 +1636,7 @@ fn link(workspace: &Path, json: bool) -> Result<ExitCode, FacadeError> {
             eprintln!("{message}");
         }
     };
-    let response = decovery_facade::link(workspace, &Control::progress_only(&progress))?;
+    let response = decovery_facade::run_as_job(workspace, &JobOperation::Link, &progress)?;
     let d = &response.data;
     let code = match d["result"].as_str() {
         Some("identical") => ExitCode::SUCCESS,
@@ -1674,6 +1707,34 @@ fn print_variants(response: &Response, json: bool) -> Result<bool, FacadeError> 
 }
 
 /// The JSON envelope, or the summary on stdout and `data.warnings` on stderr.
+/// `job list | poll | cancel`: the summary, and for `list` one line per job.
+fn job(
+    workspace: &Path,
+    action: decovery_facade::JobAction,
+    json: bool,
+) -> Result<(), FacadeError> {
+    let response = decovery_facade::job_tool(workspace, action)?;
+    if json {
+        return print_json(&response);
+    }
+    println!("{}", response.summary);
+    for j in response.data["jobs"].as_array().into_iter().flatten() {
+        let text = |key: &str| j[key].as_str().unwrap_or("").to_string();
+        let note = match j["state"].as_str() {
+            Some("failed" | "interrupted") => text("error"),
+            _ => text("summary"),
+        };
+        println!(
+            "{}\t{}\t{}\t{}\t{note}",
+            text("id"),
+            text("kind"),
+            text("state"),
+            text("created")
+        );
+    }
+    Ok(())
+}
+
 fn print_summary(response: &Response, json: bool) -> Result<(), FacadeError> {
     if json {
         return print_json(response);

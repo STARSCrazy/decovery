@@ -448,9 +448,17 @@ use the whole machine and later several machines, without changing any result.
   runs through runner pools whose size each provider declares in `initialize` (`max_parallel`, memory per
   instance) — the unicorn host scales with cores, DOSBox and Ghidra instances with memory. One global limit
   (`--jobs`, default: logical cores) caps the total.
-- **Jobs.** Every long operation is a job with persistent state in `cache/jobs/<id>/` (specification, progress,
-  partial results). Jobs survive a crash or restart and resume from their cached units; MCP calls return a handle
-  at once; `job` polls and cancels, `detail` fetches results.
+  *Amended 2026-11-18 (phase 3, plan decision 4):* phase 3 does not build the DAG executor over units. It keeps
+  the global job slots (`--jobs`) for runner work and rayon for CPU work, and adds persistent jobs (below). The
+  DAG executor moves to the port of `search` (ADR 0008 step 3), its first user.
+- **Jobs.** Every long operation (`build`, `link`, `analyze`, `diagnose` with `deep`, `search`, `verify`) is a job
+  with persistent state in `cache/jobs/<id>/` (spec, state, progress, summary, result handle; ADR 0010). Jobs
+  survive a crash or restart: the MCP server's job runner (`decovery mcp --max-jobs N`, default 2, the bridge
+  plugin's `max_parallel`) re-queues a `queued` job and a `running` job whose lease is free, the latter once
+  (`resumed`); lost a second time it ends `interrupted`. A re-run is cheap because its units come from the object
+  cache and a search continues from the shadow's logbook. MCP calls with `background` (default for `search` and
+  `verify`) return the job at once; `job` lists, polls and cancels, `detail` pages the result handle, and `status`
+  lists queued and running jobs. CLI commands register their job too and wait for it.
 - **Scale-out.** The unit protocol is the plugin protocol. A remote worker is a plugin host reached over TCP or SSH
   that pulls inputs from and pushes results to the content-addressed store; no shared file system is assumed. It is
   built when a single machine is the bottleneck, with its own ADR.

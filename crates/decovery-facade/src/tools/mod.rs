@@ -7,6 +7,7 @@ mod detail;
 mod diagnose;
 mod find;
 mod history;
+mod job;
 mod legacy;
 mod link;
 mod link_symbols;
@@ -23,6 +24,7 @@ pub use find::{
     DEFAULT_LIMIT, DEFAULT_SIMILAR_LIMIT, FindQuery, FindWhat, FunctionFilter, FunctionSort, find,
 };
 pub use history::{ACTOR_ENV, DEFAULT_HISTORY_LIMIT, actor, history, history_archive, set_actor};
+pub use job::{JobAction, job_tool};
 pub use legacy::{
     LEGACY_PLUGIN, LegacyCall, LegacyOperation, LegacyOptions, SHADOW_DIR, diagnose_deep,
     keep_legacy_plugin, search, verify,

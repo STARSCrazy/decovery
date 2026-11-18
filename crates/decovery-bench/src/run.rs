@@ -535,6 +535,16 @@ fn evaluate(
             ("{max_searches}", suite.defaults.max_searches.to_string()),
             ("{wall_minutes}", suite.defaults.wall_minutes.to_string()),
             ("{tools}", tools.into()),
+            (
+                "{jobs}",
+                if tools == "core-legacy" {
+                    "search and verify run as background jobs: poll them with job (action poll); a job's                      builds count when its result is recorded.
+"
+                } else {
+                    ""
+                }
+                .into(),
+            ),
         ] {
             prompt = prompt.replace(key, &value);
         }
