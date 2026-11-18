@@ -71,6 +71,9 @@ enum Command {
     Show {
         /// Function name or address.
         target: String,
+        /// Print the instruction address ranges each pseudo-C line came from in front of it.
+        #[arg(long)]
+        lines: bool,
     },
     /// Why a rebuilt function differs from the original and what to try: findings of the diagnosis rules, the
     /// kind of deviation and the instructions side by side. Reads the object of the last `build`.
@@ -521,7 +524,7 @@ fn call_record(command: &Command) -> Option<CallRecord> {
         | Command::Setup { .. }
         | Command::Bench { .. } => return None,
         Command::Compare { function, .. } => ("compare", Some(function), None),
-        Command::Show { target } => ("show", Some(target), None),
+        Command::Show { target, .. } => ("show", Some(target), None),
         Command::Diagnose { target, deep, .. } => (
             "diagnose",
             Some(target),
@@ -649,7 +652,7 @@ fn run(cli: Cli) -> ExitCode {
                 }
             }
         }
-        Command::Show { target } => finish(show(&cli.workspace, &target, cli.json)),
+        Command::Show { target, lines } => finish(show(&cli.workspace, &target, lines, cli.json)),
         Command::Diagnose {
             target, deep: None, ..
         } => finish(diagnose(&cli.workspace, &target, cli.json)),
@@ -1401,12 +1404,22 @@ fn print_json(response: &Response) -> Result<(), FacadeError> {
     Ok(())
 }
 
-fn show(workspace: &Path, target: &str, json: bool) -> Result<(), FacadeError> {
+fn show(workspace: &Path, target: &str, lines: bool, json: bool) -> Result<(), FacadeError> {
     let session = Session::open(workspace)?;
+    let run = |budget| {
+        if lines {
+            decovery_facade::show_with_lines(&session, target, budget)
+        } else {
+            decovery_facade::show(&session, target, budget)
+        }
+    };
     if json {
-        return print_json(&decovery_facade::show(&session, target, Budget::default())?);
+        return print_json(&run(Budget::default())?);
     }
-    let response = decovery_facade::show(&session, target, Budget { chars: usize::MAX })?;
+    let response = run(Budget { chars: usize::MAX })?;
+    if let Some(signature) = response.data["signature"].as_str() {
+        println!("/* decompiler signature: {signature} */");
+    }
     if let Some(text) = response.data["text"].as_str() {
         print!("{text}");
     }
@@ -1619,6 +1632,9 @@ fn build(
                 f["verdict"].as_str().unwrap_or(""),
                 blockers.join(" ")
             );
+            if let Some(near) = f["near"].as_str() {
+                println!("  {near}");
+            }
         }
     }
     for hint in d["hints"].as_array().into_iter().flatten() {

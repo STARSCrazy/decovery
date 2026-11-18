@@ -129,6 +129,9 @@ struct ShowParams {
     target: String,
     /// Characters of text returned inline (default 8000); the rest is stored as a handle.
     budget: Option<usize>,
+    /// Put the instruction address ranges each pseudo-C line came from in front of it (when the analyzer
+    /// recorded them).
+    lines: Option<bool>,
 }
 
 #[derive(Clone, Copy, Deserialize, JsonSchema)]
@@ -502,8 +505,15 @@ impl Server {
     )]
     async fn show(&self, Parameters(p): Parameters<ShowParams>) -> CallToolResult {
         let budget = budget(p.budget);
-        self.blocking(move |root| decovery_facade::show(&Session::open(root)?, &p.target, budget))
-            .await
+        self.blocking(move |root| {
+            let session = Session::open(root)?;
+            if p.lines == Some(true) {
+                decovery_facade::show_with_lines(&session, &p.target, budget)
+            } else {
+                decovery_facade::show(&session, &p.target, budget)
+            }
+        })
+        .await
     }
 
     #[tool(

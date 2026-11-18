@@ -30,6 +30,6 @@ pub use legacy::{
     keep_legacy_plugin, search, verify,
 };
 pub use link::link;
-pub use show::show;
+pub use show::{c_line_near, differs_near, show, show_with_lines};
 pub use status::status;
 pub use variants::{MAX_VARIANTS, Variant};

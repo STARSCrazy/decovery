@@ -1122,7 +1122,9 @@ fn keep_objects(
     Ok(())
 }
 
-fn function_json(r: &RebuildRecord) -> Value {
+/// One function of the response; a differing one with a first difference and line metadata also carries the
+/// pseudo-C line of the original it is near (`c_line`, `near`).
+fn function_json(root: &Path, r: &RebuildRecord) -> Value {
     let mut v = json!({
         "address": r.address.to_string(),
         "name": r.name,
@@ -1136,6 +1138,13 @@ fn function_json(r: &RebuildRecord) -> Value {
     });
     if !r.diagnoses.is_empty() {
         v["diagnoses"] = json!(r.diagnoses);
+    }
+    if r.result == RebuildResult::Differs
+        && let Some(offset) = r.first_difference
+        && let Some((line, text)) = super::c_line_near(root, r.address, offset)
+    {
+        v["c_line"] = json!(line);
+        v["near"] = json!(format!("differs near C line {line}: {text}"));
     }
     v
 }
@@ -1221,7 +1230,7 @@ fn respond(
     let mut used = 0usize;
     let mut shown = Vec::new();
     for r in &ordered {
-        let v = function_json(r);
+        let v = function_json(root, r);
         let n = v.to_string().len();
         if used + n > budget {
             break;
@@ -1233,7 +1242,7 @@ fn respond(
     if shown.len() < records.len() {
         let text: String = records
             .iter()
-            .map(|r| format!("{}\n", function_json(r)))
+            .map(|r| format!("{}\n", function_json(root, r)))
             .collect();
         let mut handle = store_handle(root, "build-functions", &text)?;
         handle.description = format!(

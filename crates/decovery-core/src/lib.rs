@@ -6,6 +6,7 @@ pub mod archive;
 pub mod attempts;
 pub mod bench;
 pub mod calls;
+pub mod decompile_info;
 pub mod jobs;
 pub mod knowledge;
 pub mod migrate;
@@ -30,6 +31,7 @@ pub use attempts::{
 };
 pub use bench::{BenchLimits, BenchUsage};
 pub use calls::{CALLS_DIR, CallRecord, append_call};
+pub use decompile_info::{AddressRange, DecompileInfo, LineHit, LineRanges, Signature, Variable};
 pub use jobs::{
     JOBS_DIR, JobLease, JobProgress, JobRecord, JobState, job_cancel_requested, job_create,
     job_create_leased, job_lease, job_list, job_load, job_request_cancel, job_save,

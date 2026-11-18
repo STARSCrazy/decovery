@@ -11,9 +11,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use decovery_core::{
-    Address, Analysis, AnalyzedFunction, CallEdge, Confidence, DataAccess, Program, Provider,
-    ReferenceKind, StringItem, Symbol, SymbolKind, Workspace, WorkspaceLock, knowledge_hash,
-    read_rebuild, read_references, write_atomic,
+    Address, Analysis, AnalyzedFunction, CallEdge, Confidence, DataAccess, DecompileInfo, Program,
+    Provider, ReferenceKind, StringItem, Symbol, SymbolKind, Workspace, WorkspaceLock,
+    knowledge_hash, read_rebuild, read_references, write_atomic,
 };
 use decovery_plugin::protocol::INLINE_LIMIT;
 use decovery_plugin::{
@@ -178,6 +178,8 @@ struct Decompiled {
     start: Address,
     body: String,
     error: Option<String>,
+    /// Line ranges, signature and variables (decompiler v2 optional fields); empty from older plugins.
+    info: DecompileInfo,
 }
 
 struct Outcome {
@@ -220,6 +222,43 @@ struct DecompileEntry {
     error: Option<String>,
     #[serde(default)]
     disassembly: Vec<(String, String)>,
+    #[serde(default)]
+    lines: Option<Value>,
+    #[serde(default)]
+    signature: Option<Value>,
+    #[serde(default)]
+    variables: Option<Value>,
+}
+
+/// The optional metadata of an entry; a field that does not decode is dropped with a warning (the pseudo-C
+/// stays usable without it).
+fn entry_info(
+    name: &str,
+    at: Address,
+    entry: &mut DecompileEntry,
+    warnings: &mut Vec<String>,
+) -> DecompileInfo {
+    fn field<T: serde::de::DeserializeOwned>(
+        value: Option<Value>,
+        what: &str,
+        name: &str,
+        at: Address,
+        warnings: &mut Vec<String>,
+    ) -> Option<T> {
+        let value = value?;
+        match serde_json::from_value(value) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                warnings.push(format!("{name}: bad {what} for {at}: {e}; ignored"));
+                None
+            }
+        }
+    }
+    DecompileInfo {
+        lines: field(entry.lines.take(), "lines", name, at, warnings),
+        signature: field(entry.signature.take(), "signature", name, at, warnings),
+        variables: field(entry.variables.take(), "variables", name, at, warnings),
+    }
 }
 
 /// All plugin calls; the caller shuts the plugin down afterwards, also on error.
@@ -380,11 +419,15 @@ fn collect_batch(
     let mut out = Vec::with_capacity(batch.len());
     for &start in batch {
         let decompiled = match by_address.remove(&start) {
-            Some(DecompileEntry {
-                path: Some(path),
-                error: None,
-                ..
-            }) => {
+            Some(
+                mut entry @ DecompileEntry {
+                    path: Some(_),
+                    error: None,
+                    ..
+                },
+            ) => {
+                let info = entry_info(name, start, &mut entry, warnings);
+                let path = entry.path.unwrap_or_default();
                 let bytes = std::fs::read(&path).map_err(|e| {
                     FacadeError::Plugin(format!("{name}: cannot read decompiled file {path}: {e}"))
                 })?;
@@ -392,6 +435,7 @@ fn collect_batch(
                     start,
                     body: String::from_utf8_lossy(&bytes).replace("\r\n", "\n"),
                     error: None,
+                    info,
                 }
             }
             Some(entry) => {
@@ -402,6 +446,7 @@ fn collect_batch(
                     start,
                     body: failure_body(&error, &entry.disassembly),
                     error: Some(error),
+                    info: DecompileInfo::default(),
                 }
             }
             None => {
@@ -410,6 +455,7 @@ fn collect_batch(
                     start,
                     body: failure_body(&error, &[]),
                     error: Some(error),
+                    info: DecompileInfo::default(),
                 }
             }
         };
@@ -545,6 +591,7 @@ fn store(
     // analysis with old bodies.
     for d in &outcome.decompiled {
         Analysis::save_decompiled(root, d.start, &d.body, lock)?;
+        d.info.save(root, d.start, lock)?;
     }
     analysis.save(root, lock)?;
     // R9: a full run removes the bodies of functions that are gone; a selection run never prunes.
@@ -807,6 +854,9 @@ mod tests {
             path: None,
             error: Some(error.into()),
             disassembly: Vec::new(),
+            lines: None,
+            signature: None,
+            variables: None,
         };
         let batch = [Address::Flat(0x10000), Address::Flat(0x10100)];
         let mut warnings = Vec::new();
@@ -830,6 +880,27 @@ mod tests {
         assert_eq!(warnings.len(), 2, "{warnings:?}");
         assert!(warnings[0].contains("duplicate") && warnings[0].contains("flat:00010000"));
         assert!(warnings[1].contains("not requested") && warnings[1].contains("flat:00020000"));
+    }
+
+    #[test]
+    fn bad_metadata_fields_are_dropped_with_a_warning() {
+        let mut entry: DecompileEntry = serde_json::from_value(json!({
+            "address": "flat:00010000",
+            "path": "x.c",
+            "lines": [{"line": "one"}],
+            "signature": {"return_type": "int"},
+        }))
+        .unwrap();
+        let mut warnings = Vec::new();
+        let info = entry_info("fake", Address::Flat(0x10000), &mut entry, &mut warnings);
+        assert_eq!(info.lines, None);
+        assert_eq!(info.variables, None);
+        assert_eq!(
+            info.signature.and_then(|s| s.return_type).as_deref(),
+            Some("int")
+        );
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("bad lines for flat:00010000"));
     }
 
     #[test]

@@ -109,6 +109,41 @@ fn differing_function_has_blockers() {
     assert_eq!(response.summary, "a.c: 2 functions, 1 identical, 1 differ");
 }
 
+/// The original's line map (as the analyzer stores it) for `sub`: line 3 covers bytes 0..=2, line 4 bytes
+/// 8..=9; byte 6 is unmapped (a temporary), so it takes line 3, the nearest mapped instruction before it.
+#[test]
+fn differing_function_names_the_c_line_near_the_mismatch() {
+    let python = python_or_skip!();
+    let f = fixture(&python, "");
+    let dir = f.root().join("knowledge/analysis/decompiled");
+    std::fs::create_dir_all(&dir).unwrap();
+    let stem = SUB_AT.to_string().replace(':', "_");
+    std::fs::write(
+        dir.join(format!("{stem}.c")),
+        "int sub(int a, int b)\n{\n  int t = a;\n  return t - b;\n}\n",
+    )
+    .unwrap();
+    let at = |d: i64| SUB_AT.offset_by(d).unwrap().to_string();
+    let info = serde_json::json!({
+        "lines": [
+            {"line": 1, "ranges": []},
+            {"line": 3, "ranges": [{"start": at(0), "end": at(2)}]},
+            {"line": 4, "ranges": [{"start": at(8), "end": at(9)}]},
+        ],
+    });
+    std::fs::write(dir.join(format!("{stem}.json")), info.to_string()).unwrap();
+    let mut sub = SUB.to_vec();
+    sub[6] = 0x33;
+    f.write_obj("A", &[("_add", ADD), ("_sub", &sub)]);
+    let response = run(&f, &["a.c"]);
+    let functions = response.data["functions"].as_array().unwrap();
+    let shown = functions.iter().find(|v| v["name"] == "sub").unwrap();
+    assert_eq!(shown["c_line"], 3);
+    assert_eq!(shown["near"], "differs near C line 3: int t = a;");
+    let add = functions.iter().find(|v| v["name"] == "add").unwrap();
+    assert_eq!(add.get("near"), None, "identical functions carry no line");
+}
+
 #[test]
 fn unknown_function_is_a_hint() {
     let python = python_or_skip!();
