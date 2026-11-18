@@ -127,3 +127,41 @@ Problems for step 3: agents stop on their own after 5-19 builds with a nonidenti
 ## 2026-11-18 Task 9 step 3 (probe re-run with the continue prompt)
 Run 20261118-081457-2c2c8c (same private suite, tasks 3-7, Sonnet, parallel 1, same limits): done in 10.4 min, 1 of 5 solved (task 3: 71 -> 0), others best distance 103, 1, 1, 1 (before: 105, 1, 4, 42). 70 builds, 71 calls, input 150, output 68 412, cache read 1 936 310, cache write 149 195, estimated 1.475 USD, wall 626 s. Rate limit after run: 5 h 12 %, 7 d 12 %, no quota pause.
 Agents still stop on their own inside the limits (4-28 of 40 builds); three stopped at distance 1. Prompt helped only partly; harness re-prompt (needs ADR 0009 change) remains the open candidate. Tables in docs/parity/phase-3.md. Step 4 (core+legacy) not run.
+
+## 2026-11-18 Task 14 steps 1-4 (full-build throughput, R1)
+Setup: copy Temp\bench-real\first-ws (first target, 49 files, 650 functions), object cache `cache/rebuild/objects`
+deleted before every run, release build, `tools/measure/busy_cores.py` (machine-wide GetSystemTimes, 250 ms).
+Machine now has 20 logical cores (slots = 20). First run after a fresh exe is discarded (virus scan of the new exe:
++2 s outside the build). Result unchanged in every run: 650 functions, 618 identical, 32 differ (function verdicts
+and blockers equal before/after); cached objects differ only in the compiler's header time stamp (3 bytes + checksum).
+
+Step 1, before (HEAD 74364b8; timeline from the instrumented build with the old scheduling, run tl2):
+| run | wall | CPU (machine) | busy cores avg / peak | busy share | total_ms | compile | compare | record |
+|---|---|---|---|---|---|---|---|---|
+| before2 | 4.05 s | 34.5 s | 8.5 / 19.9 | 0.43 | 3 899 | 3 061 | 96 | 225 |
+| before3 | 3.83 s | 33.6 s | 8.8 / 18.8 | 0.44 | 3 789 | 2 877 | 104 | 232 |
+| tl2 (timeline) | 4.26 s | 33.9 s | 8.0 / 20.0 | 0.40 | 4 066 | 3 109 | 104 | 236 |
+(before1 was 13.7 s wall with record 8 982 ms: first build on this copy after migration, rewrote outputs; not counted.)
+Timeline tl2: stage 0-376 ms; compile 376-3486: request queued at 650 (274 ms plan + plugin start), jobs start
+832-1074 (worker spawn), 33 jobs, longest 1 857 ms, sum of job wall 29.4 s, job CPU 18.4 s (wall > CPU: 20 workers on
+20 logical cores), last job ends 2 785, then 700 ms until the compile phase ends (objects stored one after another
+with fsync, plugin shutdown waiting for its pool); serial outside compile 957 ms.
+Lower bound 2 814 ms = serial 957 + max(longest 1 857, 29 359 / 20 = 1 468); saturation 0.80; efficiency 0.69;
+literal busy share 0.40-0.44.
+
+Step 4 changes (each idle shown by the timeline): runners start in a thread while the sources are staged; runners
+shut down in a thread, joined before the build answers; objects read and stored in the cache in parallel (rayon);
+TMP dirs removed in parallel; affected output files written in parallel (same bytes, test). Not done, no idle
+shown: longest-first by previous time (first start + longest job already = last end, ~2.4 s); streaming
+`job_done` (remaining read/store tail ~170 ms). Remaining idle: worker spawn in unicorn-dos, request queued ->
+first job start ~170-200 ms on all 20 slots (needs a warm pool before the request: protocol decision).
+
+After (3 cold runs, c1-c3):
+| run | wall | CPU | busy avg / peak | busy share | total_ms | compile | lower bound | saturation | efficiency |
+|---|---|---|---|---|---|---|---|---|---|
+| c1 | 3.27 s | 34.4 s | 10.5 / 18.5 | 0.53 | 3 172 | 2 386 | 2 696 | 0.813 | 0.850 |
+| c2 | 3.23 s | 33.3 s | 10.3 / 19.8 | 0.52 | 3 184 | 2 412 | 2 707 | 0.798 | 0.850 |
+| c3 | 3.23 s | 32.2 s | 10.0 / 19.1 | 0.50 | 3 130 | 2 386 | 2 654 | 0.795 | 0.848 |
+Median: wall 3.23 s (before 3.8-4.3), saturation 0.80, efficiency 0.85 (before 0.69), busy share 0.52 (before 0.43).
+Decision 5 (saturation >= 0.90 and efficiency >= 0.85) open with the owner: efficiency met at the edge, saturation
+not (worker start-up). Step 5 not run.
