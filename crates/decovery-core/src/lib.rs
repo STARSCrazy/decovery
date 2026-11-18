@@ -32,7 +32,7 @@ pub use bench::{BenchLimits, BenchUsage};
 pub use calls::{CALLS_DIR, CallRecord, append_call};
 pub use jobs::{
     JOBS_DIR, JobLease, JobProgress, JobRecord, JobState, job_cancel_requested, job_create,
-    job_lease, job_list, job_load, job_request_cancel, job_save,
+    job_create_leased, job_lease, job_list, job_load, job_request_cancel, job_save,
 };
 pub use knowledge::{
     ClaimSource, Confidence, LineComment, LocalVariable, RefutedClaim, Symbol, SymbolKind,

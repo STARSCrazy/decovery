@@ -145,31 +145,30 @@ fn job_dir(root: &Path, id: &str) -> Result<PathBuf, WorkspaceError> {
     }
 }
 
-/// Creates a new job of `kind` in state `queued`. Its id is the creation time in milliseconds as 12 hex digits,
+/// Creates the directory of a new job and returns its id: the creation time in milliseconds as 12 hex digits,
 /// counted up while a directory of that id exists (another job created in the same millisecond).
-pub fn job_create(
-    root: &Path,
-    kind: &str,
-    spec: serde_json::Value,
-) -> Result<JobRecord, WorkspaceError> {
+fn new_job_dir(root: &Path) -> Result<String, WorkspaceError> {
     let jobs = root.join(JOBS_DIR);
     std::fs::create_dir_all(&jobs).map_err(|e| io_error(&jobs, e))?;
     let mut n = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0))
         & 0xFFFF_FFFF_FFFF;
-    let id = loop {
+    loop {
         let id = format!("j_{n:012x}");
         let dir = jobs.join(&id);
         match std::fs::create_dir(&dir) {
-            Ok(()) => break id,
+            Ok(()) => return Ok(id),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 n = (n + 1) & 0xFFFF_FFFF_FFFF;
             }
             Err(e) => return Err(io_error(&dir, e)),
         }
-    };
-    let job = JobRecord {
+    }
+}
+
+fn new_record(id: String, kind: &str, spec: serde_json::Value) -> JobRecord {
+    JobRecord {
         schema: SCHEMA,
         id,
         kind: kind.to_string(),
@@ -184,9 +183,43 @@ pub fn job_create(
         result: None,
         error: None,
         extra: serde_json::Map::new(),
-    };
+    }
+}
+
+/// Creates a new job of `kind` in state `queued` (see [`new_job_dir`] for its id).
+pub fn job_create(
+    root: &Path,
+    kind: &str,
+    spec: serde_json::Value,
+) -> Result<JobRecord, WorkspaceError> {
+    let job = new_record(new_job_dir(root)?, kind, spec);
     job_save(root, &job)?;
     Ok(job)
+}
+
+/// Creates a new job of `kind` that the caller runs itself: the lease is taken before `job.json` is written (state
+/// `running`), so no other process ever sees the job free to run. Until then the directory is no job
+/// ([`job_list`] skips it).
+pub fn job_create_leased(
+    root: &Path,
+    kind: &str,
+    spec: serde_json::Value,
+) -> Result<(JobRecord, JobLease), WorkspaceError> {
+    let id = new_job_dir(root)?;
+    let lease = job_lease(root, &id)?.ok_or_else(|| {
+        io_error(
+            &root.join(JOBS_DIR).join(&id).join(LEASE_FILE),
+            std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                format!("the lease of the new job {id} is taken"),
+            ),
+        )
+    })?;
+    let mut job = new_record(id, kind, spec);
+    job.state = JobState::Running;
+    job.started = Some(now_utc());
+    job_save(root, &job)?;
+    Ok((job, lease))
 }
 
 /// Writes `job.json` of `job` atomically.

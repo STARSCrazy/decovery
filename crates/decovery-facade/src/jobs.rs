@@ -14,8 +14,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use decovery_core::{
-    JobLease, JobProgress, JobRecord, JobState, job_cancel_requested, job_create, job_lease,
-    job_list, job_load, job_save, now_utc,
+    JobProgress, JobRecord, JobState, job_cancel_requested, job_create, job_create_leased,
+    job_lease, job_list, job_load, job_save, now_utc,
 };
 use decovery_plugin::{CancelToken, Progress};
 use serde::{Deserialize, Serialize};
@@ -379,19 +379,9 @@ pub fn run_as_job(
     op: &JobOperation,
     progress: &dyn Fn(Progress),
 ) -> Result<Response, FacadeError> {
-    let registered = job_create(root, op.kind(), op.spec()).and_then(|job| {
-        let lease = job_lease(root, &job.id)?;
-        Ok((job, lease))
-    });
-    match registered {
-        Ok((mut job, Some(_lease))) => {
-            start_running(root, &mut job);
-            run_tracked(root, job, op, progress)
-        }
-        Ok((job, None)) => {
-            warn(&format!("job {}", job.id), "its lease is taken");
-            op.run(root, &Control::progress_only(progress))
-        }
+    // the lease is held before the record is visible, so no server can run the job too
+    match job_create_leased(root, op.kind(), op.spec()) {
+        Ok((job, _lease)) => run_tracked(root, job, op, progress),
         Err(e) => {
             warn("the job was not registered", e);
             op.run(root, &Control::progress_only(progress))
@@ -458,13 +448,34 @@ impl JobRunner {
 
 impl Drop for JobRunner {
     fn drop(&mut self) {
+        // under the queue lock, so no worker is between its stop check and its wait
+        let queue = self.shared.queue();
         self.shared.stop.store(true, Ordering::SeqCst);
+        drop(queue);
         self.shared.ready.notify_all();
     }
 }
 
+/// Recovers the job `job`, found `running` while its lease is free (the caller now holds it): the process that ran
+/// it stopped. The first time it is queued again with `resumed + 1` and returned; a second time it ends
+/// `interrupted` (ADR 0010, point 4).
+fn recover(root: &Path, mut job: JobRecord) -> Option<JobRecord> {
+    if job.resumed >= 1 {
+        job.state = JobState::Interrupted;
+        job.error = Some(STOPPED_TWICE.into());
+        job.finished = Some(now_utc());
+        save(root, &job);
+        None
+    } else {
+        job.resumed += 1;
+        job.state = JobState::Queued;
+        save(root, &job);
+        Some(job)
+    }
+}
+
 /// The ids to queue at start, oldest first: every `queued` job, and every `running` job whose lease is free (its
-/// process stopped), re-run with `resumed + 1`, or ended `interrupted` when it was resumed before.
+/// process stopped), recovered by [`recover`]. Each job is decided from its record read again under its lease.
 fn resume(root: &Path) -> Vec<String> {
     let jobs = match job_list(root) {
         Ok(jobs) => jobs,
@@ -474,28 +485,31 @@ fn resume(root: &Path) -> Vec<String> {
         }
     };
     let mut queue = Vec::new();
-    for mut job in jobs.into_iter().rev() {
+    for listed in jobs.into_iter().rev() {
+        if listed.state.is_final() {
+            continue;
+        }
+        let _lease = match job_lease(root, &listed.id) {
+            Ok(Some(lease)) => lease,
+            // another process runs it
+            Ok(None) => continue,
+            Err(e) => {
+                warn(&format!("job {}", listed.id), e);
+                continue;
+            }
+        };
+        // it may have changed since it was listed
+        let job = match job_load(root, &listed.id) {
+            Ok(job) => job,
+            Err(e) => {
+                warn(&format!("job {}", listed.id), e);
+                continue;
+            }
+        };
         match job.state {
             JobState::Queued => queue.push(job.id),
             JobState::Running => {
-                let _lease: JobLease = match job_lease(root, &job.id) {
-                    Ok(Some(lease)) => lease,
-                    // another process runs it
-                    Ok(None) => continue,
-                    Err(e) => {
-                        warn(&format!("job {}", job.id), e);
-                        continue;
-                    }
-                };
-                if job.resumed >= 1 {
-                    job.state = JobState::Interrupted;
-                    job.error = Some(STOPPED_TWICE.into());
-                    job.finished = Some(now_utc());
-                    save(root, &job);
-                } else {
-                    job.resumed += 1;
-                    job.state = JobState::Queued;
-                    save(root, &job);
+                if let Some(job) = recover(root, job) {
                     queue.push(job.id);
                 }
             }
@@ -540,6 +554,13 @@ fn run_queued(root: &Path, id: &str) {
     if job.state.is_final() {
         return;
     }
+    if job.state == JobState::Running {
+        // its lease was free: the process running it stopped
+        job = match recover(root, job) {
+            Some(job) => job,
+            None => return,
+        };
+    }
     if job_cancel_requested(root, id) {
         job.state = JobState::Cancelled;
         job.summary = Some("cancelled before it started".into());
@@ -558,4 +579,59 @@ fn run_queued(root: &Path, id: &str) {
     start_running(root, &mut job);
     // the outcome is in the job record
     let _ = run_tracked(root, job, &op, &|_| {});
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A job left `running` by a process that stopped, with `resumed` restarts before.
+    fn lost_job(root: &Path, spec: Value, resumed: u32) -> String {
+        let mut job = job_create(root, "build", spec).unwrap();
+        job.state = JobState::Running;
+        job.started = Some(now_utc());
+        job.resumed = resumed;
+        job_save(root, &job).unwrap();
+        job.id
+    }
+
+    #[test]
+    fn worker_ends_twice_lost_job_interrupted() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let id = lost_job(root, json!({}), 1);
+        run_queued(root, &id);
+        let job = job_load(root, &id).unwrap();
+        assert_eq!(job.state, JobState::Interrupted, "{job:?}");
+        assert_eq!(job.error.as_deref(), Some(STOPPED_TWICE));
+        assert_eq!(job.resumed, 1);
+    }
+
+    #[test]
+    fn worker_counts_rerun_of_lost_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // a spec that is no build request: the rerun fails at once, without running anything
+        let id = lost_job(root, json!({"no": 1}), 0);
+        run_queued(root, &id);
+        let job = job_load(root, &id).unwrap();
+        assert_eq!(job.resumed, 1, "{job:?}");
+        assert_eq!(job.state, JobState::Failed, "{job:?}");
+    }
+
+    #[test]
+    fn resume_decides_from_the_record_under_the_lease() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let lost = lost_job(root, json!({}), 0);
+        let twice = lost_job(root, json!({}), 1);
+        let mut done = job_create(root, "link", json!({})).unwrap();
+        done.state = JobState::Done;
+        job_save(root, &done).unwrap();
+        assert_eq!(resume(root), vec![lost.clone()]);
+        assert_eq!(job_load(root, &lost).unwrap().resumed, 1);
+        assert_eq!(job_load(root, &twice).unwrap().state, JobState::Interrupted);
+        assert_eq!(job_load(root, &done.id).unwrap().state, JobState::Done);
+    }
 }

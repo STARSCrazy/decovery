@@ -5,8 +5,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use decovery_core::{
-    JOBS_DIR, JobProgress, JobState, job_cancel_requested, job_create, job_lease, job_list,
-    job_load, job_request_cancel, job_save,
+    JOBS_DIR, JobProgress, JobState, job_cancel_requested, job_create, job_create_leased,
+    job_lease, job_list, job_load, job_request_cancel, job_save,
 };
 use serde_json::json;
 
@@ -61,6 +61,24 @@ fn list_is_newest_first() {
     // a stray directory is no job
     std::fs::create_dir_all(root.join(JOBS_DIR).join("other")).unwrap();
     assert_eq!(job_list(root).unwrap().len(), 4);
+}
+
+#[test]
+fn leased_create_holds_the_lease_before_the_record_appears() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let (job, lease) = job_create_leased(root, "build", json!({"files": ["a.c"]})).unwrap();
+    assert_eq!(job.state, JobState::Running);
+    assert!(job.started.is_some());
+    assert_eq!(job_load(root, &job.id).unwrap(), job);
+    // nobody else can run it while the creator holds the lease
+    assert!(job_lease(root, &job.id).unwrap().is_none());
+    drop(lease);
+    assert!(job_lease(root, &job.id).unwrap().is_some());
+    // a job directory without `job.json` (one being created) is not listed
+    std::fs::create_dir_all(root.join(JOBS_DIR).join("j_0000000000ff")).unwrap();
+    let listed: Vec<String> = job_list(root).unwrap().into_iter().map(|j| j.id).collect();
+    assert_eq!(listed, vec![job.id]);
 }
 
 #[test]
