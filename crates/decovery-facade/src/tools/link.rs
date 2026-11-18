@@ -17,7 +17,7 @@ use decovery_diff::{
     load_image,
 };
 use decovery_loaders::{LeImage, load_le};
-use decovery_objects::{functions, read_omf};
+use decovery_objects::{ObjectFormat, functions, read_object};
 use decovery_plugin::Progress;
 use decovery_toolchain::{
     BUILTIN_ASSEMBLER, Insert, LE_DEFAULT_STACK, Linked, MapFormat, Profile, SourceJob, SourceSet,
@@ -645,7 +645,8 @@ fn file_inserts(
     address_of: &(dyn Fn(&str) -> Option<Address> + Sync),
 ) -> (Vec<Insert>, Vec<String>) {
     let (mut inserts, mut hints) = (Vec::new(), Vec::new());
-    let parsed = match read_omf(object, &file.to_ascii_uppercase()) {
+    // LE programs are linked from OMF objects only (`le_linker`)
+    let parsed = match read_object(ObjectFormat::Omf, object, &file.to_ascii_uppercase()) {
         Ok(parsed) => parsed,
         Err(e) => {
             hints.extend(records.iter().map(|r| {

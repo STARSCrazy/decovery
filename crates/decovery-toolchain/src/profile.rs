@@ -35,15 +35,7 @@ const EMBEDDED: [(&str, &str); 6] = [
     ),
 ];
 
-/// Format of the objects a compiler writes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-#[non_exhaustive]
-pub enum ObjectFormat {
-    Omf,
-    /// Manx Aztec C86 objects (`.O`) and libraries.
-    Aztec,
-}
+pub use decovery_objects::ObjectFormat;
 
 /// The option search of a profile: one flag (possibly empty) from each set, all combinations.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

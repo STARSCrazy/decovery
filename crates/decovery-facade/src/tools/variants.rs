@@ -19,7 +19,7 @@ use decovery_core::{
     read_rebuild, write_atomic,
 };
 use decovery_diff::{Blocker, ModuleOptions, SharedFunctions, SymbolView, same_code};
-use decovery_objects::{FunctionView, ObjectFile, functions, read_omf};
+use decovery_objects::{FunctionView, ObjectFile, functions, read_object};
 use decovery_plugin::Progress;
 use decovery_toolchain::{
     CheatFinding, CompiledFile, Profile, SourceJob, SourceSet, definitions, find_cheats,
@@ -208,7 +208,9 @@ fn kept_objects(
                 && meta.get("object")?.as_str()? == blake3::hash(&bytes).to_hex().as_str()
                 && same(&dos_name, blake3::hash(&source).to_hex().as_str())
                 && headers.iter().all(|(h, hash)| same(h, hash));
-            current.then(|| read_omf(&bytes, &dos_name).ok()).flatten()
+            current
+                .then(|| read_object(profile.object_format, &bytes, &dos_name).ok())
+                .flatten()
         })();
         match usable {
             Some(object) => kept.push((name, object)),
@@ -463,7 +465,7 @@ fn judge_check(
     let read = |file: &CompiledFile| {
         file.object
             .as_ref()
-            .and_then(|bytes| read_omf(bytes, dos_name).ok())
+            .and_then(|bytes| read_object(profile.object_format, bytes, dos_name).ok())
     };
     let Some(full) = read(full) else {
         return (false, "the full file does not compile".into(), false);
@@ -815,7 +817,7 @@ pub(super) fn build_variants(
             let file = &compiled[g];
             match &file.object {
                 None => group_errors[g] = Some(failure_text(file)),
-                Some(bytes) => match read_omf(bytes, &dos_name) {
+                Some(bytes) => match read_object(profile.object_format, bytes, &dos_name) {
                     Ok(object) => objects[g] = Some(object),
                     Err(e) => group_errors[g] = Some(format!("cannot read the object: {e}")),
                 },

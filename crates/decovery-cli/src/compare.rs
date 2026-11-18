@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use decovery_core::{Address, Analysis, Confidence, SymbolKind, Workspace};
 use decovery_diff::{Blocker, CompareOptions, Comparison, Decoration, Verdict, compare};
 use decovery_facade::KnowledgeView;
-use decovery_objects::{functions, read_omf};
+use decovery_objects::{ObjectFormat, functions, read_object};
 use serde_json::{Value, json};
 
 /// What `decovery compare` was asked to do.
@@ -61,16 +61,18 @@ pub fn run(request: &Request) -> Result<Outcome, String> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let object = read_omf(&bytes, &file_name)
-        .map_err(|e| format!("cannot read object {}: {e}", object_path.display()))?;
-
-    let decoration = ws
+    let profile = ws
         .config
         .rebuild
         .as_ref()
         .and_then(|r| r.compiler.as_deref())
-        .and_then(|id| decovery_toolchain::profile(id).ok())
-        .map_or_else(Decoration::watcom, |p| p.decoration);
+        .and_then(|id| decovery_toolchain::profile(id).ok());
+    let format = profile
+        .as_ref()
+        .map_or(ObjectFormat::Omf, |p| p.object_format);
+    let object = read_object(format, &bytes, &file_name)
+        .map_err(|e| format!("cannot read object {}: {e}", object_path.display()))?;
+    let decoration = profile.map_or_else(Decoration::watcom, |p| p.decoration);
     let view = object
         .modules
         .iter()

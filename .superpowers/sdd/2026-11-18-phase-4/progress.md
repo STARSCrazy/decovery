@@ -13,7 +13,38 @@ Plan: `docs/plans/2026-11-18-phase-4.md`. Worktree `.worktrees/phase-4-build`, b
   `trailing_underscore_decoration_round_trips`, `undecorated_symbol_is_kept_verbatim`, `aztec_flag_sets`.
 - Commit `feat(toolchain): Aztec C86 profiles`.
 
-## Task 2: object reader — not started (comes later)
+## Task 2: Aztec object and library reader — done
+
+- `crates/decovery-objects/src/aztec.rs`: `read_aztec` (objects 0x5466 / 0x020C, libraries 0xEC62), written from the
+  compiler's object format description; three sections per module (CODE, DATA, BSS), named code/data/BSS symbols
+  as `ObjSymbol` (static functions `public: false`), externals only as `RefTarget::Symbol`, unnamed labels as
+  `RefTarget::Section` targets (not as symbols: `functions()` would split at every label), self-relative refs as
+  `Relative` relocs, `seg`/paragraph items as `Selector`, 32-bit refs as `FarPointer`, integer part of an
+  expression in the field, start item → `ObjectModule::start`, debug/line items skipped. Unsupported items
+  (segment-relative, common segment, interpreter call) are `Malformed` with the offset.
+- R3 checkpoint, ADR 0012: one model change, additive — `Section::size` (+ `Section::with_size`) for the BSS size
+  (the model had no size for a section without bytes; Task 8 needs it). OMF reader now fills it from SEGDEF.
+  Deviation from decision 3: unnamed symbols are section-position targets, not synthetic `@sec:off` symbols.
+- `ObjectFormat` moved to `decovery-objects` (re-exported by the toolchain); `read_object(format, ..)` replaces
+  the direct `read_omf` calls in `cli/compare.rs` and `facade/tools/{build,diagnose,link,variants}.rs` (build: the
+  built-in assembler's objects stay OMF; link: LE linking is OMF only).
+- Test writer `aztec_write.rs` (feature `test-writer`, enabled for the crate's own tests via a self dev-dependency):
+  `AztecModuleSpec` (named symbols as `AztecSymbolSpec` structs with a `public` flag instead of tuples),
+  `write_aztec`, `write_aztec_library`.
+- Tests `tests/aztec_synthetic.rs` (15): the planned ten plus `integer_encodings_and_section_references`,
+  `items_past_header_size_are_error`, `truncated_library_never_panics`, `corrupt_bytes_never_panic`,
+  `deeply_nested_expression_is_error`.
+- Local: `tests/aztec_local.rs` (every `.O`/`.LIB` under `DECOVERY_TOOLCHAIN_AZTEC42/LIB` and under
+  `DECOVERY_AZTEC_OBJECT_OUT`; counts against `DECOVERY_GOLDEN_DIR/aztec/reader-counts.json`, written by a scratch
+  script running Decomp's reader). `aztec_compile_local.rs` now reads each object with the reader, optional
+  `DECOVERY_AZTEC_ALL=1` and `DECOVERY_AZTEC_OBJECT_OUT`.
+  Result: all 8 sources of the third target compiled (dosbox-lab, ~4.4 s) and read; all 32 4.2b library/object
+  files read without error, no unknown targets. Cross-check with Decomp on 23 files (8 compiled objects, 15
+  small-model libraries/objects): function counts equal on all 23; reference counts equal as well (compiled
+  objects: 3/46/16/42/49/50/74/42 functions). Not compared: large-model files (Decomp rejects magic 0x020C) and
+  C/C86/CLD/GL/GLC.LIB, which contain large-model modules Decomp skips (decovery reads them: one extra module
+  `fcall` in C.LIB and C86.LIB, otherwise equal).
+- Commit `feat(objects): Aztec C86 object and library reader`.
 
 ## Task 3: runner checkpoint R1 — done with the fallback
 

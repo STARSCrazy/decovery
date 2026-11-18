@@ -11,7 +11,7 @@ use decovery_core::{
     write_atomic,
 };
 use decovery_diff::{Blocker, Comparison, ModuleOptions, Placement, SymbolView, Verdict};
-use decovery_objects::{FunctionView, ObjectFile, functions, read_omf};
+use decovery_objects::{FunctionView, ObjectFile, ObjectFormat, functions, read_object};
 use decovery_plugin::Progress;
 use decovery_toolchain::{
     AssembleError, BUILTIN_ASSEMBLER, CheatFinding, CompiledFile, JobSpan, Profile, Runner,
@@ -94,7 +94,7 @@ pub(super) fn startup_frames(
         .and_then(|r| r.link.as_ref())
         .is_some_and(|l| l.startup.is_some());
     let object = match std::fs::read(&path) {
-        Ok(bytes) => read_omf(&bytes, &name).map_err(|e| e.to_string()),
+        Ok(bytes) => read_object(profile.object_format, &bytes, &name).map_err(|e| e.to_string()),
         // the profile's default startup missing from a tool directory (a partial toolchain): nothing to say
         Err(e) if e.kind() == std::io::ErrorKind::NotFound && !configured => {
             return BTreeMap::new();
@@ -483,7 +483,14 @@ pub fn build(
         let Some(bytes) = source.compiled.as_ref().and_then(|c| c.object.as_ref()) else {
             continue;
         };
-        match read_omf(bytes, &source.dos_name) {
+        // the built-in assembler writes OMF; the compiler and the profile's assembler their profile's format
+        let format = if source.compiler == profile.id {
+            profile.object_format
+        } else {
+            decovery_toolchain::profile(&source.compiler)
+                .map_or(ObjectFormat::Omf, |p| p.object_format)
+        };
+        match read_object(format, bytes, &source.dos_name) {
             Ok(object) => objects.push((i, object)),
             Err(e) => source.error = Some(format!("cannot read the object: {e}")),
         }

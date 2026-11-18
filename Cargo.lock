@@ -389,6 +389,8 @@ name = "decovery-objects"
 version = "0.2.0"
 dependencies = [
  "decovery-core",
+ "decovery-objects",
+ "serde",
  "serde_json",
  "thiserror",
 ]

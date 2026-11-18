@@ -8,16 +8,19 @@
 //! - optional `DECOVERY_TOOLCHAIN_AZTEC42=<Aztec C86 4.2b directory>` (else the user config's toolchain entry);
 //! - optional `DECOVERY_AZTEC_RUNNER=<runner id>` (default `dosbox-lab`);
 //! - optional `DECOVERY_GOLDEN_DIR=<private dir>`: when `aztec/objects/<NAME>.O` exists there (an object Decomp
-//!   compiled from the same source and flags), the object must equal it byte for byte.
+//!   compiled from the same source and flags), the object must equal it byte for byte;
+//! - optional `DECOVERY_AZTEC_ALL=1`: compile every source, not only the three smallest;
+//! - optional `DECOVERY_AZTEC_OBJECT_OUT=<private dir>`: the objects are copied there (input of the reader's
+//!   local cross-check, `decovery-objects/tests/aztec_local.rs`).
 //!
-//! The three smallest sources are compiled into a temporary workspace (object cache off: a fresh directory). Until
-//! the Aztec object reader exists (phase 4, Task 2) an object counts when it was written, is not empty and starts
-//! with an Aztec object magic.
+//! The sources are compiled into a temporary workspace (object cache off: a fresh directory). Every object must
+//! read with the Aztec reader (phase 4, Task 2) and have at least one function.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use decovery_core::{Workspace, read_user_config};
+use decovery_objects::{functions, read_aztec};
 use decovery_toolchain::{SourceJob, compile, find_sources, open_runners, profile, stage};
 
 const PROFILE: &str = "aztec-c86-4.2b";
@@ -60,7 +63,9 @@ fn aztec_compile_local() {
         .map(|p| (std::fs::metadata(&p).unwrap().len(), p))
         .collect();
     sources.sort();
-    sources.truncate(3);
+    if std::env::var_os("DECOVERY_AZTEC_ALL").is_none() {
+        sources.truncate(3);
+    }
     assert!(!sources.is_empty(), "no C sources in {}", decomp.display());
 
     let root = tempfile::tempdir().unwrap();
@@ -129,6 +134,25 @@ fn aztec_compile_local() {
             "{}: not an Aztec object",
             file.file
         );
+        let read = read_aztec(object, &file.file)
+            .unwrap_or_else(|e| panic!("{}: the reader fails: {e}", file.file));
+        let count: usize = read.modules.iter().map(|m| functions(m).len()).sum();
+        let relocs: usize = read
+            .modules
+            .iter()
+            .flat_map(|m| &m.sections)
+            .map(|s| s.relocs.len())
+            .sum();
+        println!("    {count} functions, {relocs} relocations");
+        assert!(count > 0, "{}: no functions", file.file);
+        if let Ok(dir) = std::env::var("DECOVERY_AZTEC_OBJECT_OUT") {
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                Path::new(&dir).join(profile.object_name(&file.file)),
+                object,
+            )
+            .unwrap();
+        }
         let reference = golden
             .as_ref()
             .map(|dir| dir.join(profile.object_name(&file.file)))
