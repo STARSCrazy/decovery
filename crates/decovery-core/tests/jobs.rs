@@ -64,6 +64,30 @@ fn list_is_newest_first() {
 }
 
 #[test]
+fn concurrent_saves_never_corrupt_the_record() {
+    // Task 11 saves progress and the final state from different threads.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let job = job_create(root, "build", json!({})).unwrap();
+    std::thread::scope(|s| {
+        for t in 0..4u64 {
+            let mut job = job.clone();
+            s.spawn(move || {
+                for i in 0..50 {
+                    job.progress = Some(JobProgress::new(t * 100 + i, None, None));
+                    job_save(root, &job).unwrap();
+                }
+            });
+        }
+        s.spawn(|| {
+            for _ in 0..200 {
+                job_load(root, &job.id).unwrap();
+            }
+        });
+    });
+}
+
+#[test]
 fn cancel_flag_round_trip() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();

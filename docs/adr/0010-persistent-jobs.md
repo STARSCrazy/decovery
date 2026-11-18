@@ -46,9 +46,12 @@ dependency may be added (ADR 0003): no database, no process-inspection crate.
    or bridge request (the token goes into the request, the plugin host sends `$/cancel`; the bridge plugin answers
    `-32002`, kills the Decomp subprocess and, when no other run uses it, its server); after compiling; before
    recording. **Recording is never interrupted** (rebuild records, kept objects, attempts, output files, the
-   program record, `search --apply` writing into `src/` and its follow-up build): a cancel that arrives during it
-   takes effect after it, a cancel before it leaves the workspace unchanged. The facade reports
-   `FacadeError::Cancelled`; the CLI exits with 130 and logs the call as `cancelled`.
+   program record, `search --apply` writing into `src/` and its follow-up build): a cancel before it leaves the
+   workspace unchanged and the facade reports `FacadeError::Cancelled` (the CLI exits with 130 and logs the call
+   as `cancelled`); a cancel that arrives during it is too late for this operation, which completes and reports
+   its result, because its writes are already in the workspace. `search --apply` has two recordings: the
+   candidate build records its attempts, then the source is applied; a cancel between them ends the search as
+   cancelled with the attempts kept (they are true) and `src/` unchanged — a cancelled search never writes source.
 
 ## Consequences
 

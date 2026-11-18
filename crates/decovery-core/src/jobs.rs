@@ -197,6 +197,12 @@ pub fn job_save(root: &Path, job: &JobRecord) -> Result<(), WorkspaceError> {
         source: Box::new(e),
     })?;
     text.push('\n');
+    // `write_atomic` uses one fixed temporary name: saves from several threads (progress, final state) take turns.
+    // Across processes only the lease holder saves.
+    static SAVING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _turn = SAVING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     write_atomic(&path, text.as_bytes()).map_err(|e| io_error(&path, e))
 }
 
