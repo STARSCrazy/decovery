@@ -35,6 +35,18 @@ def _io_error(exc: OSError) -> RpcError:
     return RpcError(IO_FAILED, f"project or file I/O failed: {exc}")
 
 
+def _variable_document(variable, arch: str) -> dict:
+    result = {key: value for key, value in (
+        ("name", variable.name), ("type", variable.data_type), ("storage", variable.storage),
+    ) if value is not None}
+    if variable.first_use is not None:
+        try:
+            result["first_use"] = mapping.from_ghidra_address(variable.first_use, arch)
+        except mapping.MappingError:
+            pass
+    return result
+
+
 def build_plugin(backend_factory: Callable[[], Backend] = GhidraBackend) -> Plugin:
     """The Ghidra plugin; `backend_factory` is called once per `analyzer/open` (tests inject a fake)."""
     plugin = Plugin("ghidra", __version__)
@@ -198,6 +210,21 @@ def build_plugin(backend_factory: Callable[[], Backend] = GhidraBackend) -> Plug
                     except OSError as exc:  # out_dir unusable: no later function would fare better
                         raise _io_error(exc) from exc
                     entry["path"] = str(path)
+                    if outcome.lines is not None:
+                        entry["lines"] = [{"line": line.line, "ranges": mapping.merged_ranges(line.ranges, arch)}
+                                          for line in outcome.lines]
+                    if outcome.signature is not None:
+                        signature = outcome.signature
+                        entry["signature"] = {key: value for key, value in (
+                            ("calling_convention", signature.calling_convention),
+                            ("return_type", signature.return_type),
+                        ) if value is not None}
+                        if signature.parameters is not None:
+                            entry["signature"]["parameters"] = [
+                                _variable_document(parameter, arch) for parameter in signature.parameters
+                            ]
+                    if outcome.variables is not None:
+                        entry["variables"] = [_variable_document(variable, arch) for variable in outcome.variables]
                 else:
                     entry["error"] = outcome.error or "decompilation failed"
                     disassembly = []

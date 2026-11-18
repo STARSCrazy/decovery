@@ -100,6 +100,33 @@ def default_name(address: GhidraAddress) -> str:
     return "fun_" + address.text().replace(":", "_")
 
 
+def merged_ranges(ranges: list[tuple[GhidraAddress, GhidraAddress]], arch: str) -> list[dict]:
+    """Canonical inclusive ranges; merge overlaps/adjacency only within the same segment.
+
+    Never bridge a gap or combine segmented aliases: each endpoint keeps the decompiler's segment.
+    """
+    valid = []
+    for start, end in ranges:
+        if start.segment != end.segment or start.offset > end.offset:
+            continue
+        try:
+            from_ghidra_address(start, arch)
+            from_ghidra_address(end, arch)
+        except MappingError:
+            continue
+        valid.append((start, end))
+    valid.sort(key=lambda pair: (pair[0].segment or 0, pair[0].offset, pair[1].offset))
+    merged: list[tuple[GhidraAddress, GhidraAddress]] = []
+    for start, end in valid:
+        if merged and merged[-1][1].segment == start.segment and start.offset <= merged[-1][1].offset + 1:
+            previous_start, previous_end = merged[-1]
+            merged[-1] = (previous_start, GhidraAddress(end.segment, max(previous_end.offset, end.offset)))
+        else:
+            merged.append((start, end))
+    return [{"start": from_ghidra_address(start, arch), "end": from_ghidra_address(end, arch)}
+            for start, end in merged]
+
+
 def file_stem(text: str) -> str:
     """Output file name of a decovery address: `:` replaced by `_`."""
     return text.replace(":", "_")

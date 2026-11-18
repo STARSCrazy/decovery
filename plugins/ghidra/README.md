@@ -24,10 +24,55 @@ tiny program through a real Ghidra and is skipped unless `GHIDRA_INSTALL_DIR` is
 | `analyzer/functions` | `{}` | `[{address, name, size}]` |
 | `analyzer/apply` | `{symbols, types_h, references}` | `{applied, warnings}` |
 | `analyzer/export` | `{out_path}` | `{path, blake3}`; the file holds functions, calls, strings, data accesses |
-| `decompiler/decompile` | `{addresses, out_dir}` | `[{address, path?, error?, disassembly?}]` |
+| `decompiler/decompile` | `{addresses, out_dir}` | `[{address, path?, error?, disassembly?, lines?, signature?, variables?}]` |
 
 Addresses are decovery strings (`flat:0001A2B0`, `seg:1234:0010`). Architectures: `x86-flat-32` maps to
 `x86:LE:32:default`, `x86-real-16` to `x86:LE:16:Real Mode`; all regions of a program share one arch.
+
+### Decompiler v2 metadata
+
+The response stays a list, one entry per requested address. Successful entries retain `address` and `path`;
+the `.c` file holds the same pseudo-C text as before (there is no inline `c` response field). Available metadata
+is added to that entry:
+
+```json
+[
+  {
+    "address": "seg:1000:0010",
+    "path": "out/seg_1000_0010.c",
+    "lines": [
+      {"line": 1, "ranges": []},
+      {"line": 4, "ranges": [{"start": "seg:1000:0010", "end": "seg:1000:0015"}]}
+    ],
+    "signature": {
+      "calling_convention": "__cdecl",
+      "return_type": "int",
+      "parameters": [{"name": "count", "type": "int", "storage": "register:AX"}]
+    },
+    "variables": [
+      {"name": "count", "type": "int", "storage": "register:AX"},
+      {"name": "saved", "type": "int", "storage": "stack:-4", "first_use": "seg:1000:0014"}
+    ]
+  }
+]
+```
+
+`lines` enumerates every printer line, including blank and unaddressed lines, with 1-based numbers into the
+written `.c` text. Ranges have **inclusive** endpoints from Clang tokens; overlapping and adjacent ranges in
+the same segment are merged. Gaps and distinct segments stay separate; no instruction coverage is fabricated.
+Flat programs use `flat:XXXXXXXX` endpoints instead. The example above abbreviates the line list.
+
+Signature parameters are in prototype order; `variables` contains the HighFunction's locals and parameters.
+Types use Ghidra's display names. Simple storage is `register:AX` or a signed decimal stack offset such as
+`stack:+4`; other storage uses Ghidra's readable representation. `first_use` is the symbol's storage-validity
+PC address, when supplied by Ghidra, rather than a guessed function entry. Missing metadata, including individual
+name/type/storage/signature fields, is omitted. Known empty lists remain `[]`. Failed entries retain the v1
+`error` and optional `disassembly` shape without metadata.
+
+The opt-in `test_second_target_line_coverage_five_functions` additionally needs `DECOVERY_TARGET_MZ` (private
+second-target executable) and `DECOVERY_GOLDEN_DIR` (private report directory). It records coverage of instruction
+starts for five real-mode functions to `ghidra-v2-line-coverage.json`; mapping holes are reported and allowed.
+Neither private inputs nor report data belong in this repository.
 
 ## Project persistence
 
