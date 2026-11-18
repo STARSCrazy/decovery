@@ -32,7 +32,7 @@ impl ObjectCache {
     }
 
     /// The key of one compile: profile id, `flags` (the rendered compile line, so the source name counts too),
-    /// prelude, source bytes, headers sorted by name with their bytes, and the fingerprint of the tool files.
+    /// prelude (and the job prelude, when the profile has one), source bytes, headers sorted by name with their bytes, and the fingerprint of the tool files.
     pub fn key(
         profile: &Profile,
         flags: &str,
@@ -45,6 +45,10 @@ impl ObjectCache {
         field(&mut hasher, profile.id.as_bytes());
         field(&mut hasher, flags.as_bytes());
         field(&mut hasher, profile.prelude.join("\n").as_bytes());
+        if !profile.job_prelude.is_empty() {
+            // only then: the keys of the profiles without one stay what they were
+            field(&mut hasher, profile.job_prelude.join("\n").as_bytes());
+        }
         field(&mut hasher, source);
         let mut sorted: Vec<&(String, Vec<u8>)> = headers.iter().collect();
         sorted.sort_by(|a, b| a.0.cmp(&b.0));

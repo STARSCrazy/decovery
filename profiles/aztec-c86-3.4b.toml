@@ -7,10 +7,15 @@ version = "3.4b"
 bits = 16
 object_format = "aztec"
 object_extension = "O"
-runners = ["unicorn-dos", "dosbox-lab"]
+# unicorn-dos cannot run the pass chain yet (risk R1, docs/plans/2026-11-18-phase-4.md): CGEN loaded in place by CC
+# sees no arguments there
+runners = ["dosbox-lab"]
 # CC runs the passes and the assembler itself (command form as in Decomp)
 command = "CC -n {flags} {input}"
 prelude = ['SET CLIB=D:\LIB\', 'SET INCLUDE=D:\INCLUDE\', 'SET PATH=D:\BIN']
+# CC puts its work files (ctmp1..4, named after the time of day) where CCTEMP points, not into TMP: jobs started in
+# the same second would otherwise share them
+job_prelude = ['SET CCTEMP=C:\{tmp}\']
 # the frame differs with and without +b: no fixed prologue
 prologue = []
 padding = false

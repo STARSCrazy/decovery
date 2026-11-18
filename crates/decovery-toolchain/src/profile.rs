@@ -192,6 +192,10 @@ pub struct Profile {
     pub command: String,
     /// DOS commands run before the compiler.
     pub prelude: Vec<String>,
+    /// DOS commands run in each compile job after the prelude and `SET TMP=`; `{tmp}` is the job's own temporary
+    /// directory (`C:\TMP00000`). For compilers that take their work directory from another variable (Aztec C86:
+    /// `CCTEMP`): jobs running at the same time must not share work files.
+    pub job_prelude: Vec<String>,
     pub decoration: Decoration,
     /// Bytes every function starts with; empty when the compiler has no fixed prologue.
     pub prologue: Vec<u8>,
@@ -228,6 +232,8 @@ struct RawProfile {
     command: String,
     #[serde(default)]
     prelude: Vec<String>,
+    #[serde(default)]
+    job_prelude: Vec<String>,
     decoration: RawDecoration,
     #[serde(default)]
     prologue: Vec<u8>,
@@ -265,6 +271,7 @@ fn parse(text: &str) -> Result<Profile, ToolchainError> {
         runners: raw.runners,
         command: raw.command,
         prelude: raw.prelude,
+        job_prelude: raw.job_prelude,
         decoration: Decoration::new(raw.decoration.function, raw.decoration.data),
         prologue: raw.prologue,
         padding: raw.padding,
@@ -519,6 +526,8 @@ mod tests {
             assert!(p.linker.is_none() && p.assembler.is_none(), "{id}");
             assert!(p.prologue.is_empty());
             assert_eq!(p.fingerprint, ["BIN/CC.EXE"]);
+            assert_eq!(p.runners, ["dosbox-lab"]);
+            assert_eq!(p.job_prelude, ["SET CCTEMP=C:\\{tmp}\\"]);
             assert_eq!(
                 p.prelude,
                 [
