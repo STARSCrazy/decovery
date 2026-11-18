@@ -731,8 +731,11 @@ fn overlay_add_list_remove() {
         "schema = 1\n\n[target]\nfile = \"main.exe\"\nsha256 = \"aa\"\nformat = \"mz\"\nprocessor = \"x86\"\n",
     )
     .unwrap();
+    std::fs::write(ws.join("main.exe"), main_fixture()).unwrap();
     let ovr = ws.join("vtest.ovr");
     std::fs::write(&ovr, overlay_fixture()).unwrap();
+    let bad = ws.join("vbad.ovr");
+    std::fs::write(&bad, [0xF3u8, 0, 0, 0]).unwrap();
     let run = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_decovery"))
             .args(args)
@@ -770,7 +773,21 @@ fn overlay_add_list_remove() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("VTEST"));
     assert!(run(&["overlay", "remove", "vtest"]).status.success());
     let config = std::fs::read_to_string(ws.join("decovery.toml")).unwrap();
-    assert!(!config.contains("overlay"), "{config}");
+    assert!(
+        !config.contains("overlay") && !config.contains("ovl:"),
+        "{config}"
+    );
+}
+
+/// A minimal MZ main program: 32-byte header, 64-byte image starting with the Aztec startup `mov bp, 0FF6h`.
+fn main_fixture() -> Vec<u8> {
+    let mut bytes = vec![0u8; 96];
+    bytes[0..2].copy_from_slice(b"MZ");
+    for (at, w) in [(2usize, 96u16), (4, 1), (8, 2), (0x18, 0x1C)] {
+        bytes[at..at + 2].copy_from_slice(&w.to_le_bytes());
+    }
+    bytes[32..35].copy_from_slice(&[0xBD, 0xF6, 0x0F]);
+    bytes
 }
 
 /// A hand-built Aztec overlay: 14-byte header (magic 0xF2), 16 bytes code at 0x5000, 4 bytes data at 0x9000,

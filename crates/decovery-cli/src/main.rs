@@ -304,6 +304,9 @@ enum OverlayCommand {
         /// Overlay format.
         #[arg(long, default_value = "aztec-c86")]
         format: String,
+        /// Data segment (hex, relative to the load segment) when the startup code does not show it.
+        #[arg(long, value_parser = parse_hex_u16)]
+        ds: Option<u16>,
     },
     /// Every configured overlay with its segments.
     List,
@@ -938,8 +941,8 @@ fn run(cli: Cli) -> ExitCode {
         )),
         Command::Overlay { what } => {
             let answer = match what {
-                OverlayCommand::Add { files, format } => {
-                    overlay::add(&cli.workspace, &files, &format)
+                OverlayCommand::Add { files, format, ds } => {
+                    overlay::add(&cli.workspace, &files, &format, ds)
                 }
                 OverlayCommand::List => overlay::list(&cli.workspace),
                 OverlayCommand::Remove { name } => overlay::remove(&cli.workspace, &name),
@@ -1121,6 +1124,14 @@ fn bench_run(suite: &Path, options: &decovery_bench::RunOptions, json: bool) -> 
 }
 
 /// Prints the failure on stderr and maps it to its exit code.
+fn parse_hex_u16(text: &str) -> Result<u16, String> {
+    let digits = text
+        .strip_prefix("0x")
+        .or_else(|| text.strip_prefix("0X"))
+        .unwrap_or(text);
+    u16::from_str_radix(digits, 16).map_err(|e| format!("{text:?}: {e}"))
+}
+
 fn finish(result: Result<(), FacadeError>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,

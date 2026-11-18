@@ -161,3 +161,28 @@ Result through `runner/run` of both plugins (worktree unicorn-dos, `CC -n +b`, t
   `address_key_of_ovl`, ordering), `address_key_covers_every_address_kind` extended, `overlays_round_trip`,
   facade `unknown_overlay_name_is_named`, CLI `overlay_add_list_remove`. No schema bump (addresses are text).
 - Commit `feat(core): overlay addresses (ADR 0011)`.
+
+## Task 6: overlay loading — done
+
+- `decovery_loaders::overlay`: `read_overlay(bytes, name)` (14-byte header, magic 0xF2; truncated code/data →
+  `Truncated { offset }`, code past 64 KiB → `Malformed { offset: 2 }`, data+BSS past 64 KiB → `Malformed { offset: 6 }`,
+  entry outside the code → `Malformed { offset: 12 }`; new `LoadError::Malformed { offset, detail }`),
+  `read_overlays` (one result per file), `find_overlay_loader(code)` (unique `ovloader_` match),
+  `aztec_data_segment(image, cs, ip)` (`mov bp, <seg>` at the entry). Put in `overlay.rs`, not `mz.rs`.
+- `overlay add` now checks the header against the MZ main program (CS from the header, DS from the startup code or
+  `--ds SSSS`) and writes `NAME.code` (`ovl:NAME:CS:corg`, rwx, file offset 14) and, when dsize+bss > 0,
+  `NAME.data` (`ovl:NAME:DS:dorg`, length dsize+bss, file_length dsize, rw) plus `entry`; reports the loader
+  address. Segment names are English (`.data`, Decomp: `.daten`).
+- Facade `program::load` appends overlay regions (`overlay_regions`: bytes from each overlay file per `ovl:`
+  segment; an unreadable overlay is a warning, the others still load) and the overlay entries. `Program::read` /
+  `region_at` work by `Address::bytes_from`, so `ovl:` (and `sel:`) regions are readable.
+- Tests `tests/overlay_synthetic.rs`: `overlay_header_fields`, `bad_magic_is_error_with_offset`,
+  `overlay_past_file_end_is_error` (+ every prefix, no panic), `bad_overlay_does_not_hide_the_others`,
+  `loader_pattern_found`; facade `overlay_segments_become_readable_regions`; CLI test extended (segments, bad header).
+- Local `crates/decovery-cli/tests/overlay_local.rs` (in the CLI crate, not loaders: it goes through
+  `overlay add`), scratch workspace, `DECOVERY_LOCAL_WORKSPACE_AZTEC`: 13 overlays added, loader `ovloader_`
+  found once, entry and both segments (start, length, file offset, file length) equal Decomp's `[[overlay]]`
+  entries for all 13, 0 mismatches, no load warnings.
+- Not done: Ghidra analysis of a workspace with overlays (the plugin's overlay spaces are untested against a real
+  Ghidra); overlay migration from Decomp stays Task 9.
+- Commit `feat(loaders): Aztec overlays`.

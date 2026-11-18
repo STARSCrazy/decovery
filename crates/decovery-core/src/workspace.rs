@@ -255,6 +255,26 @@ pub struct SegmentConfig {
     pub permissions: String,
 }
 
+impl SegmentConfig {
+    pub fn new(
+        name: impl Into<String>,
+        start: Address,
+        length: u64,
+        file_offset: Option<u64>,
+        file_length: Option<u64>,
+        permissions: impl Into<String>,
+    ) -> Self {
+        SegmentConfig {
+            name: name.into(),
+            start,
+            length,
+            file_offset,
+            file_length,
+            permissions: permissions.into(),
+        }
+    }
+}
+
 /// Analysis settings.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
