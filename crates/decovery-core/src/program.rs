@@ -100,11 +100,10 @@ impl Region {
         }
     }
 
-    fn contains(&self, linear: u64, len: u64) -> bool {
-        let Some(start) = self.start.linear() else {
-            return false;
-        };
-        linear >= start && linear.saturating_add(len) <= start.saturating_add(self.virtual_size)
+    /// Offset of `at` in this region when `len` bytes from there lie inside it (same address space only).
+    fn offset_of(&self, at: Address, len: u64) -> Option<u64> {
+        let offset = at.bytes_from(self.start)?;
+        (offset.saturating_add(len) <= self.virtual_size).then_some(offset)
     }
 }
 
@@ -143,15 +142,13 @@ impl Program {
 
     /// The region containing `at`.
     pub fn region_at(&self, at: Address) -> Option<&Region> {
-        let linear = at.linear()?;
-        self.regions.iter().find(|r| r.contains(linear, 1))
+        self.regions.iter().find(|r| r.offset_of(at, 1).is_some())
     }
 
     /// `len` initialized bytes at `at`, if the whole range lies inside one region's data.
     pub fn read(&self, at: Address, len: usize) -> Option<&[u8]> {
-        let linear = at.linear()?;
         let region = self.region_at(at)?;
-        let offset = usize::try_from(linear - region.start.linear()?).ok()?;
+        let offset = usize::try_from(region.offset_of(at, 1)?).ok()?;
         region.data.get(offset..offset.checked_add(len)?)
     }
 

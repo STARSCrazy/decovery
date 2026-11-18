@@ -93,6 +93,14 @@ impl Workspace {
         Ok(WorkspaceLock { _file: file })
     }
 
+    /// Writes `decovery.toml` from `self.config` (atomic; comments in the file are not kept).
+    pub fn save_config(&self, _lock: &WorkspaceLock) -> Result<(), WorkspaceError> {
+        let path = self.root.join(crate::workspace::CONFIG_FILE);
+        let text =
+            toml::to_string(&self.config).map_err(|e| io_error(&path, std::io::Error::other(e)))?;
+        write_atomic(&path, text.as_bytes()).map_err(|e| io_error(&path, e))
+    }
+
     /// Writes `knowledge/symbols.toml` from `self.symbols`, sorted by address, then kind.
     pub fn save_symbols(&self, _lock: &WorkspaceLock) -> Result<(), WorkspaceError> {
         let path = self.root.join(SYMBOLS_FILE);
@@ -224,6 +232,7 @@ mod tests {
             detected: Vec::new(),
             legacy: None,
             plugins: Default::default(),
+            overlays: Vec::new(),
         };
         std::fs::write(dir.join(CONFIG_FILE), toml::to_string(&config).unwrap()).unwrap();
         Workspace {

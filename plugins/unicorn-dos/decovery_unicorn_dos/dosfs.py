@@ -106,6 +106,7 @@ class DosFs:
         self.output = bytearray()
         self.handles: dict[int, OpenFile] = {}
         self.searches: dict[int, list[Path]] = {}
+        self.doomed: set[Path] = set()  # deleted while open: removed from the host when the last handle closes
         self._devices()
 
     def _devices(self) -> None:
@@ -179,7 +180,7 @@ class DosFs:
         if device in DEVICES:
             return self._new_handle(OpenFile(None, None, device, mode != 0))
         drive, path = self.resolve(name)
-        if not path.is_file():
+        if not path.is_file() or path in self.doomed:
             raise DosError(FILE_NOT_FOUND if path.parent.is_dir() else PATH_NOT_FOUND)
         if mode != 0 and drive in self.read_only:
             raise DosError(ACCESS_DENIED)
@@ -196,10 +197,11 @@ class DosFs:
         drive, path = self.resolve(name)
         if drive in self.read_only:
             raise DosError(ACCESS_DENIED)
-        if new_only and path.exists():
+        if new_only and path.exists() and path not in self.doomed:
             raise DosError(FILE_EXISTS)
         if not path.parent.is_dir():
             raise DosError(PATH_NOT_FOUND)
+        self.doomed.discard(path)  # a new file under a name deleted while open (the old handles see it too)
         f = open(path, "w+b")
         return self._new_handle(OpenFile(f, path, writable=True))
 
@@ -210,6 +212,16 @@ class DosFs:
             raise DosError(INVALID_HANDLE)
         if entry.file is not None and not any(other is entry for other in self.handles.values()):
             entry.file.close()
+            self._reap(entry.path)
+
+    def _open_paths(self) -> set[Path]:
+        return {e.path for e in self.handles.values() if e.file is not None and not e.file.closed}
+
+    def _reap(self, path: Path | None) -> None:
+        """Remove a file deleted while open once no handle holds it any more."""
+        if path in self.doomed and path not in self._open_paths():
+            self.doomed.discard(path)
+            path.unlink(missing_ok=True)
 
     def dup(self, h: int) -> int:
         """A new handle for the file of `h`; both share the file position, as in DOS."""
@@ -231,6 +243,9 @@ class DosFs:
             if entry.file is not None:
                 entry.file.close()
         self._devices()
+        for path in self.doomed:
+            path.unlink(missing_ok=True)
+        self.doomed.clear()
 
     def read(self, h: int, n: int) -> bytes:
         entry = self._file(h)
@@ -293,9 +308,14 @@ class DosFs:
         drive, path = self.resolve(name)
         if drive in self.read_only:
             raise DosError(ACCESS_DENIED)
-        if not path.is_file():
+        if not path.is_file() or path in self.doomed:
             raise DosError(FILE_NOT_FOUND)
-        path.unlink()
+        if path in self._open_paths():
+            # DOS removes the directory entry and lets open handles go on; a Windows host refuses to delete an open
+            # file, so the host file goes when its last handle closes
+            self.doomed.add(path)
+        else:
+            path.unlink()
 
     def rename(self, old: str, new: str) -> None:
         drive_old, path_old = self.resolve(old)

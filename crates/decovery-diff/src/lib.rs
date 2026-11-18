@@ -60,7 +60,9 @@ mod anchors;
 mod classify;
 mod compare;
 mod diagnose;
+mod gaps;
 mod instructions;
+mod module;
 mod pairs;
 mod program_le;
 mod program_mz;
@@ -79,6 +81,8 @@ pub use compare::{
     same_code,
 };
 pub use diagnose::{Finding, diagnose};
+pub use gaps::compare_with_gaps;
+pub use module::{ModuleVerdict, compare_overlay_module};
 pub use pairs::{Pair, PairKind, instruction_pairs, pairs_text};
 pub use program_le::compare_le;
 pub use program_mz::{Place, PlaceKind, diagnose_mz_link, load_image};

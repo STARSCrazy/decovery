@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use crate::ToolchainError;
 
-const EMBEDDED: [(&str, &str); 3] = [
+const EMBEDDED: [(&str, &str); 6] = [
     (
         "watcom-9.5",
         include_str!("../../../profiles/watcom-9.5.toml"),
@@ -21,14 +21,28 @@ const EMBEDDED: [(&str, &str); 3] = [
         "turbo-c-2.0",
         include_str!("../../../profiles/turbo-c-2.0.toml"),
     ),
+    (
+        "aztec-c86-3.4b",
+        include_str!("../../../profiles/aztec-c86-3.4b.toml"),
+    ),
+    (
+        "aztec-c86-4.2b",
+        include_str!("../../../profiles/aztec-c86-4.2b.toml"),
+    ),
+    (
+        "aztec-c86-5.2a",
+        include_str!("../../../profiles/aztec-c86-5.2a.toml"),
+    ),
 ];
 
-/// Format of the objects a compiler writes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+pub use decovery_objects::ObjectFormat;
+
+/// The option search of a profile: one flag (possibly empty) from each set, all combinations.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[non_exhaustive]
-pub enum ObjectFormat {
-    Omf,
+pub struct SearchSpec {
+    pub flag_sets: Vec<Vec<String>>,
 }
 
 /// The linker of a profile.
@@ -170,9 +184,16 @@ pub struct Profile {
     pub command: String,
     /// DOS commands run before the compiler.
     pub prelude: Vec<String>,
+    /// DOS commands run in each compile job after the prelude and `SET TMP=`; `{tmp}` is the job's own temporary
+    /// directory (`C:\TMP00000`). For compilers that take their work directory from another variable (Aztec C86:
+    /// `CCTEMP`): jobs running at the same time must not share work files.
+    pub job_prelude: Vec<String>,
     pub decoration: Decoration,
     /// Bytes every function starts with; empty when the compiler has no fixed prologue.
     pub prologue: Vec<u8>,
+    /// Prologue with placeholders and a call target (`prologue_pattern` / `prologue_call`), for compilers whose
+    /// frame setup goes through a runtime helper (Aztec C86: `mov ax,-N; call $csav`).
+    pub prologue_pattern: Option<decovery_x86::ProloguePattern>,
     /// Whether the compiler pads functions to an alignment.
     pub padding: bool,
     /// Files (relative to the tool directory) whose presence identifies the compiler.
@@ -180,6 +201,8 @@ pub struct Profile {
     pub linker: Option<LinkerSpec>,
     pub assembler: Option<AssemblerSpec>,
     pub literals: Option<LiteralSpec>,
+    /// Flag sets the option search combines; `None` when the profile has none.
+    pub search: Option<SearchSpec>,
 }
 
 #[derive(Deserialize)]
@@ -204,9 +227,15 @@ struct RawProfile {
     command: String,
     #[serde(default)]
     prelude: Vec<String>,
+    #[serde(default)]
+    job_prelude: Vec<String>,
     decoration: RawDecoration,
     #[serde(default)]
     prologue: Vec<u8>,
+    #[serde(default)]
+    prologue_pattern: Option<String>,
+    #[serde(default)]
+    prologue_call: Option<String>,
     #[serde(default)]
     padding: bool,
     #[serde(default)]
@@ -217,6 +246,8 @@ struct RawProfile {
     assembler: Option<AssemblerSpec>,
     #[serde(default)]
     literals: Option<LiteralSpec>,
+    #[serde(default)]
+    search: Option<SearchSpec>,
 }
 
 fn parse(text: &str) -> Result<Profile, ToolchainError> {
@@ -228,6 +259,18 @@ fn parse(text: &str) -> Result<Profile, ToolchainError> {
             raw.id, raw.schema
         )));
     }
+    if raw.prologue_call.is_some() && raw.prologue_pattern.is_none() {
+        return Err(ToolchainError::Invalid(format!(
+            "profile {}: prologue_call without prologue_pattern",
+            raw.id
+        )));
+    }
+    let prologue_pattern = raw
+        .prologue_pattern
+        .as_deref()
+        .map(|text| decovery_x86::ProloguePattern::parse(text, raw.prologue_call.as_deref()))
+        .transpose()
+        .map_err(|e| ToolchainError::Invalid(format!("profile {}: {e}", raw.id)))?;
     Ok(Profile {
         id: raw.id,
         family: raw.family,
@@ -239,13 +282,16 @@ fn parse(text: &str) -> Result<Profile, ToolchainError> {
         runners: raw.runners,
         command: raw.command,
         prelude: raw.prelude,
+        job_prelude: raw.job_prelude,
         decoration: Decoration::new(raw.decoration.function, raw.decoration.data),
         prologue: raw.prologue,
+        prologue_pattern,
         padding: raw.padding,
         fingerprint: raw.fingerprint,
         linker: raw.linker,
         assembler: raw.assembler,
         literals: raw.literals,
+        search: raw.search,
     })
 }
 
@@ -479,6 +525,94 @@ mod tests {
         assert_eq!(assembler_profile(&w10).unwrap().unwrap().id, "watcom-10.6");
         let tc = profile("turbo-c-2.0").unwrap();
         assert_eq!(assembler_profile(&tc).unwrap(), None);
+    }
+
+    const AZTEC: [&str; 3] = ["aztec-c86-3.4b", "aztec-c86-4.2b", "aztec-c86-5.2a"];
+
+    #[test]
+    fn aztec_profiles_parse() {
+        for id in AZTEC {
+            let p = profile(id).unwrap();
+            assert_eq!((p.family.as_str(), p.bits), ("aztec-c86", 16), "{id}");
+            assert_eq!(p.object_format, ObjectFormat::Aztec);
+            assert!(p.linker.is_none() && p.assembler.is_none(), "{id}");
+            assert!(p.prologue.is_empty());
+            assert_eq!(p.fingerprint, ["BIN/CC.EXE"]);
+            assert_eq!(p.runners, ["unicorn-dos", "dosbox-lab"]);
+            assert_eq!(p.job_prelude, ["SET CCTEMP=C:\\{tmp}\\"]);
+            assert_eq!(
+                p.prelude,
+                [
+                    "SET CLIB=D:\\LIB\\",
+                    "SET INCLUDE=D:\\INCLUDE\\",
+                    "SET PATH=D:\\BIN"
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn aztec_compile_line() {
+        let p = profile("aztec-c86-4.2b").unwrap();
+        assert_eq!(p.compile_line("+b", "FOO.C"), "CC -n +b FOO.C");
+        assert_eq!(p.compile_line("", "FOO.C"), "CC -n FOO.C");
+    }
+
+    #[test]
+    fn aztec_object_name() {
+        let p = profile("aztec-c86-4.2b").unwrap();
+        assert_eq!(p.object_name("FOO.C"), "FOO.O");
+    }
+
+    #[test]
+    fn trailing_underscore_decoration_round_trips() {
+        let d = profile("aztec-c86-4.2b").unwrap().decoration;
+        for name in ["main", "get_", "a_b_", "x"] {
+            let public = d.function.replace("{name}", name);
+            assert_eq!(d.undecorate(&public), name, "{public}");
+            let data = d.data.replace("{name}", name);
+            assert_eq!(d.undecorate(&data), name, "{data}");
+        }
+    }
+
+    #[test]
+    fn undecorated_symbol_is_kept_verbatim() {
+        let d = profile("aztec-c86-4.2b").unwrap().decoration;
+        assert_eq!(d.undecorate("$begin"), "$begin");
+        assert_eq!(d.undecorate("_"), "_");
+        assert_eq!(d.undecorate("asmproc"), "asmproc");
+    }
+
+    #[test]
+    fn aztec_prologue_pattern() {
+        for id in AZTEC {
+            let p = profile(id).unwrap().prologue_pattern.unwrap();
+            assert_eq!(p.bytes.len(), 6);
+            assert_eq!(p.call_target.as_deref(), Some("$csav"));
+        }
+        assert!(profile("turbo-c-2.0").unwrap().prologue_pattern.is_none());
+    }
+
+    #[test]
+    fn prologue_call_without_pattern_is_invalid() {
+        let text = include_str!("../../../profiles/aztec-c86-4.2b.toml")
+            .replace("prologue_pattern = \"B8 ?? ?? E8 ?? ??\"", "");
+        assert!(matches!(parse(&text), Err(ToolchainError::Invalid(_))));
+        let bad = include_str!("../../../profiles/aztec-c86-4.2b.toml")
+            .replace("B8 ?? ?? E8 ?? ??", "B8 ?? ?? E8 00 00");
+        assert!(matches!(parse(&bad), Err(ToolchainError::Invalid(_))));
+    }
+
+    #[test]
+    fn aztec_flag_sets() {
+        for id in AZTEC {
+            let search = profile(id).unwrap().search.unwrap();
+            assert_eq!(
+                search.flag_sets,
+                [strings(&["", "+b"]), strings(&["+h", "-z"])]
+            );
+        }
+        assert!(profile("turbo-c-2.0").unwrap().search.is_none());
     }
 
     #[test]

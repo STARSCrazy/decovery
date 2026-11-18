@@ -1,0 +1,33 @@
+# Aztec C86 5.2a (1992): small model, own object format, functions and data decorated with a trailing underscore
+schema = 1
+id = "aztec-c86-5.2a"
+family = "aztec-c86"
+language = "c"
+version = "5.2a"
+bits = 16
+object_format = "aztec"
+object_extension = "O"
+# unicorn-dos first (faster); CC loads each pass in place over its own code, which unicorn-dos runs since it drops
+# stale translated code on DOS writes
+runners = ["unicorn-dos", "dosbox-lab"]
+# CC runs the passes and the assembler itself (command form as in Decomp)
+command = "CC -n {flags} {input}"
+prelude = ['SET CLIB=D:\LIB\', 'SET INCLUDE=D:\INCLUDE\', 'SET PATH=D:\BIN']
+# CC puts its work files (ctmp1..4, named after the time of day) where CCTEMP points, not into TMP: jobs started in
+# the same second would otherwise share them
+job_prelude = ['SET CCTEMP=C:\{tmp}\']
+# the frame differs with and without +b: no fixed prologue
+prologue = []
+# with +b the frame goes through the runtime helper: mov ax,-frame; call $csav
+prologue_pattern = "B8 ?? ?? E8 ?? ??"
+prologue_call = "$csav"
+padding = false
+fingerprint = ["BIN/CC.EXE"]
+
+[decoration]
+function = "{name}_"
+data = "{name}_"
+
+# option search: one choice from each set
+[search]
+flag_sets = [["", "+b"], ["+h", "-z"]]

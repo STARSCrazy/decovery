@@ -3,6 +3,7 @@
 //! - `flat:0001A2B0` — 32-bit linear/virtual address
 //! - `seg:1234:0010` — real-mode segment:offset, relative to the load segment
 //! - `sel:0007:00001234` — static segment number from the file (e.g. NE segment table index) and offset
+//! - `ovl:VINIT:0000:505E` — real-mode segment:offset inside a named overlay (ADR 0011)
 //!
 //! `file:0x1A2B` is accepted only as [`AddressInput`] at the CLI/MCP boundary. `flat64:` is reserved.
 
@@ -21,6 +22,83 @@ pub enum Address {
     Seg { seg: u16, off: u16 },
     /// Static segment number from the file and offset; has no linear address.
     Sel { segment: u16, off: u32 },
+    /// Real-mode segment and offset inside a named overlay; has no linear address (ADR 0011).
+    Ovl {
+        overlay: OverlayName,
+        seg: u16,
+        off: u16,
+    },
+}
+
+/// Maximum length of an overlay name.
+pub const OVERLAY_NAME_MAX: usize = 16;
+
+/// Name of an overlay: `[A-Za-z0-9_]{1,16}`, stored upper case. Fixed size so [`Address`] stays `Copy`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct OverlayName([u8; OVERLAY_NAME_MAX]);
+
+impl OverlayName {
+    /// Checks and normalises (upper case) an overlay name.
+    pub fn new(s: &str) -> Result<Self, AddressError> {
+        let bytes = s.as_bytes();
+        if bytes.is_empty()
+            || bytes.len() > OVERLAY_NAME_MAX
+            || !bytes
+                .iter()
+                .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+        {
+            return Err(AddressError::OverlayName(s.to_string()));
+        }
+        let mut name = [0u8; OVERLAY_NAME_MAX];
+        for (slot, b) in name.iter_mut().zip(bytes) {
+            *slot = b.to_ascii_uppercase();
+        }
+        Ok(OverlayName(name))
+    }
+
+    /// The name (upper case).
+    pub fn as_str(&self) -> &str {
+        let len = self
+            .0
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(OVERLAY_NAME_MAX);
+        // Only ASCII is ever stored (checked in `new`).
+        std::str::from_utf8(&self.0[..len]).unwrap_or("")
+    }
+}
+
+impl fmt::Debug for OverlayName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self.as_str())
+    }
+}
+
+impl fmt::Display for OverlayName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for OverlayName {
+    type Err = AddressError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        OverlayName::new(s)
+    }
+}
+
+impl Serialize for OverlayName {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for OverlayName {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        OverlayName::new(&text).map_err(serde::de::Error::custom)
+    }
 }
 
 /// An address as typed by a user or agent: either a program address or a file offset.
@@ -40,15 +118,51 @@ pub enum AddressError {
     Reserved(&'static str),
     #[error("address arithmetic overflow")]
     Overflow,
+    #[error("invalid overlay name {0:?} (expected 1 to 16 of A-Z, 0-9, _)")]
+    OverlayName(String),
 }
 
 impl Address {
-    /// Linear address for flat and real-mode addresses; `None` for static segment addresses.
+    /// Linear address for flat and real-mode addresses; `None` for static segment and overlay addresses.
     pub fn linear(&self) -> Option<u64> {
         match *self {
             Address::Flat(a) => Some(u64::from(a)),
             Address::Seg { seg, off } => Some(u64::from(seg) * 16 + u64::from(off)),
-            Address::Sel { .. } => None,
+            Address::Sel { .. } | Address::Ovl { .. } => None,
+        }
+    }
+
+    /// Bytes from `start` to `self` when both lie in one address space and `self` is not below `start`:
+    /// linear distance for flat and real-mode addresses, offset distance within one static segment or one
+    /// overlay segment; `None` across spaces.
+    pub fn bytes_from(&self, start: Address) -> Option<u64> {
+        match (start, *self) {
+            (Address::Sel { segment: a, off: s }, Address::Sel { segment: b, off: e })
+                if a == b =>
+            {
+                u64::from(e).checked_sub(u64::from(s))
+            }
+            (
+                Address::Ovl {
+                    overlay: a,
+                    seg: sa,
+                    off: s,
+                },
+                Address::Ovl {
+                    overlay: b,
+                    seg: sb,
+                    off: e,
+                },
+            ) if a == b && sa == sb => u64::from(e).checked_sub(u64::from(s)),
+            (start, at) => at.linear()?.checked_sub(start.linear()?),
+        }
+    }
+
+    /// The overlay this address lies in; `None` for main-program addresses.
+    pub fn overlay(&self) -> Option<OverlayName> {
+        match *self {
+            Address::Ovl { overlay, .. } => Some(overlay),
+            _ => None,
         }
     }
 
@@ -67,6 +181,11 @@ impl Address {
                 segment,
                 off: add(i128::from(off), delta)?,
             },
+            Address::Ovl { overlay, seg, off } => Address::Ovl {
+                overlay,
+                seg,
+                off: add(i128::from(off), delta)?,
+            },
         })
     }
 }
@@ -77,6 +196,7 @@ impl fmt::Display for Address {
             Address::Flat(a) => write!(f, "flat:{a:08X}"),
             Address::Seg { seg, off } => write!(f, "seg:{seg:04X}:{off:04X}"),
             Address::Sel { segment, off } => write!(f, "sel:{segment:04X}:{off:08X}"),
+            Address::Ovl { overlay, seg, off } => write!(f, "ovl:{overlay}:{seg:04X}:{off:04X}"),
         }
     }
 }
@@ -133,6 +253,20 @@ impl FromStr for Address {
                     off: hex(off, 8, s)?,
                 })
             }
+            "ovl" => {
+                let mut parts = rest.split(':');
+                let (Some(name), Some(seg), Some(off), None) =
+                    (parts.next(), parts.next(), parts.next(), parts.next())
+                else {
+                    return Err(AddressError::Syntax(s.to_string()));
+                };
+                Ok(Address::Ovl {
+                    overlay: OverlayName::new(name)
+                        .map_err(|_| AddressError::Syntax(s.to_string()))?,
+                    seg: hex(seg, 4, s)?,
+                    off: hex(off, 4, s)?,
+                })
+            }
             "flat64" => Err(AddressError::Reserved("flat64")),
             _ => Err(AddressError::Syntax(s.to_string())),
         }
@@ -179,11 +313,21 @@ mod tests {
                 segment: 7,
                 off: 0x1234,
             },
+            Address::Ovl { .. } => Address::Ovl {
+                overlay: OverlayName::new("VINIT").unwrap(),
+                seg: 0,
+                off: 0x505E,
+            },
         };
         let kinds = [
             Address::Flat(0),
             Address::Seg { seg: 0, off: 0 },
             Address::Sel { segment: 0, off: 0 },
+            Address::Ovl {
+                overlay: OverlayName::new("A").unwrap(),
+                seg: 0,
+                off: 0,
+            },
         ];
         let keys: Vec<String> = kinds
             .iter()
@@ -191,7 +335,12 @@ mod tests {
             .collect();
         assert_eq!(
             keys,
-            ["flat_00012340", "seg_0000_01FA", "sel_0007_00001234"]
+            [
+                "flat_00012340",
+                "seg_0000_01FA",
+                "sel_0007_00001234",
+                "ovl_VINIT_0000_505E"
+            ]
         );
     }
 
@@ -199,7 +348,12 @@ mod tests {
 
     #[test]
     fn round_trips_all_forms() {
-        for text in ["flat:0001A2B0", "seg:1234:0010", "sel:0007:00001234"] {
+        for text in [
+            "flat:0001A2B0",
+            "seg:1234:0010",
+            "sel:0007:00001234",
+            "ovl:VINIT:0000:505E",
+        ] {
             let address: Address = text.parse().unwrap();
             assert_eq!(address.to_string(), text);
         }

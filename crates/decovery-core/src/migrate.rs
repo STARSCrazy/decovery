@@ -9,6 +9,7 @@ mod attempts;
 mod decomp_format;
 mod knowledge;
 mod layout;
+mod rules;
 
 pub use attempts::{AttemptMigrationReport, migrate_attempts};
 
@@ -28,15 +29,15 @@ use toml::Value;
 
 use self::decomp_format::{dirs, files, keys, values};
 
-use crate::address::Address;
+use crate::address::{Address, OverlayName};
 use crate::knowledge::{
     ClaimSource, Confidence, LineComment, LocalVariable, RefutedClaim, Symbol, SymbolKind,
     SymbolsFile,
 };
 use crate::workspace::{
     AnalysisConfig, CONFIG_FILE, DetectedFact, LegacyConfig, LinkConfig, OutputConfig,
-    RebuildConfig, RuntimeBase, RuntimeConfig, SCHEMA, SYMBOLS_FILE, SegmentConfig, TargetConfig,
-    TargetFormat, UnpackedConfig, WorkspaceConfig,
+    OverlayConfig, RebuildConfig, RuntimeBase, RuntimeConfig, SCHEMA, SYMBOLS_FILE, SegmentConfig,
+    TargetConfig, TargetFormat, UnpackedConfig, WorkspaceConfig,
 };
 
 /// Result of a migration.
@@ -252,7 +253,7 @@ fn file_flags(n: &mut Tbl, cx: &mut Ctx) -> std::collections::BTreeMap<String, S
     out
 }
 
-/// Translates a Decomp address (`va:X`, `rel:S:O`) or an already canonical one.
+/// Translates a Decomp address (`va:X`, `rel:S:O`) or an already canonical one (`ovl:` maps 1:1, ADR 0011).
 fn translate_address(text: &str) -> Option<Address> {
     if let Some(hex) = text.strip_prefix("va:") {
         return Some(Address::Flat(u32::from_str_radix(hex, 16).ok()?));
@@ -416,6 +417,10 @@ pub fn migrate_decomp(from: &Path, to: &Path) -> Result<MigrationReport, Migrate
                 knowledge::convert_file(decomp_name, &path, &mut cx)?,
             ));
         }
+    }
+    let compiler = config.rebuild.as_ref().and_then(|r| r.compiler.as_deref());
+    if let Some(text) = rules::convert(from, compiler, &mut cx)? {
+        extra.push((rules::FILE.to_string(), text));
     }
     if knowledge_dir.join(dirs::RUNS).is_dir() {
         copies.add(knowledge_dir.join(dirs::RUNS), "knowledge/runs");
@@ -632,31 +637,18 @@ fn convert_config(table: toml::Table, cx: &mut Ctx) -> Result<WorkspaceConfig, M
     };
     let processor = target_table.require_string(keys::PROCESSOR, cx)?;
     let mut segments = Vec::new();
-    for mut s in target_table.tables("segment", cx) {
-        let name = s.require_string("name", cx)?;
-        let start_text = s.require_string("start", cx)?;
-        let start = require_address(&s.key("start"), &start_text)?;
-        let length = s.require_uint(keys::LENGTH, cx)?;
-        let file_offset = s.uint(keys::FILE_OFFSET, cx);
-        let file_length = s.uint(keys::FILE_LENGTH, cx);
-        let permissions = s
-            .string(keys::PERMISSIONS, cx)
-            .unwrap_or_else(|| "rwx".into());
-        if permissions.is_empty() || !permissions.chars().all(|c| matches!(c, 'r' | 'w' | 'x')) {
-            cx.unmapped
-                .insert(format!("{}={permissions}", s.key(keys::PERMISSIONS)));
-        }
+    for mut s in target_table.tables(keys::SEGMENT, cx) {
+        segments.push(convert_segment(&mut s, cx)?);
         s.finish(cx);
-        segments.push(SegmentConfig {
-            name,
-            start,
-            length,
-            file_offset,
-            file_length,
-            permissions,
-        });
     }
     target_table.finish(cx);
+    let mut overlays = Vec::new();
+    for mut o in root.tables(keys::OVERLAY, cx) {
+        let (overlay, overlay_segments) = convert_overlay(&mut o, cx)?;
+        o.finish(cx);
+        overlays.push(overlay);
+        segments.extend(overlay_segments);
+    }
     let target = TargetConfig {
         file,
         sha256,
@@ -809,7 +801,91 @@ fn convert_config(table: toml::Table, cx: &mut Ctx) -> Result<WorkspaceConfig, M
         detected,
         legacy: None,
         plugins: Default::default(),
+        overlays,
     })
+}
+
+fn convert_segment(s: &mut Tbl, cx: &mut Ctx) -> Result<SegmentConfig, MigrateError> {
+    let name = s.require_string("name", cx)?;
+    let start_text = s.require_string("start", cx)?;
+    let start = require_address(&s.key("start"), &start_text)?;
+    let length = s.require_uint(keys::LENGTH, cx)?;
+    let file_offset = s.uint(keys::FILE_OFFSET, cx);
+    let file_length = s.uint(keys::FILE_LENGTH, cx);
+    let permissions = s
+        .string(keys::PERMISSIONS, cx)
+        .unwrap_or_else(|| "rwx".into());
+    if permissions.is_empty() || !permissions.chars().all(|c| matches!(c, 'r' | 'w' | 'x')) {
+        cx.unmapped
+            .insert(format!("{}={permissions}", s.key(keys::PERMISSIONS)));
+    }
+    Ok(SegmentConfig {
+        name,
+        start,
+        length,
+        file_offset,
+        file_length,
+        permissions,
+    })
+}
+
+/// One Decomp `[[overlay]]`: the overlay record and its memory segments (which go into `[[target.segment]]`, as
+/// `overlay add` writes them). Decomp's `register.ds` is implied by the data segment's start and is only checked.
+fn convert_overlay(
+    o: &mut Tbl,
+    cx: &mut Ctx,
+) -> Result<(OverlayConfig, Vec<SegmentConfig>), MigrateError> {
+    let name_text = o.require_string("name", cx)?;
+    let name = OverlayName::new(&name_text).map_err(|_| MigrateError::Invalid {
+        key: o.key("name"),
+        value: name_text.clone(),
+    })?;
+    let file = o.require_string(keys::FILE, cx)?;
+    let sha256 = o.require_string("sha256", cx)?;
+    let format = o.require_string("format", cx)?;
+    let entry = match o.string(keys::ENTRY, cx) {
+        Some(text) => Some(require_address(&o.key(keys::ENTRY), &text)?),
+        None => None,
+    };
+    let mut segments = Vec::new();
+    for mut s in o.tables(keys::SEGMENT, cx) {
+        let mut segment = convert_segment(&mut s, cx)?;
+        s.finish(cx);
+        if segment.start.overlay() != Some(name) {
+            return Err(MigrateError::Invalid {
+                key: format!("{}.{}.start", keys::OVERLAY, keys::SEGMENT),
+                value: segment.start.to_string(),
+            });
+        }
+        if let Some(stem) = segment.name.strip_suffix(values::DATA_SEGMENT_SUFFIX) {
+            segment.name = format!("{stem}.data");
+        }
+        segments.push(segment);
+    }
+    if let Some(mut r) = o.table(keys::REGISTER, cx) {
+        if let Some(ds) = r.string("ds", cx) {
+            let data_seg = segments.iter().find_map(|s| match s.start {
+                Address::Ovl { seg, .. } if !s.permissions.contains('x') => Some(seg),
+                _ => None,
+            });
+            let agrees = u16::from_str_radix(&ds, 16)
+                .ok()
+                .is_some_and(|v| data_seg.is_none_or(|d| d == v));
+            if !agrees {
+                cx.unmapped.insert(format!("{}={ds}", r.key("ds")));
+            }
+        }
+        r.finish(cx);
+    }
+    // the overlay's bytes in its file end with the last segment stored there
+    let size = segments
+        .iter()
+        .filter_map(|s| Some(s.file_offset? + s.file_length.unwrap_or(s.length)))
+        .max()
+        .unwrap_or(0);
+    let mut overlay = OverlayConfig::new(name, file, sha256, format, size);
+    overlay.entry = entry;
+    Ok((overlay, segments))
 }
 
 fn convert_symbols(table: toml::Table, cx: &mut Ctx) -> Result<Vec<Symbol>, MigrateError> {

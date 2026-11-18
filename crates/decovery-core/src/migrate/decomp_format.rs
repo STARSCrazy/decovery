@@ -78,6 +78,23 @@ pub(super) mod keys {
     pub(crate) const LOCAL: &str = "lokal";
     pub(crate) const PLACE: &str = "platz";
     pub(crate) const LINE_COMMENT: &str = "zeilenkommentar";
+    pub(crate) const OVERLAY: &str = "overlay";
+    pub(crate) const REGISTER: &str = "register";
+    pub(crate) const SEGMENT: &str = "segment";
+}
+
+/// Decomp's compiler knowledge (`compilerwissen/*.toml` at the Decomp repository root) and its keys.
+pub(super) mod rules {
+    pub(crate) const DIR: &str = "compilerwissen";
+    pub(crate) const RULE: &str = "regel";
+    pub(crate) const COMPILER: &str = "compiler";
+    pub(crate) const SUGGESTION: &str = "vorschlag";
+    pub(crate) const DOES_NOT_HELP: &str = "hilft_nicht";
+    pub(crate) const EVIDENCE: &str = "beleg";
+    pub(crate) const TARGET: &str = "ziel";
+    pub(crate) const FUNCTION: &str = "funktion";
+    pub(crate) const DATE: &str = "datum";
+    pub(crate) const RESULT: &str = "ergebnis";
 }
 
 /// Enum values of `decomp.toml` and `symbole.toml`.
@@ -96,6 +113,8 @@ pub(super) mod values {
     pub(crate) const DETECTED_CALLING_CONVENTION: &str = "aufrufart";
     pub(crate) const FORMAT_FLAT32: &str = "flach32";
     pub(crate) const DETECTED_SOURCE_PACKED: &str = "gepackt";
+    /// Suffix of an overlay's data segment name (`VINIT.daten`), English `.data`.
+    pub(crate) const DATA_SEGMENT_SUFFIX: &str = ".daten";
 }
 
 /// The header of a generated function file (`ausgabe/funktionen/**`) and the German phrases in it.

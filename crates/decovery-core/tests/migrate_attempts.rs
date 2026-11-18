@@ -281,14 +281,26 @@ fn second_import_adds_only_new_lines() {
 }
 
 #[test]
-fn overlay_addresses_are_skipped_with_reason() {
+fn overlay_attempts_are_migrated() {
     let from = tempfile::tempdir().unwrap();
     let to = tempfile::tempdir().unwrap();
-    lines(from.path(), &[line("ovl:0001:0020", "hand", "unsupported")]);
+    lines(
+        from.path(),
+        &[
+            line("ovl:VINIT:0000:505E", "hand", "manual"),
+            line("ovl:0001:0020", "hand", "no overlay name"),
+        ],
+    );
     let report = migrate_attempts(from.path(), to.path()).unwrap();
-    assert_eq!(report.attempts, 0);
-    assert_eq!(report.skipped_lines, 1);
-    assert!(report.skipped[0].contains("ovl:"));
+    assert_eq!(report.attempts, 1);
+    assert_eq!(report.skipped_lines, 1, "{report:?}");
+    assert!(report.skipped[0].contains("ovl:0001:0020"));
+    let address: Address = "ovl:VINIT:0000:505E".parse().unwrap();
+    let (records, _) = read_attempts(to.path(), address).unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].address, address);
+    let again = migrate_attempts(from.path(), to.path()).unwrap();
+    assert_eq!((again.attempts, again.already_present), (0, 1));
 }
 
 #[test]

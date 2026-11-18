@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::address::Address;
+use crate::address::{Address, OverlayName};
 use crate::knowledge::{Confidence, Symbol, SymbolsFile};
 
 /// File name of the workspace configuration.
@@ -120,6 +120,61 @@ pub struct WorkspaceConfig {
     /// `[plugins.<name>]`: how to start a plugin; overrides the user config entry of the same name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub plugins: BTreeMap<String, PluginConfig>,
+    /// `[[overlay]]`: overlay files the main program loads at run time (ADR 0011).
+    #[serde(default, rename = "overlay", skip_serializing_if = "Vec::is_empty")]
+    pub overlays: Vec<OverlayConfig>,
+}
+
+impl WorkspaceConfig {
+    /// The configured overlay of that name.
+    pub fn overlay(&self, name: OverlayName) -> Option<&OverlayConfig> {
+        self.overlays.iter().find(|o| o.name == name)
+    }
+}
+
+/// `[[overlay]]`: an overlay file of the target (ADR 0011). Its memory segments are `[[target.segment]]` entries
+/// with `ovl:` start addresses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct OverlayConfig {
+    pub name: OverlayName,
+    /// Path to the overlay file, relative to the workspace root unless absolute.
+    pub file: String,
+    pub sha256: String,
+    /// Overlay format, e.g. `aztec-c86`.
+    pub format: String,
+    /// Start of the overlay inside the file (0 for a file of its own).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub file_offset: u64,
+    /// Bytes of the overlay in the file.
+    pub size: u64,
+    /// Entry point.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<Address>,
+}
+
+impl OverlayConfig {
+    pub fn new(
+        name: OverlayName,
+        file: impl Into<String>,
+        sha256: impl Into<String>,
+        format: impl Into<String>,
+        size: u64,
+    ) -> Self {
+        OverlayConfig {
+            name,
+            file: file.into(),
+            sha256: sha256.into(),
+            format: format.into(),
+            file_offset: 0,
+            size,
+            entry: None,
+        }
+    }
+}
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
 }
 
 /// `[legacy]`: settings of the Decomp legacy bridge (ADR 0007).
@@ -198,6 +253,26 @@ pub struct SegmentConfig {
     pub file_length: Option<u64>,
     /// Access rights as `r`, `w`, `x` letters, for example `rx`.
     pub permissions: String,
+}
+
+impl SegmentConfig {
+    pub fn new(
+        name: impl Into<String>,
+        start: Address,
+        length: u64,
+        file_offset: Option<u64>,
+        file_length: Option<u64>,
+        permissions: impl Into<String>,
+    ) -> Self {
+        SegmentConfig {
+            name: name.into(),
+            start,
+            length,
+            file_offset,
+            file_length,
+            permissions: permissions.into(),
+        }
+    }
 }
 
 /// Analysis settings.
@@ -368,6 +443,31 @@ decomp_workspace = \"D:/decomp/ws\"
         let legacy = config.legacy.as_ref().unwrap();
         assert_eq!(legacy.decomp_workspace.as_deref(), Some("D:/decomp/ws"));
         let again: WorkspaceConfig = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(again, config);
+    }
+
+    #[test]
+    fn overlays_round_trip() {
+        let config: WorkspaceConfig = toml::from_str(BASE).unwrap();
+        assert!(!toml::to_string(&config).unwrap().contains("overlay"));
+        let text = format!(
+            "{BASE}
+[[overlay]]
+name = \"vinit\"
+file = \"VINIT.OVR\"
+sha256 = \"bb\"
+format = \"aztec-c86\"
+size = 6013
+entry = \"ovl:VINIT:0000:6655\"
+"
+        );
+        let config: WorkspaceConfig = toml::from_str(&text).unwrap();
+        let name = OverlayName::new("VINIT").unwrap();
+        let o = config.overlay(name).unwrap();
+        assert_eq!((o.file_offset, o.size), (0, 6013));
+        let written = toml::to_string(&config).unwrap();
+        assert!(written.contains("name = \"VINIT\""), "{written}");
+        let again: WorkspaceConfig = toml::from_str(&written).unwrap();
         assert_eq!(again, config);
     }
 

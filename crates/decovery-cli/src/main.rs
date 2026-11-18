@@ -9,6 +9,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 mod compare;
+mod overlay;
 mod setup;
 
 use decovery_core::{CallRecord, ClaimSource, Confidence, append_call};
@@ -285,6 +286,34 @@ enum Command {
     Bench {
         #[command(subcommand)]
         what: BenchCommand,
+    },
+    /// Overlay files of the target (`[[overlay]]` in decovery.toml, ADR 0011).
+    Overlay {
+        #[command(subcommand)]
+        what: OverlayCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum OverlayCommand {
+    /// Add overlay files (a file of the same name replaces its entry); the name is the file stem, upper case.
+    Add {
+        /// Overlay files.
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+        /// Overlay format.
+        #[arg(long, default_value = "aztec-c86")]
+        format: String,
+        /// Data segment (hex, relative to the load segment) when the startup code does not show it.
+        #[arg(long, value_parser = parse_hex_u16)]
+        ds: Option<u16>,
+    },
+    /// Every configured overlay with its segments.
+    List,
+    /// Remove an overlay and its memory segments.
+    Remove {
+        /// Overlay name.
+        name: String,
     },
 }
 
@@ -564,6 +593,11 @@ fn call_record(command: &Command) -> Option<CallRecord> {
         Command::Link => ("link", None, None),
         Command::History { function, .. } => ("history", Some(function), None),
         Command::Detail { handle, .. } => ("detail", Some(handle), None),
+        Command::Overlay { what } => match what {
+            OverlayCommand::Add { .. } => ("overlay", None, Some("add")),
+            OverlayCommand::List => ("overlay", None, Some("list")),
+            OverlayCommand::Remove { name } => ("overlay", Some(name), Some("remove")),
+        },
         Command::Job { what } => match what {
             JobCommand::List => ("job", None, Some("list")),
             JobCommand::Poll { id } => ("job", Some(id), Some("poll")),
@@ -905,6 +939,29 @@ fn run(cli: Cli) -> ExitCode {
             limits,
             max_jobs,
         )),
+        Command::Overlay { what } => {
+            let answer = match what {
+                OverlayCommand::Add { files, format, ds } => {
+                    overlay::add(&cli.workspace, &files, &format, ds)
+                }
+                OverlayCommand::List => overlay::list(&cli.workspace),
+                OverlayCommand::Remove { name } => overlay::remove(&cli.workspace, &name),
+            };
+            match answer {
+                Ok(v) => {
+                    if cli.json {
+                        println!("{v:#}");
+                    } else {
+                        overlay::print(&v);
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::from(2)
+                }
+            }
+        }
         Command::Job { what } => {
             let action = match what {
                 JobCommand::List => decovery_facade::JobAction::List,
@@ -1067,6 +1124,14 @@ fn bench_run(suite: &Path, options: &decovery_bench::RunOptions, json: bool) -> 
 }
 
 /// Prints the failure on stderr and maps it to its exit code.
+fn parse_hex_u16(text: &str) -> Result<u16, String> {
+    let digits = text
+        .strip_prefix("0x")
+        .or_else(|| text.strip_prefix("0X"))
+        .unwrap_or(text);
+    u16::from_str_radix(digits, 16).map_err(|e| format!("{text:?}: {e}"))
+}
+
 fn finish(result: Result<(), FacadeError>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,

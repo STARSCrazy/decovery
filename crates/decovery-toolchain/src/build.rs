@@ -236,6 +236,24 @@ impl CompilePlan {
     }
 }
 
+/// The commands of one compile job: the prelude, `SET TMP=` to the job's own temporary directory `tmp` (a
+/// directory of the build drive C:), the profile's job prelude, `CD dir` when the job runs in a directory, the line.
+fn job_commands(profile: &Profile, tmp: &str, dir: Option<&str>, line: String) -> Vec<String> {
+    let mut commands = profile.prelude.clone();
+    commands.push(format!("SET TMP=C:\\{tmp}"));
+    commands.extend(
+        profile
+            .job_prelude
+            .iter()
+            .map(|command| command.replace("{tmp}", tmp)),
+    );
+    if let Some(dir) = dir {
+        commands.push(format!("CD {dir}"));
+    }
+    commands.push(line);
+    commands
+}
+
 /// Reads the inputs of compiling the staged `sources` (DOS name, flags) in `build_dir` once: the tool fingerprint
 /// (hashed once per process), every source and header, and the cached objects.
 pub fn plan_compile(
@@ -335,12 +353,7 @@ pub fn compile_planned(
                 path: tmp_dir,
                 source,
             })?;
-            let mut commands = profile.prelude.clone();
-            commands.push(format!("SET TMP=C:\\{tmp}"));
-            if let Some(dir) = &job.dir {
-                commands.push(format!("CD {dir}"));
-            }
-            commands.push(line);
+            let commands = job_commands(profile, &tmp, job.dir.as_deref(), line);
             let object = match &job.dir {
                 Some(dir) => format!("{dir}/{}", profile.object_name(&job.name)),
                 None => profile.object_name(&job.name),
@@ -452,6 +465,23 @@ pub fn compile_planned(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn job_prelude_gets_the_job_temp_dir() {
+        let aztec = crate::profile("aztec-c86-4.2b").unwrap();
+        let commands = job_commands(&aztec, "TMP00003", None, "CC -n T.C".into());
+        assert_eq!(
+            &commands[3..],
+            [
+                "SET TMP=C:\\TMP00003",
+                "SET CCTEMP=C:\\TMP00003\\",
+                "CC -n T.C"
+            ]
+        );
+        let tc = crate::profile("turbo-c-2.0").unwrap();
+        let commands = job_commands(&tc, "TMP00000", Some("SUB"), "TCC X.C".into());
+        assert_eq!(commands, ["SET TMP=C:\\TMP00000", "CD SUB", "TCC X.C"]);
+    }
     use crate::RunnerError;
 
     /// Reports every job as done with its object produced, but writes nothing: the object cannot be read.

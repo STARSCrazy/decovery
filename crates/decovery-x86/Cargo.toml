@@ -8,6 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+decovery-core.workspace = true
 iced-x86.workspace = true
 
 [lints]

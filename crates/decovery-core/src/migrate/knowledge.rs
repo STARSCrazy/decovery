@@ -357,7 +357,7 @@ fn address_text(text: &str, path: &str, cx: &mut Ctx) -> String {
 }
 
 fn mixed_text(text: &str, path: &str, cx: &mut Ctx) -> String {
-    if text.starts_with("va:") || text.starts_with("rel:") {
+    if text.starts_with("va:") || text.starts_with("rel:") || text.starts_with("ovl:") {
         address_text(text, path, cx)
     } else {
         text.to_string()

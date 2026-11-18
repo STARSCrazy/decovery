@@ -55,6 +55,8 @@ pub struct Section {
     /// Initialised bytes up to the highest written offset, raw (fixup fields keep their stored content).
     pub data: Vec<u8>,
     pub relocs: Vec<ObjReloc>,
+    /// Size of the section in memory, at least `data.len()` (a BSS section has a size but no bytes).
+    pub size: u32,
 }
 
 /// A symbol defined in a section. `public` is false for local publics (static functions).
@@ -158,6 +160,7 @@ impl Section {
         data: Vec<u8>,
         relocs: Vec<ObjReloc>,
     ) -> Self {
+        let size = u32::try_from(data.len()).unwrap_or(u32::MAX);
         Section {
             name: name.into(),
             class: class.into(),
@@ -165,7 +168,15 @@ impl Section {
             bits,
             data,
             relocs,
+            size,
         }
+    }
+
+    /// Sets the size in memory; it never drops below the initialised bytes.
+    pub fn with_size(mut self, size: u32) -> Self {
+        let have = u32::try_from(self.data.len()).unwrap_or(u32::MAX);
+        self.size = size.max(have);
+        self
     }
 }
 

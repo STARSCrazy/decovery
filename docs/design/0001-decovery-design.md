@@ -106,7 +106,7 @@ Anti-goals (would make it a failure even if it works)
 |---|---|
 | Workspace | One target program under study: `decovery.toml` + `knowledge/` + `src/` + generated `output/` + `cache/`. Lives in its own (usually private) git repo. |
 | Program | The loaded image: format, architecture + mode per region, sections/segments/objects, address spaces, relocations/fixups, entry points, imports/exports, resources, debug info if present. |
-| Address | Typed: `flat:XXXXXXXX` (32-bit linear/VA), `flat64:…` (64-bit VA, reserved), `seg:SSSS:OOOO` (real mode, relative to load segment), `sel:SSSS:OOOO` (protected-mode segment, e.g. NE), `file:0x…` (file offset). One canonical text form each. |
+| Address | Typed: `flat:XXXXXXXX` (32-bit linear/VA), `flat64:…` (64-bit VA, reserved), `seg:SSSS:OOOO` (real mode, relative to load segment), `sel:SSSS:OOOO` (protected-mode segment, e.g. NE), `ovl:NAME:SSSS:OOOO` (real-mode address inside a named overlay, no linear address; ADR 0011), `file:0x…` (file offset). One canonical text form each. |
 | Function | Address range + name + prototype + module assignment + status. |
 | Claim | Any piece of knowledge (name, type, comment, prototype, boundary) with `confidence` = `confirmed` \| `assumed` \| `refuted`, `source` (`human`, `signature`, `runtime`, `similarity`, `analysis`, `agent`, `import`, `link`) and `evidence` text. Precedence `human` > `confirmed` > `assumed`; refuted claims are kept with history. |
 | Profile | Declarative description of a compiler (or assembler/linker) version: invocation, flag space, naming, object format, calling conventions, prologue patterns. |
@@ -247,7 +247,8 @@ A remote mode lets the CLI talk to a running MCP server so the warm backends are
 
 ```
 <workspace>/
-  decovery.toml            target file + hash, format, segments, detected facts, profile, runners, plugins
+  decovery.toml            target file + hash, format, segments, detected facts, profile, runners, plugins,
+                           [[overlay]] files (ADR 0011; their segments have ovl: starts)
   knowledge/
     symbols.toml           functions, globals, labels with claims
     types.h                C types (parsed by the C frontend)

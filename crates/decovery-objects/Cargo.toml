@@ -1,6 +1,6 @@
 [package]
 name = "decovery-objects"
-description = "Object file readers for decovery: OMF with a section/symbol/relocation model"
+description = "Object file readers for decovery: OMF and Aztec C86 with a section/symbol/relocation model"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,10 +9,16 @@ rust-version.workspace = true
 
 [dependencies]
 decovery-core.workspace = true
+serde.workspace = true
 thiserror.workspace = true
+
+[features]
+# Test-only Aztec object writer for public tests.
+test-writer = []
 
 [dev-dependencies]
 serde_json.workspace = true
+decovery-objects = { path = ".", features = ["test-writer"] }
 
 [lints]
 workspace = true

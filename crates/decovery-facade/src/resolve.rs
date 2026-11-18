@@ -45,6 +45,7 @@ pub(crate) fn locate(session: &Session, input: &str) -> Result<Address, FacadeEr
     } else {
         address_of_name(session, input)?
     };
+    check_overlay(session, requested)?;
     if segment_of(session, requested).is_none() {
         return Err(FacadeError::OutsideMap(requested));
     }
@@ -86,8 +87,9 @@ fn address_of_name(session: &Session, name: &str) -> Result<Address, FacadeError
 }
 
 fn from_file_offset(session: &Session, off: u64) -> Result<Address, FacadeError> {
+    // `file:` offsets are offsets in the main program's file; overlay segments hold offsets in their own files.
     for seg in &session.workspace.config.target.segments {
-        let Some(start) = seg.file_offset else {
+        let Some(start) = seg.file_offset.filter(|_| seg.start.overlay().is_none()) else {
             continue;
         };
         let len = seg.file_length.unwrap_or(seg.length);
@@ -106,35 +108,41 @@ fn from_file_offset(session: &Session, off: u64) -> Result<Address, FacadeError>
 }
 
 pub(crate) fn in_segment(seg: &SegmentConfig, at: Address) -> bool {
-    match (seg.start, at) {
-        (
-            Address::Sel {
-                segment: s,
-                off: base,
-            },
-            Address::Sel { segment, off },
-        ) => s == segment && off >= base && u64::from(off - base) < seg.length,
-        (Address::Sel { .. }, _) | (_, Address::Sel { .. }) => false,
-        (start, at) => match (start.linear(), at.linear()) {
-            (Some(s), Some(a)) => a >= s && a - s < seg.length,
-            _ => false,
-        },
+    at.bytes_from(seg.start).is_some_and(|d| d < seg.length)
+}
+
+/// An `ovl:` address must name a configured overlay.
+fn check_overlay(session: &Session, at: Address) -> Result<(), FacadeError> {
+    let Some(name) = at.overlay() else {
+        return Ok(());
+    };
+    let known = &session.workspace.config.overlays;
+    if known.iter().any(|o| o.name == name) {
+        return Ok(());
     }
+    let names: Vec<&str> = known.iter().map(|o| o.name.as_str()).collect();
+    Err(FacadeError::Invalid(format!(
+        "unknown overlay {name} in {at} (known overlays: {})",
+        if names.is_empty() {
+            "none".to_string()
+        } else {
+            names.join(", ")
+        }
+    )))
 }
 
 /// The analyzed function with the smallest distance to `at`, with its display name.
 fn nearest(session: &Session, at: Address) -> Option<(Address, String)> {
-    let target = at.linear()?;
     session
         .analysis
         .functions
         .iter()
         .filter_map(|f| {
-            let (start, end) = (f.start.linear()?, f.end.linear()?);
-            let distance = if target < start {
-                start - target
-            } else {
-                target.saturating_sub(end)
+            let distance = match f.start.bytes_from(at) {
+                Some(d) => d,
+                None => at
+                    .bytes_from(f.end)
+                    .or_else(|| f.end.bytes_from(at).map(|_| 0))?,
             };
             Some((distance, f.start))
         })
@@ -181,6 +189,71 @@ comment = \"only a comment\"
         assert!(matches!(
             address_of_name(&session, ""),
             Err(FacadeError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn unknown_overlay_name_is_named() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("decovery.toml"),
+            "schema = 1
+
+[target]
+file = \"t.exe\"
+sha256 = \"aa\"
+format = \"mz\"
+processor = \"x86\"
+
+[[target.segment]]
+name = \"VINIT.code\"
+start = \"ovl:VINIT:0000:5000\"
+length = 256
+file_offset = 14
+permissions = \"rx\"
+
+[[overlay]]
+name = \"VINIT\"
+file = \"VINIT.OVR\"
+sha256 = \"bb\"
+format = \"aztec-c86\"
+size = 270
+
+[[overlay]]
+name = \"VBASE\"
+file = \"VBASE.OVR\"
+sha256 = \"cc\"
+format = \"aztec-c86\"
+size = 270
+",
+        )
+        .unwrap();
+        let session = Session::open_without_analysis(dir.path()).unwrap();
+        let Err(FacadeError::Invalid(message)) = locate(&session, "ovl:NOPE:0000:5000") else {
+            panic!("unknown overlay accepted");
+        };
+        assert!(
+            message.contains("NOPE") && message.contains("VINIT, VBASE"),
+            "{message}"
+        );
+        assert!(locate(&session, "ovl:vinit:0000:5010").is_ok());
+        assert!(matches!(
+            locate(&session, "ovl:VINIT:0000:5100"),
+            Err(FacadeError::OutsideMap(_))
+        ));
+        // the overlay's window is not part of the main program and vice versa
+        assert!(matches!(
+            locate(&session, "ovl:VBASE:0000:5010"),
+            Err(FacadeError::OutsideMap(_))
+        ));
+        assert!(matches!(
+            locate(&session, "seg:0000:5010"),
+            Err(FacadeError::OutsideMap(_))
+        ));
+        // `file:` offsets belong to the main program's file, not to an overlay file
+        assert!(matches!(
+            locate(&session, "file:0x10"),
+            Err(FacadeError::Invalid(_))
         ));
     }
 }

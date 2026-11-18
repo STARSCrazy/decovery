@@ -673,15 +673,7 @@ fn site_text(session: &Session, index: &AnalysisIndex<'_>, at: Address) -> Strin
 }
 
 fn offset_in(start: Address, at: Address) -> u64 {
-    match (start, at) {
-        (Address::Sel { off: a, .. }, Address::Sel { off: b, .. }) => {
-            u64::from(b.saturating_sub(a))
-        }
-        _ => match (start.linear(), at.linear()) {
-            (Some(a), Some(b)) => b.saturating_sub(a),
-            _ => 0,
-        },
-    }
+    at.bytes_from(start).unwrap_or(0)
 }
 
 // --- pattern -------------------------------------------------------------------------------------------

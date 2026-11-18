@@ -4,6 +4,7 @@
 //!   jump tables and the operand fields that can carry an address (port of Decomp's `nachbau/befehle.py`
 //!   `zerlege`).
 //! - [`padding_positions`]: bytes of no-op padding behind an unconditional instruction (Decomp's `nop_fuellung`).
+//! - [`find_prologues`]: prologue search with placeholder bytes and a resolved call target.
 //! - [`internal_calls`]: every `E8`/`E9` near call/jump position with its target, for calls the compiler
 //!   resolved inside the object without a fixup.
 //!
@@ -14,11 +15,13 @@
 
 mod calls;
 mod decode;
+mod prologue;
 
 use std::collections::BTreeSet;
 
 pub use calls::internal_calls;
 pub use decode::{DecodeOptions, Decoded, DecodedKind, FieldRole, decode_detailed};
+pub use prologue::{PatternByte, PatternError, ProloguePattern, find_prologues};
 
 /// One decoded instruction (or padding run, jump table, undecodable byte) of a function.
 #[derive(Debug, Clone, PartialEq, Eq)]

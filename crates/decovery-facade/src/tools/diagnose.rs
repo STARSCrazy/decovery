@@ -3,7 +3,7 @@
 use decovery_diff::{
     CompareOptions, PairKind, classify_deviation, diagnose, instruction_pairs, pairs_text,
 };
-use decovery_objects::{functions, read_omf};
+use decovery_objects::{functions, read_object};
 use decovery_toolchain::rebuild_profile;
 use serde_json::{Value, json};
 
@@ -50,13 +50,14 @@ pub fn diagnose_tool(
         .to_ascii_lowercase();
     let bytes = std::fs::read(root.join(OBJECTS_DIR).join(format!("{stem}.obj")))
         .map_err(|_| no_object(&name, Some(file)))?;
-    let object = read_omf(&bytes, &file.to_ascii_uppercase()).map_err(|e| {
-        FacadeError::Invalid(format!(
-            "cannot read the rebuilt object of {file}: {e}; run `decovery build {file}`"
-        ))
-    })?;
     let ws = &session.workspace;
     let (profile, _) = rebuild_profile(ws).map_err(toolchain)?;
+    let object =
+        read_object(profile.object_format, &bytes, &file.to_ascii_uppercase()).map_err(|e| {
+            FacadeError::Invalid(format!(
+                "cannot read the rebuilt object of {file}: {e}; run `decovery build {file}`"
+            ))
+        })?;
     let view = object
         .modules
         .iter()

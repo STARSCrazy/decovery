@@ -34,7 +34,7 @@ from decovery_ghidra.export import (  # noqa: E402
     StringRecord,
 )
 from decovery_ghidra.hashing import blake3_hex  # noqa: E402
-from decovery_ghidra.mapping import GhidraAddress, default_name  # noqa: E402
+from decovery_ghidra.mapping import GhidraAddress, MappingError, block_for, default_name  # noqa: E402
 
 
 def flat(offset):
@@ -787,6 +787,34 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(default_name(GhidraAddress(0x1000, 0x10)), "fun_1000_0010")
         self.assertEqual(GhidraAddress.parse("0001A2B0"), GhidraAddress(None, 0x1A2B0))
         self.assertEqual(GhidraAddress.parse("1000:0010"), GhidraAddress(0x1000, 0x10))
+
+    def test_overlay_addresses_map_to_overlay_spaces(self):
+        from decovery_ghidra.mapping import from_ghidra_address, merged_ranges, to_ghidra_address
+
+        at = to_ghidra_address("ovl:VINIT:0000:505E", "x86-real-16")
+        self.assertEqual(at, GhidraAddress(0, 0x505E, "VINIT"))
+        self.assertEqual(at.text(), "VINIT::0000:505E")
+        self.assertEqual(GhidraAddress.parse(at.text()), at)
+        self.assertEqual(from_ghidra_address(at, "x86-real-16"), "ovl:VINIT:0000:505E")
+        self.assertEqual(default_name(at), "fun_VINIT_0000_505E")
+        with self.assertRaises(MappingError):
+            to_ghidra_address("ovl:VINIT:0000:505E", "x86-flat-32")
+        # ranges of two overlays at the same CS:IP are never merged
+        a = GhidraAddress(0, 0x5000, "A")
+        b = GhidraAddress(0, 0x5001, "B")
+        self.assertEqual(len(merged_ranges([(a, a), (b, b)], "x86-real-16")), 2)
+        block = block_for({"name": "VINIT.code", "start": "ovl:VINIT:0000:505E", "size": 4, "permissions": "rx"},
+                          "x86-real-16", bytes([0x90]))
+        self.assertEqual(block.overlay, "VINIT")
+        from decovery_ghidra.mapping import overlay_address
+
+        data = block_for({"name": "VINIT.data", "start": "ovl:VINIT:0FF6:909C", "size": 8, "permissions": "rw"},
+                         "x86-real-16", b"")
+        blocks = [block, data]
+        self.assertEqual(overlay_address(blocks, "VINIT", 0x505F), GhidraAddress(0, 0x505F, "VINIT"))
+        self.assertEqual(overlay_address(blocks, "VINIT", 0xFF60 + 0x909D), GhidraAddress(0xFF6, 0x909D, "VINIT"))
+        self.assertIsNone(overlay_address(blocks, "VINIT", 0x6000))
+        self.assertIsNone(overlay_address(blocks, "OTHER", 0x505F))
 
     def test_signature_for_ghidra(self):
         self.assertEqual(apply_mod.signature_for_ghidra("int __cdecl f(int a)"), ("int f(int a)", "__cdecl"))

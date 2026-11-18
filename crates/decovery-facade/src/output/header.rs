@@ -293,12 +293,7 @@ fn size_text(f: &AnalyzedFunction) -> String {
 
 /// Bytes from `start` to `end` inclusive, if both lie in one address space.
 fn span(start: Address, end: Address) -> Option<u64> {
-    match (start, end) {
-        (Address::Sel { segment: a, off: s }, Address::Sel { segment: b, off: e }) if a == b => {
-            u64::from(e).checked_sub(u64::from(s)).map(|d| d + 1)
-        }
-        _ => end.linear()?.checked_sub(start.linear()?).map(|d| d + 1),
-    }
+    end.bytes_from(start).map(|d| d + 1)
 }
 
 /// The kebab-case id serde writes for an enum value.

@@ -310,6 +310,7 @@ dependencies = [
  "decovery-mcp",
  "decovery-objects",
  "decovery-toolchain",
+ "decovery-x86",
  "serde_json",
  "sha2",
  "tempfile",
@@ -389,6 +390,8 @@ name = "decovery-objects"
 version = "0.2.0"
 dependencies = [
  "decovery-core",
+ "decovery-objects",
+ "serde",
  "serde_json",
  "thiserror",
 ]
@@ -412,6 +415,7 @@ dependencies = [
  "decovery-loaders",
  "decovery-objects",
  "decovery-plugin",
+ "decovery-x86",
  "rayon",
  "serde",
  "serde_json",
@@ -424,6 +428,7 @@ dependencies = [
 name = "decovery-x86"
 version = "0.2.0"
 dependencies = [
+ "decovery-core",
  "iced-x86",
 ]
 

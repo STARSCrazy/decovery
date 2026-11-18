@@ -149,6 +149,32 @@ class DosFsTest(unittest.TestCase):
         self.assertEqual(self.code(self.fs.dup, 9), 6)
         self.assertEqual(self.code(self.fs.force_dup, 9, 1), 6)
 
+    def test_delete_while_open_defers_the_host_delete(self):
+        h = self.fs.create("TMP.TXT")
+        self.fs.write(h, b"data")
+        self.fs.seek(h, 0, 0)
+        self.fs.delete("TMP.TXT")  # legal in DOS; a Windows host refuses to remove an open file
+        self.assertEqual(self.code(self.fs.open, "TMP.TXT", 0), 2)
+        self.assertEqual(self.code(self.fs.delete, "TMP.TXT"), 2)
+        self.assertEqual(self.fs.read(h, 4), b"data")  # the open handle goes on
+        self.fs.close(h)
+        self.assertFalse((self.c / "TMP.TXT").exists())
+
+    def test_delete_while_open_is_done_at_the_end_of_the_program(self):
+        self.fs.create("TMP.TXT")
+        self.fs.delete("TMP.TXT")
+        self.fs.close_all()
+        self.assertFalse((self.c / "TMP.TXT").exists())
+
+    def test_create_after_delete_while_open_keeps_the_new_file(self):
+        h = self.fs.create("TMP.TXT")
+        self.fs.delete("TMP.TXT")
+        g = self.fs.create("TMP.TXT")
+        self.fs.write(g, b"new")
+        self.fs.close(h)
+        self.fs.close(g)
+        self.assertEqual((self.c / "TMP.TXT").read_bytes(), b"new")
+
 
 if __name__ == "__main__":
     unittest.main()

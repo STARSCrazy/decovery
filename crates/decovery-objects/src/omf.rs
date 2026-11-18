@@ -314,7 +314,7 @@ fn segdef(st: &mut State, rd: &mut Rd, gross: bool) -> Result<(), ObjectError> {
     if attr >> 5 == 0 {
         rd.skip(3)?; // absolute segment: frame number and offset
     }
-    rd.skip(if gross { 4 } else { 2 })?; // length
+    let length = rd.uint(if gross { 4 } else { 2 })?;
     let name = rd.index()?;
     let class = rd.index()?;
     let lookup = |idx: u32| -> Result<String, ObjectError> {
@@ -339,6 +339,7 @@ fn segdef(st: &mut State, rd: &mut Rd, gross: bool) -> Result<(), ObjectError> {
         bits,
         data: Vec::new(),
         relocs: Vec::new(),
+        size: length,
     });
     Ok(())
 }
@@ -599,6 +600,7 @@ fn finish(name: String, mut st: State) -> ObjectModule {
         if s.kind != SectionKind::Code && s.data.is_empty() {
             s.kind = SectionKind::Bss;
         }
+        s.size = s.size.max(u32::try_from(s.data.len()).unwrap_or(u32::MAX));
     }
     ObjectModule {
         name,
