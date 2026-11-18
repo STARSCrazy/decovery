@@ -202,3 +202,22 @@ def test_other_rate_limit_events_are_ignored(run_driver, event):
     process, result, _ = run_driver([INIT, event, success(total_cost_usd=0.5)])
     assert process.returncode == 0
     assert "stop" not in result
+
+
+def test_last_rate_limit_info_is_recorded(run_driver):
+    first = {"type": "rate_limit_event", "rate_limit_info": {"status": "allowed",
+                                                            "unifiedWindows": {"5h": {"utilization": 0.01}}}}
+    last = {"type": "rate_limit_event", "rate_limit_info": {
+        "status": "allowed_warning", "resetsAt": 1,
+        "unifiedWindows": {"5h": {"utilization": 0.02}, "7d": {"utilization": 0.11}}}}
+    process, result, _ = run_driver([INIT, first, last, success(total_cost_usd=0.5)])
+    assert process.returncode == 0
+    assert result["rate_limit"] == {"status": "allowed_warning",
+                                    "unifiedWindows": {"5h": {"utilization": 0.02}, "7d": {"utilization": 0.11}}}
+
+
+def test_rate_limit_without_info_object_is_not_recorded(run_driver):
+    event = {"type": "rate_limit_event", "rate_limit_info": "rejected"}
+    process, result, _ = run_driver([INIT, event, success(total_cost_usd=0.5)])
+    assert process.returncode == 0
+    assert "rate_limit" not in result

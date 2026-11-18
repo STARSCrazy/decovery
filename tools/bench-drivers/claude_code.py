@@ -244,6 +244,11 @@ def run(args, result):
                             result["turns"] = turns
                     if kind == FIELDS["rate_limit_event"]:
                         status = field(event, "rate_limit_status")
+                        info = event.get("rate_limit_info")
+                        if isinstance(info, dict):
+                            # Last window state; the harness keeps unknown keys under driver_extra.
+                            result["rate_limit"] = {key: info[key] for key in ("status", "unifiedWindows")
+                                                    if key in info}
                         if isinstance(status, str) and status.lower() in RATE_LIMIT_STOPPED:
                             result["stop"] = "quota"
                     if kind == FIELDS["error"] or (kind == FIELDS["result"] and (

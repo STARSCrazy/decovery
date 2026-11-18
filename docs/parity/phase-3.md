@@ -51,3 +51,22 @@ tasks and the driver keeps no stream), so the 5 h window utilisation after the r
 - `max_builds` 40 and `max_tool_calls` 80 are suite defaults carried over from step 1; the plan fixes no probe value
   for them.
 - Candidate pool of the second target is small (14), so three tasks span 25 to 75 % coarsely.
+
+## Fixes after the probe (Task 9 step 3, 2026-11-18)
+
+- **Prompt change** (`crates/decovery-bench/src/prompt.md`, the default task prompt): added after the limits
+  paragraph:
+
+  > The goal is a byte-identical build. Keep iterating (diagnose, adjust, rebuild) until the verdict is identical or
+  > a limit is reached; do not stop while budget remains. When progress stalls, try a different approach, for example
+  > find similar or diagnose.
+
+  Results of runs before this change are not directly comparable with later ones.
+- **Harness resume not added**: ADR 0009 defines `--resume <run-id>` only for runs paused on `quota`, and the Claude
+  driver runs with `--no-session-persistence`, so re-prompting the same agent session after a nonidentical end would
+  need a driver contract change (an ADR). Left open; the prompt change is tried first.
+- **Quota data**: `tools/bench-drivers/claude_code.py` writes the last `rate_limit_event` `rate_limit_info`
+  (`status`, `unifiedWindows`) as `rate_limit` into its result; the harness stores it under the task's
+  `driver_extra`.
+- **Run directories are private**: a run directory (including `prompt.md`, which names the function and file, and
+  the logs) holds material derived from the private target and is never shared or committed.

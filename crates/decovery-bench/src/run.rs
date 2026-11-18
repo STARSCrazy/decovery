@@ -780,6 +780,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn default_prompt_asks_to_continue_until_identical_or_a_limit() {
+        let prompt = include_str!("prompt.md");
+        assert!(prompt.contains("byte-identical build"));
+        assert!(prompt.contains("the verdict is identical or a limit is reached"));
+        assert!(prompt.contains("do not stop while budget remains"));
+    }
+
+    #[test]
     fn failed_harness_build_does_not_reuse_a_stale_verdict() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
