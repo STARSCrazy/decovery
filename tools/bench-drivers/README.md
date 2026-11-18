@@ -5,10 +5,19 @@ and an independently installed Claude Code CLI. It submits the harness prompt on
 stdin, runs in the solution-free workspace copy, and writes an atomic schema-1
 result. Only decovery determines whether the function was solved.
 
-Task 8 steps 2–5 are implemented. **Step 1 has not been run.** All tests use a
-Python fake CLI; the real CLI has not been invoked. Isolation, subscription
-billing and the stream format still require the separately authorized step-1
-checkpoint. Use Claude Code 2.1.325 or newer as specified by the phase-3 plan.
+Task 8 is implemented and step 1 was run once by hand (2026-11-18, Claude Code
+2.1.327, run 20261118-063344-b04703, one 126-byte C function: solved identical, 12
+builds, 218 s, estimated 0.80 USD with `costBasis` "list"). Confirmed: the init event
+offered only the 13 `mcp__decovery__*` tools, the only MCP server was `decovery`
+(started with `--limits`), skills, slash commands and hooks were empty,
+`apiKeySource` was "none" (subscription). All `FIELDS` names were confirmed. The
+tests still use a Python fake CLI and never run the real one. Use Claude Code 2.1.325
+or newer. Copies must stay outside instruction trees (the builtin plugin
+`cc-plugin-agents-md` would load an `AGENTS.md` above the copy).
+
+The per-task spending cap is the estimated cost (`max_cost_usd`, default 3 USD);
+`max_tokens` is only a secondary guard because cache tokens are not counted (441k
+cache-read vs 18k counted in step 1).
 
 ## One-time login (owner action)
 
@@ -70,12 +79,12 @@ The fixed system prompt is written to a temporary file. Isolation arguments are
 trees and exclude project settings as specified by the plan. These flags are
 covered by tests; effective isolation still needs step 1.
 
-## Stream mapping — to be confirmed in step 1
+## Stream mapping (confirmed in step 1)
 
-All assumed field names and event selectors are centralized in `FIELDS` in
-`claude_code.py`. Change that mapping if the live checkpoint finds differences.
+All field names and event selectors are centralized in `FIELDS` in
+`claude_code.py`.
 
-| Stream fields (all to be confirmed in step 1) | Driver behavior |
+| Stream fields | Driver behavior |
 | --- | --- |
 | `type=system`, `subtype=init`, `model` | Model identification |
 | Init `tools`, `mcp_servers` | Reserved names for the step-1 isolation inspection |
@@ -98,7 +107,10 @@ through as `--max-budget-usd` and checked whenever a final result reports cost.
 Limits depend on reported events and can overshoot by one event; the adapter
 cannot estimate unreported usage or enforce cost between cost reports.
 
-Usage/subscription-limit, quota and rate-limit error messages produce
+A `rate_limit_event` whose `rate_limit_info.status` is `rejected` or `exhausted` also
+produces `stop = "quota"` (other statuses are ignored). Unmapped live events:
+`system/thinking_tokens`, `usage.output_tokens_details.thinking_tokens`, result
+`modelUsage` (the result schema has no field for thinking tokens). Usage/subscription-limit, quota and rate-limit error messages produce
 `stop = "quota"`. Token and cost stops use `token-limit` and `cost-limit`.
 Recognized stops exit zero so the harness can classify them from the result.
 Other CLI failures, error events, malformed streams and missing final results
@@ -122,8 +134,5 @@ python -m pytest tools/bench-drivers/tests -q
 The suite uses only synthetic stream events and a small generated Python CLI.
 It never searches for or runs the real `claude` executable.
 
-Open step-1 checks: confirm every mapped field, assistant usage aggregation and
-final totals; inspect the complete init event for allowed tools and loaded
-configuration; verify MCP starts with limits; verify no owner SessionStart hook,
-instructions, memory or plugins leak; confirm subscription use and estimated
-cost semantics. Real quota wording also remains unverified.
+Real quota wording is still unverified; the `rate_limit_event` shape was seen live only with
+status `allowed` (5h window 2 %, 7d 11 %).

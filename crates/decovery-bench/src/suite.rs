@@ -50,7 +50,7 @@ impl Default for TaskDefaults {
             max_searches: 0,
             wall_minutes: 15,
             max_tokens: None,
-            max_cost_usd: None,
+            max_cost_usd: Some(3.0),
             prompt: None,
             extra: BTreeMap::new(),
         }

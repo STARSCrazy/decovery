@@ -181,3 +181,24 @@ def test_malformed_stream_is_reported(run_driver):
     process, _, _ = run_driver(["not an event"])
     assert process.returncode != 0
     assert "event" in process.stderr.lower()
+
+
+@pytest.mark.parametrize("status", ["rejected", "exhausted"])
+def test_rate_limit_event_rejected_becomes_quota_stop(run_driver, status):
+    event = {"type": "rate_limit_event", "rate_limit_info": {"status": status}}
+    process, result, _ = run_driver([INIT, event], HANG="1")
+    assert process.returncode == 0
+    assert result["stop"] == "quota"
+
+
+@pytest.mark.parametrize("event", [
+    {"type": "rate_limit_event", "rate_limit_info": {"status": "allowed",
+                                                    "unifiedWindows": {"5h": {"utilization": 0.02}}}},
+    {"type": "rate_limit_event", "rate_limit_info": {"status": "allowed_warning"}},
+    {"type": "rate_limit_event"},
+    {"type": "rate_limit_event", "rate_limit_info": "rejected"},
+])
+def test_other_rate_limit_events_are_ignored(run_driver, event):
+    process, result, _ = run_driver([INIT, event, success(total_cost_usd=0.5)])
+    assert process.returncode == 0
+    assert "stop" not in result

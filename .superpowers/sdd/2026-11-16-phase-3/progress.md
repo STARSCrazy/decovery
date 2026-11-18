@@ -111,3 +111,10 @@ begtext and audio_driver_call_b7, probably no function start in its engine). Off
 Codex cannot run the local tests: its sandbox denies reading Decomp's cache directories.
 Task 16 (richer Ghidra decompile output) added to the plan, runs after Task 9.
 Next: rerun local tests, then try `find similar` on Syndicate (no tokens), then Tasks 8-11, 14, 15. Open: 186 MB build output in branch history (force-push denied by the classifier; owner may run the strip script, needs updating to the new HEAD).
+
+## 2026-11-18 Task 8 step 1
+Run 20261118-063344-b04703, second target, one 126-byte C function: solved identical, start distance 57 -> 0, 12 builds, 20 tool calls, 21 turns, 218 s.
+Tokens: input 38, output 18 272 (10 399 thinking), cache read 441 429, cache write 43 066. total_cost_usd 0.80 (estimate, costBasis "list"). Model claude-opus-5-5 (no --model), claude 2.1.327.
+Isolation held: init offered only 13 mcp__decovery__* tools; only MCP server decovery (with --limits); skills and slash_commands empty; no hooks; apiKeySource "none" (subscription); rate_limit_event 5h 2 %, 7d 11 %.
+Notes: init `agents` lists built-in types but the Agent tool is not offered; builtin plugin cc-plugin-agents-md would load an AGENTS.md above the copy (copies stay outside instruction trees). FIELDS all confirmed. Unmapped: rate_limit_event (now mapped: rejected/exhausted -> quota), system/thinking_tokens, output_tokens_details.thinking_tokens, result modelUsage.
+Owner decision: per-task cap = estimated cost, default 3 USD (max_tokens ignores cache). Default changed in suite.rs; plan updated.

@@ -12,18 +12,22 @@ import sys
 import tempfile
 
 
-# All assumed stream-json field paths live here: to be confirmed in step 1.
+# All stream-json field paths live here (confirmed by the live step-1 run, Claude Code 2.1.327).
 FIELDS = {
     "type": "type", "subtype": "subtype", "init": "init",
     "system": "system", "assistant": "assistant", "result": "result", "error": "error",
     "success": "success", "model": "model", "tools": "tools", "mcp_servers": "mcp_servers",
     "assistant_usage": "message.usage", "message_id": "message.id", "final_usage": "usage",
+    "rate_limit_event": "rate_limit_event", "rate_limit_status": "rate_limit_info.status",
     "is_error": "is_error", "text": "result", "error_detail": "error",
     "cost_usd": "total_cost_usd", "turns": "num_turns",
     "usage": {"input_tokens": "input_tokens", "output_tokens": "output_tokens",
               "cache_write_tokens": "cache_creation_input_tokens",
               "cache_read_tokens": "cache_read_input_tokens"},
 }
+# Statuses of a rate_limit_event that mean no more calls are possible ("allowed" and
+# warning statuses keep the run going).
+RATE_LIMIT_STOPPED = {"rejected", "exhausted"}
 SYSTEM_PROMPT = """You are recovering a function in an isolated decovery benchmark workspace.
 Use only the supplied mcp__decovery__* tools. Submit source variants through
 decovery build. Follow the task prompt and tool limits. Only decovery's build
@@ -238,6 +242,10 @@ def run(args, result):
                             if type(turns) is not int or turns < 0:
                                 raise ValueError("invalid turns")
                             result["turns"] = turns
+                    if kind == FIELDS["rate_limit_event"]:
+                        status = field(event, "rate_limit_status")
+                        if isinstance(status, str) and status.lower() in RATE_LIMIT_STOPPED:
+                            result["stop"] = "quota"
                     if kind == FIELDS["error"] or (kind == FIELDS["result"] and (
                             field(event, "is_error") or field(event, "subtype") != FIELDS["success"])):
                         detail = field(event, "text") or field(event, "error_detail") or field(event, "subtype")
