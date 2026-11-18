@@ -6,6 +6,16 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Phase-4 acceptance (`docs/parity/phase-4.md`): on the third target (MZ program with 13 overlays, Aztec C86 4.2b)
+  `build` on the migrated workspace gives 322 identical functions and 7 identical overlay modules; 1144 of 1144
+  verdicts equal Decomp's frozen baseline, no deviations.
+- Aztec C86 profiles `aztec-c86-3.4b`, `aztec-c86-4.2b`, `aztec-c86-5.2a` (runners `unicorn-dos`, `dosbox-lab`), an
+  Aztec object and library reader (ADR 0012), object-against-image verdicts with link gaps, and whole overlay module
+  comparison (code, data, BSS).
+- Overlay addresses `ovl:NAME:SSSS:OOOO` (ADR 0011), `[[overlay]]` in `decovery.toml`, `decovery overlay
+  add|list|remove`, overlay loading and an Aztec prologue search with placeholders.
+- `migrate` takes Decomp's overlays and overlay attempts over and writes the compiler rules for the workspace's
+  compiler (Decomp's `compilerwissen/`) to `knowledge/compiler-rules.toml`.
 - Phase-3 acceptance: benchmark of 30 tasks, two runs of the reference driver, 19 of 30 solved each
   (`docs/parity/phase-3.md`).
 - Attempt memory: `history`, `migrate-attempts` (66 299 attempts and 4 049 archive entries of the first target

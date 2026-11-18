@@ -263,3 +263,50 @@ Result through `runner/run` of both plugins (worktree unicorn-dos, `CC -n +b`, t
   fallback. Task 9 (migration) must handle this: the object's `ovmain_` has to place at the overlay's
   `<OVERLAY>_ovmain` (facade `place_objects` looks names up globally).
 - Commit `feat(diff): overlay module compare with data and BSS`.
+
+## Task 9: migrating the third target's workspace — done
+
+- `migrate` converts Decomp's `[[overlay]]` (name, `datei`, sha256, format, `einsprung`, `[[overlay.segment]]`) into
+  `[[overlay]]` plus `[[target.segment]]` with `ovl:` starts, as `overlay add` writes them; `.daten` segment names
+  become `.data`; `size` = end of the last segment stored in the file (format-neutral, no file read);
+  `register.ds` is implied by the data segment's start and only checked (disagreement → unmapped
+  `overlay.register.ds=…`); a bad overlay name or a segment outside its overlay is an error.
+- Compiler rules: `migrate/rules.rs` finds `compilerwissen/` in an ancestor of the Decomp workspace, takes every
+  `[[regel]]` whose `compiler` list holds the workspace's `[rebuild] compiler`, writes
+  `knowledge/compiler-rules.toml` (`[[rule]]` id, compilers, status confirmed/assumed/refuted, text, suggestion,
+  does_not_help, `[[rule.evidence]]` target/function/date/result; texts stay German and are counted). No reader in
+  decovery consumes it yet (agents read it as knowledge). Other Decomp targets migrated from a Decomp checkout now
+  also get this file (Watcom rules for the first target).
+- Profile: Decomp's `aztec-c86-4.2b` is decovery's id; copied as is.
+- Attempts: `ovl:` lines were already migrated since Task 5 (`translate_address`); the old test only used a
+  name-less `ovl:0001:0020`. `overlay_addresses_are_skipped_with_reason` → `overlay_attempts_are_migrated` (named
+  overlay migrated, re-import adds nothing; name-less one still skipped).
+- `build`: `ovmain` fix. `place_objects` determines the overlay of an object (the one overlay all its by-name placed
+  functions lie in) and looks every function up as `<OVERLAY>_<name>` first (address must lie in that overlay),
+  then by plain name. An object with only `ovmain_` gets "no counterpart". Unit test
+  `overlay_main_is_placed_in_its_own_overlay`.
+- `original_len` used `linear()`, which is None for `ovl:`; now `end.bytes_from(start) + 1`.
+- Tests `crates/decovery-core/tests/migrate_overlays.rs`: `overlays_are_migrated`,
+  `overlay_register_that_disagrees_with_the_data_segment_is_unmapped`, `bad_overlay_name_is_an_error`,
+  `aztec_profile_is_mapped`, `compiler_rules_become_workspace_knowledge`,
+  `workspace_without_compiler_knowledge_writes_no_rules`, `second_migration_changes_nothing`.
+- Local (W7 Decomp workspace read only → `%TEMP%\w7-migrated`): 1144 analysis functions, 13 overlays, 26 overlay
+  segments, 30 compiler rules, 8 sources, 0 attempt lines, 0 archive entries, 0 overlay attempts (W7 has no
+  `cache/`), 0 unmapped, 634 untranslated texts, 16 s wall (debug). Skipped: `decomp-symbole.json`, `index.md`,
+  `stand.json`, and `globale.md` ("3906 accesses named a function that is missing or ambiguous" — not looked into;
+  likely the per-overlay duplicate names).
+- Commit `feat(migrate): Aztec overlay workspaces`.
+
+## Task 10: parity acceptance — done, owner gate B open
+
+- Workspace edits for the run only (scratch copy): `[rebuild] runners = ["dosbox-lab"]`, `tool_dir` =
+  `DECOVERY_TOOLCHAIN_AZTEC42` path (the user's installed unicorn-dos is old; not reinstalled).
+- `decovery build --json` (debug build): 8 sources, 322 functions, 322 identical, 0 differ/failed/unchecked, 7 of 7
+  overlay modules identical, no hints, no warnings. Wall 6.5 s (compile 4.48 s, compare 0.09 s, record 0.28 s,
+  attempts 1.3 s).
+- Comparison with `baseline-2026-11-18.json` over all 1144 (full list through `decovery detail <handle>`; scratch
+  script `parity.py`): identical/identical 322, not tried/not tried 822, deviations 0, built functions outside the
+  baseline 0. Deviation list: empty.
+- Plan: Tasks 1–8 ticked except Task 7 step 3 (count part: 902 of 927 by pattern), R1–R5 rows closed/held.
+- Docs: `docs/parity/phase-4.md`, CHANGELOG, README (Aztec profiles, overlay commands).
+- Commit `docs: phase-4 acceptance`.

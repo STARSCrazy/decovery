@@ -101,10 +101,26 @@ once:
 ```sh
 decovery setup toolchain watcom-9.5 <dir>          # WCC386, WLINK and their libraries
 decovery setup toolchain turbo-c-2.0 <dir>         # TCC.EXE, TLINK.EXE, LIB/, INCLUDE/
+decovery setup toolchain aztec-c86-4.2b <dir>      # BIN/CC.EXE and its passes, LIB/, INCLUDE/
 ```
 
 This writes `[toolchains]` into the user config; `[rebuild] tool_dir` in a workspace overrides it. The profiles in
-`profiles/` (`watcom-9.5`, `watcom-10.6`, `turbo-c-2.0`) describe how each compiler and linker is called.
+`profiles/` (`watcom-9.5`, `watcom-10.6`, `turbo-c-2.0`, `aztec-c86-3.4b`, `aztec-c86-4.2b`, `aztec-c86-5.2a`)
+describe how each compiler and linker is called. Aztec C86 has no linker step: its objects are compared against the
+original image with the relocated fields as gaps, and a module of an overlay is compared as a whole (code, data, BSS).
+
+## Overlays
+
+A program that loads overlay files (Aztec C86 `.OVR`) registers them in the workspace:
+
+```sh
+decovery overlay add VINIT.OVR VBASE.OVR [--format aztec-c86] [--ds SSSS]   # checks the header, adds segments
+decovery overlay list
+decovery overlay remove VINIT
+```
+
+Functions in an overlay have addresses of the form `ovl:NAME:SSSS:OOOO` (ADR 0011). `migrate` takes Decomp's
+overlay list over unchanged.
 
 The compilers run in an emulator plugin:
 
