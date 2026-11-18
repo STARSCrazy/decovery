@@ -181,3 +181,15 @@ after the new exe discarded; objects cache deleted before each cold run; 650 fun
 | warm | 1.02 s | 5.3 s | 5.2 / 6.6 | 756 | none | 0.914 |
 Median cold (runs 1-3): saturation 0.904 (met at the edge), efficiency 0.832 (below 0.85; six-run median 0.827).
 Details in docs/parity/phase-3.md. Step 6 (commit) done as the two commits listed in the final report.
+
+## 2026-11-18 Bridge, exemplar and line-mapping runs (Task 9 steps 4-5, Task 13 step 6, Task 16 step 4)
+5 task runs of the 16 allowed (Sonnet claude-sonnet-5-5, `--parallel 1`, probe limits). No quota pause; 5 h window 57-62 %, 7 d 18-19 %.
+A (run 20261118-141041): 1 task `core+legacy` (first target Q1): solved, 2 builds, 4 calls, 0.031 USD, 18 s, searches 0.
+Bridge never called, so first-call time measured by hand in the kept copy: 45 s; copy 1 942 files 60.3 MB -> 2 145 files
+75.4 MB after the shadow; no Ghidra project in the legacy source cache; leak scan of copy + legacy view + shadow: no hit.
+B skipped: no bench switch hides exemplars (needs facade + bench setting).
+C (run 20261118-141310): v2 metadata made first with `analyze --function` (ghidra plugin added to the private user
+config, 1.5 + 0.9 min, no tokens); 4 unsolved probe tasks: 2 of 4 solved (before 0 of 4), builds 63 -> 104, calls 60 -> 97,
+cost 1.32 -> 2.22 USD; confounded by the harness continuation. Step 5 extrapolation: core 28.9 USD for 60 task runs,
+core+legacy about the same, both about 58 USD, about 6.5 h. Ticked: Task 9 steps 4, 5. Task 16 step 4 only partly; Task 13 step 6 open.
+

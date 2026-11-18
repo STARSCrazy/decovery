@@ -205,7 +205,7 @@ A first run gave 6 of 20: iced-x86 prints `jmp short N` where capstone prints `j
 `near` qualifiers (index schema 2) the figure is 18 of 20 and 20 of 20. In the 2 misses Decomp printed nothing, most
 likely because its engine finds no function start there. R4 is met.
 
-Task 13 step 6 (re-run of the probe suite with exemplars, `bench compare` against the Task-9 run) was **not run**:
+Task 13 step 6 (re-run of the probe suite with exemplars, `bench compare` against the Task-9 run) was **not run** (see "Bridge, exemplar and line-mapping runs" below):
 it needs model tokens and the owner's go, and the acceptance runs spent the allowance. So this document does not say
 whether exemplars changed success, builds or tokens. The acceptance runs cannot answer it either: they use another
 suite, another prompt (continue paragraph, one harness continuation) and no exemplar-free control. The share of tasks
@@ -228,7 +228,7 @@ Source: `cache/calls/<yyyy-mm>.jsonl` of every task copy of the two acceptance r
 a further 142 lines are the harness's own start and final builds and are not counted). All 60 task runs used
 `tools = "core"`, so there is **no bridge call at all**: `search`, `verify` and `diagnose --deep` are refused in a
 `core` copy and the 2 `diagnose` calls with a registers operation were refused and counted. The data therefore say nothing about which Decomp tools matter for the port order of ADR 0008
-step 3. Task 9 step 4 (one `core+legacy` task) was not run.
+step 3. Task 9 step 4 (one `core+legacy` task) was run afterwards, see the next section.
 
 Native tools over both runs (calls, total seconds, median / maximum seconds per call; refusals and errors included):
 
@@ -249,3 +249,91 @@ The owner's own workspaces hold almost nothing: the first-target copy's log has 
 3 find) and the second target's 2 (1 build, 1 link); the first-target figure includes the `show` checks above. Real work
 with the bridge has not yet happened since Task 3, so the port order of ADR 0008 step 3 has no usage data; more will
 come from `tools = "core+legacy"` runs and from the owner's own use.
+
+## Bridge, exemplar and line-mapping runs (Task 9 steps 4 and 5, Task 13 step 6, Task 16 step 4, 2026-11-18)
+
+Same driver, model, limits and start point as the probe (Claude Code 2.1.327, `claude-sonnet-5-5`, `--parallel 1`, seed 0,
+`max_cost_usd` 3.0, `max_tokens` 400 000, 40 builds, 80 calls, 15 min). Runs used: 5 task runs (1 + 4) of the 16
+allowed. No quota pause. Subscription window after the runs: 5 h utilisation 57 % (first run) to 62 % (last), 7 d 18-19 %,
+status `allowed` throughout.
+
+### R5: one `core+legacy` task (Task 9 step 4)
+
+One probe task (first target, quartile 1; probe run: solved, 5 calls, 0.034 USD) with
+`tools = "core+legacy"`, `--keep`. Result: solved, start -> best distance 10 -> 0, 2 builds, 4 calls (build 1, find 1,
+history 1, show 1), `searches` 0, 8 input / 750 output / 37 825 cache-read / 4 963 cache-write tokens, 0.031 USD
+estimated, 18.4 s wall, 5 turns, 0 continuations. The agent never touched the bridge (task too easy), so a real
+first-call time was measured afterwards by calling `search --strategy forms` in the kept copy by hand (no tokens):
+
+| Measure | Value |
+| --- | --- |
+| Copy before the first bridge call (task copy + legacy view) | 1 942 files, 60.3 MB |
+| Same after the first bridge call (shadow created, Decomp server started) | 2 145 files, 75.4 MB |
+| First bridge call, wall (server start included; the call itself ended in an error because the function is already identical) | 45 s |
+| `core` copy of the same task (acceptance runs) | no bridge, no shadow |
+
+The legacy source workspace of this target holds no Ghidra project in its `cache/`, so no ~825 MB project copy was
+made; the shadow adds 15 MB. A source workspace with a cached Ghidra project would add its size per task copy.
+Leak scan over the whole kept task directory (copy, legacy view, shadow; 2 145 files, 75.4 MB): the whitespace-
+normalised original definition and the code hash of the function appear in no file outside the rebuild record and the
+analysis export; the legacy view has no `nachbau/` directory and its `nachbau.toml` has no entry of the function.
+Limits of this check: it ran after the agent solved the task (the copy's `src/` holds the agent's own text), so it
+shows the view and the shadow's Decomp side carry no original text, not that a pristine shadow does; the pristine
+check is the test `legacy_view_has_no_trace_of_the_solution` and the `bench_local` leak scan.
+
+### Extrapolation of the full acceptance (Task 9 step 5, from existing numbers, no tokens)
+
+Per task of the acceptance runs (60 task runs): mean 0.48 USD, median 0.28 USD, mean wall 177 s; the probe's first run
+(one session, before the prompt and continuation changes) had a mean of 0.17 USD and is too low for planning.
+
+| Plan (30 tasks) | Runs | Task runs | Est. cost USD | Wall |
+| --- | ---: | ---: | ---: | ---: |
+| `core` (done) | 2 | 60 | 28.9 | 177 min |
+| `core+legacy` (same tokens; one measured task cost 0.031 vs 0.034 USD for `core`) | 2 | 60 | about 29 | about 177 min + up to 45 s per task that calls the bridge (at most 45 min) |
+| both | 4 | 120 | about 58 | about 6.5 h |
+
+Disk: 60 MB per `core+legacy` copy before and 75 MB after the first bridge call on this target, so 60 copies are about
+4.5 GB if all are kept (copies are removed without `--keep`). The one measured task did not use the bridge, so the
+token cost of tasks that search is not measured; `search` is limited to 2 per task and a Decomp search may run for
+minutes, which is not in these figures.
+
+### Exemplar effect (Task 13 step 6): skipped
+
+The bench has no switch that hides exemplars: they come from the exemplar index that `show` and `build` refresh, there
+is no suite, tool-set or workspace setting that turns them off (a removed index is rebuilt on the next call), and
+the harness only removes the function's own entry. A control arm needs a new setting in the facade and the bench (an
+interface change), so the 5 x 2 comparison was not run. No tokens were spent on it.
+
+### Line mapping (Task 16 step 4)
+
+Before the runs the workspaces held no v2 decompile metadata (no `ranges` in `knowledge/analysis`). `analyze` with the
+new Ghidra plugin (Ghidra 12.1.4, `--function` for the 4 task functions; no tokens; 1.5 min and 0.9 min) wrote the
+`lines`, `signature` and `variables` files for them; the second target's analysis gained 3 files and rewrote 2 pseudo-C
+files, the first target's 1. The start build of 4 of 4 tasks printed `differs near C line N`.
+
+The 4 tasks that no earlier run solved, same suite, limits and driver, `tools = "core"`; one run (20261118-141310)
+with the harness continuation (`max_continuations` 1), which the earlier runs did not have:
+
+| Task | Solved | Start -> best distance | Builds | Calls | Calls by tool | Input | Output | Cache read | Cache write | Est. cost USD | Wall s | Turns | Cont. | Exit |
+| --- | --- | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 4 | no | 175 -> 88 | 13 | 18 | build 11, diagnose 2, history 3, show 2 | 36 | 17 094 | 296 683 | 40 664 | 0.363 | 133 | 10 | 1 | ok |
+| 5 | yes | 57 -> 0 | 32 | 28 | build 14, diagnose 2, find 5, history 5, show 2 | 52 | 35 723 | 565 530 | 66 175 | 0.679 | 284 | 20 | 1 | ok |
+| 6 | no | 51 -> 3 | 40 | 29 | build 24, find 1, history 2, show 2 | 58 | 25 889 | 666 964 | 51 237 | 0.531 | 198 | 7 | 1 | call-limit |
+| 7 | yes | 134 -> 0 | 19 | 22 | build 15, diagnose 2, find 2, history 1, show 2 | 42 | 30 791 | 792 686 | 66 111 | 0.652 | 236 | 23 | 0 | ok |
+| Total | 2 of 4 | | 104 | 97 | | 188 | 109 497 | 2 321 863 | 224 187 | 2.224 | 851 | 60 | 3 | |
+
+Before (the re-run after the prompt fix, single session, same four tasks) -> now:
+
+| Task | Best distance | Builds | Calls | Est. cost USD |
+| --- | --- | ---: | ---: | ---: |
+| 4 | 103 -> 88 | 4 -> 13 | 7 -> 18 | 0.115 -> 0.363 |
+| 5 | 1 -> 0 (solved) | 10 -> 32 | 10 -> 28 | 0.226 -> 0.679 |
+| 6 | 1 -> 3 | 21 -> 40 | 16 -> 29 | 0.269 -> 0.531 |
+| 7 | 1 -> 0 (solved) | 28 -> 19 | 27 -> 22 | 0.714 -> 0.652 |
+| Total | 0 of 4 -> 2 of 4 solved | 63 -> 104 | 60 -> 97 | 1.324 -> 2.224 |
+
+Reading: 2 of 4 previously unsolved tasks are now solved, but three things changed at once (line mapping, the
+harness continuation, and new exemplars since the re-run), the sample is 4 tasks and one run each, and the
+acceptance runs showed that a single task's outcome moves between runs. The numbers do not isolate the effect of the
+line mapping; they show no harm (cost per task up from 0.33 to 0.56 USD because the agent kept going). The agent's
+tool calls are logged without the question kind, so whether it used the line text is not known.
