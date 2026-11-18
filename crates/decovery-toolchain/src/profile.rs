@@ -191,6 +191,9 @@ pub struct Profile {
     pub decoration: Decoration,
     /// Bytes every function starts with; empty when the compiler has no fixed prologue.
     pub prologue: Vec<u8>,
+    /// Prologue with placeholders and a call target (`prologue_pattern` / `prologue_call`), for compilers whose
+    /// frame setup goes through a runtime helper (Aztec C86: `mov ax,-N; call $csav`).
+    pub prologue_pattern: Option<decovery_x86::ProloguePattern>,
     /// Whether the compiler pads functions to an alignment.
     pub padding: bool,
     /// Files (relative to the tool directory) whose presence identifies the compiler.
@@ -230,6 +233,10 @@ struct RawProfile {
     #[serde(default)]
     prologue: Vec<u8>,
     #[serde(default)]
+    prologue_pattern: Option<String>,
+    #[serde(default)]
+    prologue_call: Option<String>,
+    #[serde(default)]
     padding: bool,
     #[serde(default)]
     fingerprint: Vec<String>,
@@ -252,6 +259,18 @@ fn parse(text: &str) -> Result<Profile, ToolchainError> {
             raw.id, raw.schema
         )));
     }
+    if raw.prologue_call.is_some() && raw.prologue_pattern.is_none() {
+        return Err(ToolchainError::Invalid(format!(
+            "profile {}: prologue_call without prologue_pattern",
+            raw.id
+        )));
+    }
+    let prologue_pattern = raw
+        .prologue_pattern
+        .as_deref()
+        .map(|text| decovery_x86::ProloguePattern::parse(text, raw.prologue_call.as_deref()))
+        .transpose()
+        .map_err(|e| ToolchainError::Invalid(format!("profile {}: {e}", raw.id)))?;
     Ok(Profile {
         id: raw.id,
         family: raw.family,
@@ -266,6 +285,7 @@ fn parse(text: &str) -> Result<Profile, ToolchainError> {
         job_prelude: raw.job_prelude,
         decoration: Decoration::new(raw.decoration.function, raw.decoration.data),
         prologue: raw.prologue,
+        prologue_pattern,
         padding: raw.padding,
         fingerprint: raw.fingerprint,
         linker: raw.linker,
@@ -561,6 +581,26 @@ mod tests {
         assert_eq!(d.undecorate("$begin"), "$begin");
         assert_eq!(d.undecorate("_"), "_");
         assert_eq!(d.undecorate("asmproc"), "asmproc");
+    }
+
+    #[test]
+    fn aztec_prologue_pattern() {
+        for id in AZTEC {
+            let p = profile(id).unwrap().prologue_pattern.unwrap();
+            assert_eq!(p.bytes.len(), 6);
+            assert_eq!(p.call_target.as_deref(), Some("$csav"));
+        }
+        assert!(profile("turbo-c-2.0").unwrap().prologue_pattern.is_none());
+    }
+
+    #[test]
+    fn prologue_call_without_pattern_is_invalid() {
+        let text = include_str!("../../../profiles/aztec-c86-4.2b.toml")
+            .replace("prologue_pattern = \"B8 ?? ?? E8 ?? ??\"", "");
+        assert!(matches!(parse(&text), Err(ToolchainError::Invalid(_))));
+        let bad = include_str!("../../../profiles/aztec-c86-4.2b.toml")
+            .replace("B8 ?? ?? E8 ?? ??", "B8 ?? ?? E8 00 00");
+        assert!(matches!(parse(&bad), Err(ToolchainError::Invalid(_))));
     }
 
     #[test]

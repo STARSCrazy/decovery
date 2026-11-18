@@ -18,6 +18,9 @@ prelude = ['SET CLIB=D:\LIB\', 'SET INCLUDE=D:\INCLUDE\', 'SET PATH=D:\BIN']
 job_prelude = ['SET CCTEMP=C:\{tmp}\']
 # the frame differs with and without +b: no fixed prologue
 prologue = []
+# with +b the frame goes through the runtime helper: mov ax,-frame; call $csav
+prologue_pattern = "B8 ?? ?? E8 ?? ??"
+prologue_call = "$csav"
 padding = false
 fingerprint = ["BIN/CC.EXE"]
 
