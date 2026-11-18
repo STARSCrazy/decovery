@@ -552,7 +552,19 @@ pub fn build(
             &options,
         );
         warnings.extend(module.warnings);
-        module.functions
+        if profile.object_format == ObjectFormat::Aztec {
+            // no linker (phase 4): object against image, relocated fields are link gaps
+            placements
+                .iter()
+                .map(|p| {
+                    let len = p.function.code().len();
+                    let image = program.read(p.at, len).unwrap_or(&[]);
+                    decovery_diff::compare_with_gaps(&p.function, image, p.at)
+                })
+                .collect()
+        } else {
+            module.functions
+        }
     };
     drop(placements);
 

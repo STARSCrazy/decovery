@@ -114,3 +114,25 @@ Result through `runner/run` of both plugins (worktree unicorn-dos, `CC -n +b`, t
 - Profiles: `runners = ["unicorn-dos", "dosbox-lab"]` for all three.
 - Note: the user config runs an installed copy of unicorn-dos (`extern/unicorn-venv`); it needs the new plugin
   code (reinstall after merge) before the Aztec profiles work with unicorn-dos first.
+
+## Task 4: first verdicts on main-program functions — done, owner gate A
+
+- Baseline frozen 2026-11-18: `tools/parity/aztec_baseline.py` read Decomp's function export (`ausgabe/funktionen`,
+  `@adresse`/`@name`/`@nachbau`) and wrote `$DECOVERY_GOLDEN_DIR/aztec/baseline-2026-11-18.json`
+  (`functions` {address: verdict}, `names` {address: name}). Counts: 1144 functions, 322 identisch, 822 nicht-versucht
+  (equal to Decomp's `stand.json`); main program 217 functions, 3 identisch, 214 nicht-versucht. Decomp has no
+  `abweichend`/`fehler` verdicts recorded.
+- `decovery_diff::compare_with_gaps(object, image, image_base)` (`gaps.rs`): relocated fields are gaps; bytes
+  outside must be equal; self-relative fields to the own section (unnamed labels, own symbols) are checked against
+  the original's target; other refs count as `refs_unchecked`, not blocking (no symbol view). Facade `build` uses it
+  for `ObjectFormat::Aztec` instead of the module comparison.
+- Tests `tests/gaps_synthetic.rs`: `relocated_word_is_a_gap`, `self_relative_call_to_unnamed_symbol_compares`,
+  `gap_does_not_hide_opcode_difference`, plus `short_image_is_unavailable`.
+- Local test `crates/decovery-cli/tests/aztec_verdicts_local.rs` (not through `build`/workspace: migration of the
+  Decomp workspace fails on `ovl:` addresses until Task 9; scratch workspace in a temp dir, runner forced to
+  dosbox-lab because the user's installed unicorn-dos copy predates 56b7603). Compiles all 8 sources (4.25 s wall),
+  compares every object function the baseline places at a `rel:` address with the MZ image.
+  Result: 3 compared (far_alloc 19 B = 15 equal + 4 gaps, far_copy 28 B = 24 + 4, far_free 19 B = 15 + 4; Decomp:
+  "15 fest + 4 Linker" etc.), all identisch; 217/217 main-program verdicts equal Decomp's, 0 disagreements.
+  Overlay functions (319 identisch in Decomp) wait for Task 6.
+- Commit `feat(diff): object-against-image verdicts with link gaps`.
