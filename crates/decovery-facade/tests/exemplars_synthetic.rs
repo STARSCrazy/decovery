@@ -79,7 +79,7 @@ fn index_contains_only_identical_c_functions() {
     let index = exemplar_index(&session).unwrap();
     assert_eq!(index.len(), 1);
     let file = index_file(&f);
-    assert_eq!(file["schema"], 1);
+    assert_eq!(file["schema"], 2);
     assert_eq!(file["target_sha256"], "aa");
     assert_eq!(entry_names(&file), ["add"]);
     let add = &file["entries"][0];

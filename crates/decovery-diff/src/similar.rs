@@ -67,7 +67,8 @@ pub fn coarse_forms(code: &[u8], bits: u32, base: u64) -> Vec<String> {
         .collect()
 }
 
-/// Decomp's `form`: numbers (`0x…`, `…h`, decimal, with a leading `-`) become `N`, then registers are grouped.
+/// Decomp's `form`: numbers (`0x…`, `…h`, decimal, with a leading `-`) become `N`, then registers are grouped;
+/// iced-x86's `short`/`near` branch markers are dropped (capstone has none).
 fn normalise(text: &str) -> String {
     let chars: Vec<char> = text.trim().chars().collect();
     let mut out = String::with_capacity(chars.len());
@@ -84,6 +85,11 @@ fn normalise(text: &str) -> String {
             i += 1;
         }
         let word: String = chars[start..i].iter().collect();
+        // Branch distance markers: capstone (Decomp) prints `jmp 0x…` for rel8 and rel32 alike.
+        if (word == "short" || word == "near") && chars.get(i) == Some(&' ') {
+            i += 1;
+            continue;
+        }
         if is_number(&word) {
             if out.ends_with('-') {
                 out.pop();

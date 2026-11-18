@@ -26,7 +26,7 @@ use crate::{FacadeError, Session};
 pub const EXEMPLARS_FILE: &str = "cache/exemplars/index.json";
 /// Up to this many members every member is a candidate; above it only those sharing an LSH band key.
 pub const LSH_ALL: usize = 2000;
-const SCHEMA: u32 = 1;
+const SCHEMA: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct IndexFile {

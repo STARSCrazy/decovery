@@ -37,6 +37,17 @@ fn forms_normalise_numbers_and_registers() {
 }
 
 #[test]
+fn short_and_near_jumps_share_a_form() {
+    // Decomp's capstone text has no `short`/`near`: jmp rel8 and jmp rel32 are the same form there.
+    // 32-bit: jmp short +0; jmp near +0; je short +0; je near +0
+    let code = [
+        0xEB, 0x00, 0xE9, 0x00, 0x00, 0x00, 0x00, 0x74, 0x00, 0x0F, 0x84, 0x00, 0x00, 0x00, 0x00,
+    ];
+    let forms = instruction_forms(&code, 32, 0x1000);
+    assert_eq!(forms, vec!["jmp N", "jmp N", "je N", "je N"]);
+}
+
+#[test]
 fn padding_is_dropped() {
     // ret; then int3/nop padding.
     let code = [0x55, 0xC3, 0x90, 0x90, 0x90];
