@@ -31,10 +31,13 @@ pub use le_link::{
 pub use link::{DEFAULT_STARTUP, Linked, link, startup_object};
 pub use map::{LinkMap, MapPublic, MapSegment, parse_tlink_map};
 pub use runner::{
-    JobOutcome, JobStatus, Mount, NativeRunner, PluginRunner, RunJob, RunRequest, Runner,
+    JobOutcome, JobStatus, JobTimes, Mount, NativeRunner, PluginRunner, RunJob, RunRequest, Runner,
     RunnerError, open_runners, run_with_fallback, run_with_fallback_reporting,
 };
-pub use schedule::{JobSlots, SlotGuard, default_jobs, global_slots, set_global_jobs};
+pub use schedule::{
+    JobSlots, JobSpan, SlotGuard, Throughput, default_jobs, global_slots, set_global_jobs,
+    throughput,
+};
 pub use shrink::{Definition, Shrunk, definitions, shrink, splice_function};
 pub use staging::{
     BUILD_ONLY_MARKERS, SourceSet, find_sources, is_build_only, stage, stage_text, to_dos_bytes,

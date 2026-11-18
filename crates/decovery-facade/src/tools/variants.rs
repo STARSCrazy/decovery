@@ -737,7 +737,7 @@ pub(super) fn build_variants(
             .map(|g| SourceJob::new(dos_name.clone(), flags.clone()).in_dir(g.dir.clone()))
             .collect::<Result<_, _>>()
             .map_err(toolchain)?;
-        let compiled = compile_jobs(&ws, &profile, &jobs_input, &run_dir.0, control)?;
+        let compiled = compile_jobs(&ws, &profile, &jobs_input, &run_dir.0, control, None)?;
         if compiled.files.len() != groups.len() {
             return Err(FacadeError::Invalid(format!(
                 "internal error: {} compile results for {} distinct texts",

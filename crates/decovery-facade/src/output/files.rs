@@ -4,6 +4,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use decovery_core::{Address, Analysis, AnalyzedFunction, WorkspaceLock, write_atomic};
+use rayon::prelude::*;
 
 use super::{Change, Context, FUNCTIONS_DIR, OUTPUT_DIR, OutputReport, functions_dir, header};
 use crate::resolve::in_segment;
@@ -78,15 +79,17 @@ pub fn write_affected(
             }
         }
         Change::Rebuild { addresses } => {
-            // a rebuild changes no names, so no file is renamed: only the content is written
-            for &start in addresses {
-                if let Some(f) = cx.index.function_at(start) {
+            // a rebuild changes no names, so no file is renamed: only the content is written, the files in
+            // parallel (each one's bytes do not depend on the others)
+            let written = addresses
+                .par_iter()
+                .filter_map(|&start| cx.index.function_at(start).map(|f| (start, f)))
+                .map(|(start, f)| {
                     let path = root.join(relative_path(session, start, &cx.display_name(start)));
-                    if write_if_changed(&path, &render(&cx, f)?)? {
-                        report.written += 1;
-                    }
-                }
-            }
+                    write_if_changed(&path, &render(&cx, f)?)
+                })
+                .collect::<Result<Vec<bool>, FacadeError>>()?;
+            report.written += written.into_iter().filter(|&w| w).count() as u32;
         }
     }
     super::indices::write_indices(&cx)?;

@@ -118,7 +118,22 @@ pub struct JobOutcome {
     pub message: Option<String>,
     /// Name of the runner that ran the job.
     pub runner: String,
+    /// When the job ran, as far as the runner reports it; `None` for a job rejected before the call.
+    pub times: Option<JobTimes>,
     expected: Vec<String>,
+}
+
+/// When a job ran: `started_ms` and `ended_ms` are wall-clock milliseconds since `submitted` (when the host sent the
+/// request), `cpu_ms` the CPU time of the job's worker; each is `None` when the runner does not report it. `slots`
+/// is how many jobs of the request could run at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct JobTimes {
+    pub submitted: Instant,
+    pub started_ms: Option<u64>,
+    pub ended_ms: Option<u64>,
+    pub cpu_ms: Option<u64>,
+    pub slots: u32,
 }
 
 impl JobOutcome {
@@ -132,6 +147,7 @@ impl JobOutcome {
             produced: expected.clone(),
             message: None,
             runner: "test".into(),
+            times: None,
             expected,
         }
     }
@@ -193,6 +209,31 @@ struct RawJob {
     stdout: String,
     #[serde(default)]
     message: Option<String>,
+    #[serde(default)]
+    started_ms: Option<u64>,
+    #[serde(default)]
+    ended_ms: Option<u64>,
+    #[serde(default)]
+    cpu_ms: Option<u64>,
+}
+
+impl RawJob {
+    fn new(
+        status: JobStatus,
+        exit_code: Option<i32>,
+        stdout: String,
+        message: Option<String>,
+    ) -> Self {
+        RawJob {
+            status,
+            exit_code,
+            stdout,
+            message,
+            started_ms: None,
+            ended_ms: None,
+            cpu_ms: None,
+        }
+    }
 }
 
 /// Size and modification time of a file.
@@ -227,11 +268,12 @@ fn c_mount(request: &RunRequest) -> Result<&Path, RunnerError> {
         .ok_or_else(|| RunnerError::Failed("no mount for drive C".into()))
 }
 
-/// The host side shared by all runners; `call` runs the jobs that passed the command line check.
+/// The host side shared by all runners; `call` runs the jobs that passed the command line check and returns their
+/// results and how many of them could run at once.
 fn run_checked(
     runner: &str,
     request: &RunRequest,
-    call: impl FnOnce(&RunRequest) -> Result<Vec<RawJob>, RunnerError>,
+    call: impl FnOnce(&RunRequest) -> Result<(Vec<RawJob>, u32), RunnerError>,
 ) -> Result<Vec<JobOutcome>, RunnerError> {
     let c_dir = c_mount(request)?;
     let before: Vec<Vec<Option<Stamp>>> = request
@@ -260,15 +302,16 @@ fn run_checked(
         }
     }
 
-    let raw = if valid.is_empty() {
-        Vec::new()
+    let submitted = Instant::now();
+    let (raw, slots) = if valid.is_empty() {
+        (Vec::new(), 1)
     } else {
         let sub = RunRequest {
             mounts: request.mounts.clone(),
             jobs: valid,
             timeout: request.timeout,
         };
-        let raw = call(&sub)?;
+        let (raw, slots) = call(&sub)?;
         if raw.len() != sub.jobs.len() {
             return Err(RunnerError::Failed(format!(
                 "{runner}: {} job results for {} jobs",
@@ -276,22 +319,33 @@ fn run_checked(
                 sub.jobs.len()
             )));
         }
-        raw
+        (raw, slots)
     };
     let mut raw = raw.into_iter();
 
     let mut outcomes = Vec::new();
     for ((job, reject), before) in request.jobs.iter().zip(rejected).zip(&before) {
-        let raw = match reject {
-            Some(message) => RawJob {
-                status: JobStatus::Failed,
-                exit_code: None,
-                stdout: String::new(),
-                message: Some(message),
-            },
-            None => raw
-                .next()
-                .ok_or_else(|| RunnerError::Failed(format!("{runner}: missing job result")))?,
+        let (raw, times) = match reject {
+            Some(message) => (
+                RawJob::new(JobStatus::Failed, None, String::new(), Some(message)),
+                None,
+            ),
+            None => {
+                let raw = raw
+                    .next()
+                    .ok_or_else(|| RunnerError::Failed(format!("{runner}: missing job result")))?;
+                let times = JobTimes {
+                    submitted,
+                    started_ms: raw.started_ms,
+                    // an end before the start is no time
+                    ended_ms: raw
+                        .ended_ms
+                        .filter(|&end| raw.started_ms.is_none_or(|start| end >= start)),
+                    cpu_ms: raw.cpu_ms,
+                    slots: slots.max(1),
+                };
+                (raw, Some(times))
+            }
         };
         if raw.status == JobStatus::Timeout {
             for (name, was) in job.expected.iter().zip(before) {
@@ -314,6 +368,7 @@ fn run_checked(
             produced,
             message: raw.message,
             runner: runner.to_string(),
+            times,
             expected: job.expected.clone(),
         });
     }
@@ -382,7 +437,7 @@ impl PluginRunner {
         request: &RunRequest,
         cancel: Option<CancelToken>,
         progress: Option<&dyn Fn(Progress)>,
-    ) -> Result<Vec<RawJob>, RunnerError> {
+    ) -> Result<(Vec<RawJob>, u32), RunnerError> {
         let guard = self.host.lock().unwrap_or_else(|p| p.into_inner());
         let host = guard
             .as_ref()
@@ -425,8 +480,10 @@ impl PluginRunner {
                 other => RunnerError::Failed(format!("{}: {other}", self.name)),
             })?;
         let jobs = result.get("jobs").cloned().unwrap_or(Value::Null);
-        serde_json::from_value(jobs)
-            .map_err(|e| RunnerError::Failed(format!("{}: bad runner/run result: {e}", self.name)))
+        let jobs = serde_json::from_value(jobs).map_err(|e| {
+            RunnerError::Failed(format!("{}: bad runner/run result: {e}", self.name))
+        })?;
+        Ok((jobs, share.count()))
     }
 }
 
@@ -479,10 +536,21 @@ impl Runner for NativeRunner {
         cancel: Option<CancelToken>,
     ) -> Result<Vec<JobOutcome>, RunnerError> {
         run_checked("native", request, |sub| {
-            sub.jobs
+            // one job after another; the host measures them itself
+            let start = Instant::now();
+            let since = |t: Instant| u64::try_from(t.duration_since(start).as_millis()).ok();
+            let jobs = sub
+                .jobs
                 .iter()
-                .map(|job| native_job(sub, job, cancel.as_ref()))
-                .collect()
+                .map(|job| {
+                    let started = since(Instant::now());
+                    let mut raw = native_job(sub, job, cancel.as_ref())?;
+                    raw.started_ms = started;
+                    raw.ended_ms = since(Instant::now());
+                    Ok(raw)
+                })
+                .collect::<Result<Vec<_>, RunnerError>>()?;
+            Ok((jobs, 1))
         })
     }
 }
@@ -562,12 +630,7 @@ fn parse_cd(line: &str) -> Option<&str> {
 }
 
 fn failed(message: String, stdout: String) -> RawJob {
-    RawJob {
-        status: JobStatus::Failed,
-        exit_code: None,
-        stdout,
-        message: Some(message),
-    }
+    RawJob::new(JobStatus::Failed, None, stdout, Some(message))
 }
 
 fn native_job(
@@ -657,11 +720,11 @@ fn native_job(
             return Err(RunnerError::Failed("native: cancelled".into()));
         }
         let Some(status) = status else {
-            return Ok(RawJob {
-                status: JobStatus::Timeout,
-                exit_code: None,
+            return Ok(RawJob::new(
+                JobStatus::Timeout,
+                None,
                 stdout,
-                message: Some(format!(
+                Some(format!(
                     "{program} did not end within {} s{}",
                     request.timeout.as_secs_f64(),
                     if incomplete {
@@ -670,19 +733,19 @@ fn native_job(
                         ""
                     }
                 )),
-            });
+            ));
         };
         exit_code = status.code().unwrap_or(-1);
         if exit_code != 0 {
             break;
         }
     }
-    Ok(RawJob {
-        status: JobStatus::Done,
-        exit_code: Some(exit_code),
+    Ok(RawJob::new(
+        JobStatus::Done,
+        Some(exit_code),
         stdout,
-        message: incomplete.then(|| "output may be incomplete".to_string()),
-    })
+        incomplete.then(|| "output may be incomplete".to_string()),
+    ))
 }
 
 /// Ends the child and its descendants (they inherit the output pipes), then reaps the child.

@@ -9,10 +9,11 @@ use std::time::{Duration, SystemTime};
 
 use decovery_core::{Workspace, read_user_config};
 use decovery_plugin::{CancelToken, Progress};
+use rayon::prelude::*;
 
 use crate::{
-    JobOutcome, JobStatus, Mount, ObjectCache, Profile, RunJob, RunRequest, Runner, ToolchainError,
-    run_with_fallback_reporting, tool_dir,
+    JobOutcome, JobStatus, JobTimes, Mount, ObjectCache, Profile, RunJob, RunRequest, Runner,
+    ToolchainError, run_with_fallback_reporting, tool_dir,
 };
 
 /// Timeout per compile when `[rebuild] timeout_s` is not set.
@@ -78,6 +79,8 @@ pub struct CompiledFile {
     pub message: String,
     /// The object came from the object cache.
     pub cached: bool,
+    /// When its compile job ran (`None`: no job, or the runner reports no times).
+    pub times: Option<JobTimes>,
 }
 
 impl CompiledFile {
@@ -88,6 +91,7 @@ impl CompiledFile {
             object: Some(object),
             message: String::new(),
             cached: false,
+            times: None,
         }
     }
 }
@@ -320,6 +324,7 @@ pub fn compile_planned(
             object,
             message: String::new(),
             cached,
+            times: None,
         });
         if !cached {
             // the jobs run in parallel in one directory; a compiler with a fixed work file name (Watcom's
@@ -389,30 +394,58 @@ pub fn compile_planned(
         }
     }
 
-    for ((i, key, job), outcome) in misses.into_iter().zip(outcomes) {
-        let object_name = &job.expected[0];
-        let file = &mut files[i];
-        if !outcome.succeeded() {
-            file.message = failure(&outcome, "compiler", object_name);
-            continue;
-        }
-        // a produced object that cannot be read fails this file, not the build
-        let object = match read(&build_dir.join(object_name)) {
-            Ok(object) => object,
-            Err(e) => {
-                file.message = e.to_string();
-                continue;
+    // each object is read and stored (with a sync to disk) in parallel: one after another they were the tail of
+    // the compile phase
+    type Done = (
+        usize,
+        Option<JobTimes>,
+        String,
+        Option<Vec<u8>>,
+        Option<String>,
+    );
+    let done: Vec<Done> = misses
+        .into_par_iter()
+        .zip(outcomes)
+        .map(|((i, key, job), outcome)| {
+            let object_name = &job.expected[0];
+            let times = outcome.times;
+            if !outcome.succeeded() {
+                return (
+                    i,
+                    times,
+                    failure(&outcome, "compiler", object_name),
+                    None,
+                    None,
+                );
             }
-        };
-        if let Err(e) = cache.put(&key, &object) {
-            warnings.push(format!("object cache: cannot store {object_name}: {e}"));
-        }
-        file.message = outcome.stdout.trim().to_string();
-        file.object = Some(object);
+            // a produced object that cannot be read fails this file, not the build
+            match read(&build_dir.join(object_name)) {
+                Ok(object) => {
+                    let warning = cache
+                        .put(&key, &object)
+                        .err()
+                        .map(|e| format!("object cache: cannot store {object_name}: {e}"));
+                    (
+                        i,
+                        times,
+                        outcome.stdout.trim().to_string(),
+                        Some(object),
+                        warning,
+                    )
+                }
+                Err(e) => (i, times, e.to_string(), None, None),
+            }
+        })
+        .collect();
+    for (i, times, message, object, warning) in done {
+        files[i].times = times;
+        files[i].message = message;
+        files[i].object = object;
+        warnings.extend(warning);
     }
-    for j in 0..job_count {
+    (0..job_count).into_par_iter().for_each(|j| {
         let _ = std::fs::remove_dir_all(build_dir.join(format!("TMP{j:05}")));
-    }
+    });
     Ok((files, warnings))
 }
 

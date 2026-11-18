@@ -18,6 +18,9 @@ copied into the C mount as the program `NB.LNK` names (exit 0); without it the j
 With FAKE_OMF_BLOCK=1 a call appends its job count to `block.log` and waits (up to 60 s) for `$/cancel`; when
 cancelled it appends `cancelled` to `cancel.log` and answers -32002.
 
+With FAKE_JOB_TIMES=<start>:<end>:<cpu> every job result carries `started_ms`, `ended_ms` and `cpu_ms` with these
+values.
+
 With FAKE_NOT_RUN_ONCE=1 the first call with more than one job answers only its first job; the others come back
 `failed` with "job not run: ..." like the dosbox-lab runner after a hang.
 """
@@ -124,6 +127,9 @@ def run(params, ctx):
                             "message": "job not run: an earlier job ended the batch"})
         else:
             results.append(run_job(job, c_root))
+            if os.environ.get("FAKE_JOB_TIMES"):
+                start, end, cpu = (int(x) for x in os.environ["FAKE_JOB_TIMES"].split(":"))
+                results[-1].update(started_ms=start, ended_ms=end, cpu_ms=cpu)
             ctx.progress(i + 1, len(jobs), f"job {i + 1} of {len(jobs)} done")
     if cut:
         open(marker, "w").close()
