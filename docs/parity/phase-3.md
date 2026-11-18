@@ -154,3 +154,36 @@ efficiency >= 0.85 is not met on the median (0.83; two of six runs reach 0.856, 
 reached 0.85, so the figure sits on the criterion and moves with machine noise). The wall time is about 0.5 s above
 the lower bound (first job starts 0.45-0.57 s after the build begins, objects stored after the last job).
 Link times were not measured.
+
+## Acceptance suite (Task 15, 2026-11-18)
+
+Suite of 30 tasks (owner decision: 30, not 50): all 14 identical functions of the second target (size quartiles
+of 4, 3, 4 and 3 tasks) and 16 of the first target (4 per size quartile, by bytes), no assembler sources. Two runs,
+reference driver (Claude Code 2.1.327, `claude-sonnet-5-5`), `tools = "core"`, `--parallel 1`, seed 0, limits per
+task 3 USD, 400 000 tokens, 15 min, 40 builds, 80 tool calls, `max_continuations` 1, run limit 3 000 000 tokens.
+Both runs state done, no quota pause.
+
+| | Run 1 | Run 2 |
+| --- | ---: | ---: |
+| Solved | 19 of 30 (0.633, CI 0.455-0.781) | 19 of 30 (0.633, CI 0.455-0.781) |
+| First target | 10 of 16 | 10 of 16 |
+| Second target | 9 of 14 | 9 of 14 |
+| Median builds / tool calls | 12 / 13.5 | 13 / 14.5 |
+| Median cost USD (est.) / mean | 0.29 / 0.44 | 0.27 / 0.52 |
+| Median wall s / mean | 104 / 159 | 103 / 194 |
+| Median output tokens | 13 059 | 11 823 |
+| Total builds / tool calls | 498 / 560 | 531 / 594 |
+| Total est. cost USD | 13.20 | 15.71 |
+| Total wall | 80 min | 97 min |
+| Exits | 26 ok, 4 call-limit | 25 ok, 5 call-limit |
+| Continuations used | 11 | 11 |
+
+Solved by size quartile (run 1 / run 2), first target: Q1 3 / 4, Q2 4 / 3, Q3 2 / 1, Q4 1 / 2; second target: Q1 4 / 3,
+Q2 2 / 3, Q3 3 / 3, Q4 0 / 0. Calls over both runs by tool: build 678, show 123, find 131, history 101, diagnose 90,
+detail 23, status 6, analyze 2.
+
+`bench compare` (paired by task, B minus A): solved +0.000 [-0.167, +0.167]; builds +1.1 [-1.9, +3.7]; calls
++1.1 [-1.2, +3.5]; cost +0.084 USD [-0.015, +0.193]; wall +35 s [-0.4, +73.6]; output tokens +5 030 [+24, +10 764]
+(the only interval that excludes 0). Verdict: the success rate is reproducible (same count, same groups); output
+tokens differ slightly between runs, so "consistent within noise" holds for every metric except output tokens.
+Four tasks per quartile make the per-quartile figures anecdotal.

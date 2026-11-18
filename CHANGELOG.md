@@ -6,6 +6,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Phase-3 acceptance: benchmark of 30 tasks, two runs of the reference driver, 19 of 30 solved each
+  (`docs/parity/phase-3.md`).
 - Decomp legacy bridge (ADR 0007), Rust side: `diagnose --deep <context|structure|registers|slots|joint>`, the new
   tools `search` (`chain`, `permute`, `beam`, `forms`; `--apply`) and `verify` (`equivalence`, `behavior`) in the CLI
   and the MCP server, run through the `decomp-legacy` plugin (capability `legacy` v1). Decomp's reports pass through
