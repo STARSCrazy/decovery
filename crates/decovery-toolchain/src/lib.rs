@@ -45,6 +45,6 @@ pub use staging::{
 
 pub use error::ToolchainError;
 pub use profile::{
-    AssemblerSpec, LinkerSpec, LiteralSpec, MapFormat, MapSpec, ObjectFormat, Profile,
+    AssemblerSpec, LinkerSpec, LiteralSpec, MapFormat, MapSpec, ObjectFormat, Profile, SearchSpec,
     assembler_profile, profile, profiles, rebuild_profile, tool_dir,
 };

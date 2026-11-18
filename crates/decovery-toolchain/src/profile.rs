@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use crate::ToolchainError;
 
-const EMBEDDED: [(&str, &str); 3] = [
+const EMBEDDED: [(&str, &str); 6] = [
     (
         "watcom-9.5",
         include_str!("../../../profiles/watcom-9.5.toml"),
@@ -21,6 +21,18 @@ const EMBEDDED: [(&str, &str); 3] = [
         "turbo-c-2.0",
         include_str!("../../../profiles/turbo-c-2.0.toml"),
     ),
+    (
+        "aztec-c86-3.4b",
+        include_str!("../../../profiles/aztec-c86-3.4b.toml"),
+    ),
+    (
+        "aztec-c86-4.2b",
+        include_str!("../../../profiles/aztec-c86-4.2b.toml"),
+    ),
+    (
+        "aztec-c86-5.2a",
+        include_str!("../../../profiles/aztec-c86-5.2a.toml"),
+    ),
 ];
 
 /// Format of the objects a compiler writes.
@@ -29,6 +41,16 @@ const EMBEDDED: [(&str, &str); 3] = [
 #[non_exhaustive]
 pub enum ObjectFormat {
     Omf,
+    /// Manx Aztec C86 objects (`.O`) and libraries.
+    Aztec,
+}
+
+/// The option search of a profile: one flag (possibly empty) from each set, all combinations.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct SearchSpec {
+    pub flag_sets: Vec<Vec<String>>,
 }
 
 /// The linker of a profile.
@@ -180,6 +202,8 @@ pub struct Profile {
     pub linker: Option<LinkerSpec>,
     pub assembler: Option<AssemblerSpec>,
     pub literals: Option<LiteralSpec>,
+    /// Flag sets the option search combines; `None` when the profile has none.
+    pub search: Option<SearchSpec>,
 }
 
 #[derive(Deserialize)]
@@ -217,6 +241,8 @@ struct RawProfile {
     assembler: Option<AssemblerSpec>,
     #[serde(default)]
     literals: Option<LiteralSpec>,
+    #[serde(default)]
+    search: Option<SearchSpec>,
 }
 
 fn parse(text: &str) -> Result<Profile, ToolchainError> {
@@ -246,6 +272,7 @@ fn parse(text: &str) -> Result<Profile, ToolchainError> {
         linker: raw.linker,
         assembler: raw.assembler,
         literals: raw.literals,
+        search: raw.search,
     })
 }
 
@@ -479,6 +506,72 @@ mod tests {
         assert_eq!(assembler_profile(&w10).unwrap().unwrap().id, "watcom-10.6");
         let tc = profile("turbo-c-2.0").unwrap();
         assert_eq!(assembler_profile(&tc).unwrap(), None);
+    }
+
+    const AZTEC: [&str; 3] = ["aztec-c86-3.4b", "aztec-c86-4.2b", "aztec-c86-5.2a"];
+
+    #[test]
+    fn aztec_profiles_parse() {
+        for id in AZTEC {
+            let p = profile(id).unwrap();
+            assert_eq!((p.family.as_str(), p.bits), ("aztec-c86", 16), "{id}");
+            assert_eq!(p.object_format, ObjectFormat::Aztec);
+            assert!(p.linker.is_none() && p.assembler.is_none(), "{id}");
+            assert!(p.prologue.is_empty());
+            assert_eq!(p.fingerprint, ["BIN/CC.EXE"]);
+            assert_eq!(
+                p.prelude,
+                [
+                    "SET CLIB=D:\\LIB\\",
+                    "SET INCLUDE=D:\\INCLUDE\\",
+                    "SET PATH=D:\\BIN"
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn aztec_compile_line() {
+        let p = profile("aztec-c86-4.2b").unwrap();
+        assert_eq!(p.compile_line("+b", "FOO.C"), "CC -n +b FOO.C");
+        assert_eq!(p.compile_line("", "FOO.C"), "CC -n FOO.C");
+    }
+
+    #[test]
+    fn aztec_object_name() {
+        let p = profile("aztec-c86-4.2b").unwrap();
+        assert_eq!(p.object_name("FOO.C"), "FOO.O");
+    }
+
+    #[test]
+    fn trailing_underscore_decoration_round_trips() {
+        let d = profile("aztec-c86-4.2b").unwrap().decoration;
+        for name in ["main", "get_", "a_b_", "x"] {
+            let public = d.function.replace("{name}", name);
+            assert_eq!(d.undecorate(&public), name, "{public}");
+            let data = d.data.replace("{name}", name);
+            assert_eq!(d.undecorate(&data), name, "{data}");
+        }
+    }
+
+    #[test]
+    fn undecorated_symbol_is_kept_verbatim() {
+        let d = profile("aztec-c86-4.2b").unwrap().decoration;
+        assert_eq!(d.undecorate("$begin"), "$begin");
+        assert_eq!(d.undecorate("_"), "_");
+        assert_eq!(d.undecorate("asmproc"), "asmproc");
+    }
+
+    #[test]
+    fn aztec_flag_sets() {
+        for id in AZTEC {
+            let search = profile(id).unwrap().search.unwrap();
+            assert_eq!(
+                search.flag_sets,
+                [strings(&["", "+b"]), strings(&["+h", "-z"])]
+            );
+        }
+        assert!(profile("turbo-c-2.0").unwrap().search.is_none());
     }
 
     #[test]
