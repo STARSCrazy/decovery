@@ -123,3 +123,34 @@ different prompt file and the remaining token, cost and wall budget.
 
 Results of runs after this change are not comparable with the probe and the re-run above (both were single-session
 runs); compare later runs only with runs that use the same `max_continuations`.
+
+## Build throughput (Task 14, 2026-11-18)
+
+First target (49 source files, 650 functions, 618 identical, 32 differ; result unchanged in every run), release
+build, object cache deleted before each cold run, 20 logical cores (20 job slots), machine-wide busy cores sampled
+every 250 ms. The first run after a new executable is discarded (virus scan of the new exe).
+
+Before the idle fixes (3 cold runs): wall 3.8-4.3 s, machine CPU 34 s, busy cores average 8.0-8.8 (share 0.40-0.44),
+lower bound 2.81 s, saturation 0.80 (with worker start-up), efficiency 0.69.
+
+After the idle fixes, rule of owner decision 5 (worker start-up, request sent until first job start, not counted in
+saturation; efficiency >= 0.85):
+
+| run | wall | CPU | busy avg / peak | busy share | lower bound | saturation | efficiency |
+|---|---|---|---|---|---|---|---|
+| cold 1 | 3.25 s | 33.6 s | 10.3 / 19.8 | 0.52 | 2 713 ms | 0.919 | 0.857 |
+| cold 2 | 3.66 s | 35.7 s | 9.8 / 19.9 | 0.49 | 2 787 ms | 0.884 | 0.813 |
+| cold 3 | 3.23 s | 33.2 s | 10.3 / 19.4 | 0.51 | 2 650 ms | 0.904 | 0.832 |
+| cold 4 | 3.44 s | 31.3 s | 9.1 / 16.2 | 0.46 | 2 722 ms | 0.797 | 0.814 |
+| cold 5 | 3.44 s | 34.6 s | 10.0 / 18.8 | 0.50 | 2 757 ms | 0.894 | 0.856 |
+| cold 6 | 3.65 s | 37.2 s | 10.2 / 19.5 | 0.51 | 2 867 ms | 0.878 | 0.821 |
+| warm | 1.02 s | 5.3 s | 5.2 / 6.6 | 0.26 | 756 ms | none (no job) | 0.914 |
+
+Median of the first three cold runs: wall 3.25 s, saturation 0.904, efficiency 0.832 (busy share 0.51). Median of
+all six: saturation 0.889, efficiency 0.827. Longest job about 1.9-2.0 s, job wall 29-32 s, job CPU 18-20 s.
+
+Verdict: saturation >= 0.90 is met at the edge (0.904 over three runs, 0.889 over six; individual runs 0.80-0.92);
+efficiency >= 0.85 is not met on the median (0.83; two of six runs reach 0.856, the 2026-11-18 morning runs
+reached 0.85, so the figure sits on the criterion and moves with machine noise). The wall time is about 0.5 s above
+the lower bound (first job starts 0.45-0.57 s after the build begins, objects stored after the last job).
+Link times were not measured.

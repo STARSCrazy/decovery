@@ -165,3 +165,19 @@ After (3 cold runs, c1-c3):
 Median: wall 3.23 s (before 3.8-4.3), saturation 0.80, efficiency 0.85 (before 0.69), busy share 0.52 (before 0.43).
 Decision 5 (saturation >= 0.90 and efficiency >= 0.85) open with the owner: efficiency met at the edge, saturation
 not (worker start-up). Step 5 not run.
+
+## 2026-11-18 Task 14 steps 2, 5, 6
+Owner decision 5: saturation excludes worker start-up (request sent until first job start); efficiency >= 0.85 stays.
+Implemented in schedule.rs (intervals before the first job start skipped), synthetic test
+`worker_start_up_is_not_counted_in_saturation`; plan decision 5 and Task 14 interface text updated.
+Step 5 (release, plugin override to the worktree unicorn-dos in first-ws decovery.toml, restored afterwards; first run
+after the new exe discarded; objects cache deleted before each cold run; 650 functions, 618 identical every run):
+| run | wall | CPU | busy avg / peak | lower bound | saturation | efficiency |
+|---|---|---|---|---|---|---|
+| cold 1 | 3.25 s | 33.6 s | 10.3 / 19.8 | 2 713 | 0.919 | 0.857 |
+| cold 2 | 3.66 s | 35.7 s | 9.8 / 19.9 | 2 787 | 0.884 | 0.813 |
+| cold 3 | 3.23 s | 33.2 s | 10.3 / 19.4 | 2 650 | 0.904 | 0.832 |
+| cold 4-6 | 3.44 / 3.44 / 3.65 s | 31-37 s | 9.1-10.2 | 2 722-2 867 | 0.797 / 0.894 / 0.878 | 0.814 / 0.856 / 0.821 |
+| warm | 1.02 s | 5.3 s | 5.2 / 6.6 | 756 | none | 0.914 |
+Median cold (runs 1-3): saturation 0.904 (met at the edge), efficiency 0.832 (below 0.85; six-run median 0.827).
+Details in docs/parity/phase-3.md. Step 6 (commit) done as the two commits listed in the final report.
