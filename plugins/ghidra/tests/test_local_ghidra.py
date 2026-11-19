@@ -151,6 +151,60 @@ class LocalGhidraTests(unittest.TestCase):
             again = run(build_plugin(), opening, req(3, "shutdown"))
             self.assertEqual(by_id(again, 2)["result"]["reused"], True)
 
+    def test_two_overlays_at_one_address(self):
+        """ADR 0011: overlays sharing a processor address get their own address spaces and `ovl:` addresses."""
+
+        def overlay_code(filler: int) -> bytes:
+            code = bytearray([filler]) * 32
+            code[0:4] = b"\xe8\x0d\x00\xc3"  # call 0010; ret
+            code[0x10] = 0xC3  # ret
+            return bytes(code)
+
+        def region(name, start, data):
+            return {"name": name, "start": start, "size": len(data), "arch": "x86-real-16", "permissions": "r-x",
+                    "blob": inline_blob(data)}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            program = {
+                "format": "mz",
+                "entry_points": ["seg:1000:0000"],
+                "regions": [
+                    region("image", "seg:1000:0000", b"\xc3" + b"\x90" * 15),
+                    region("OVA.code", "ovl:OVA:2000:0000", overlay_code(0x90)),
+                    region("OVB.code", "ovl:OVB:2000:0000", overlay_code(0xCC)),
+                ],
+            }
+            symbols = [
+                {"address": a, "kind": "function", "name": n, "locals": [], "line_comments": []}
+                for a, n in (("ovl:OVA:2000:0000", "a_main"), ("ovl:OVA:2000:0010", "a_helper"),
+                             ("ovl:OVB:2000:0000", "b_main"), ("ovl:OVB:2000:0010", "b_helper"))
+            ]
+            out_path = root / "export.json"
+            out = run(
+                build_plugin(),
+                req(2, "analyzer/open", {"program": program, "project_dir": str(root / "ghidra"),
+                                         "program_hash": "e" * 64}),
+                req(3, "analyzer/apply", {"symbols": symbols, "types_h": "", "references": []}),
+                req(4, "analyzer/export", {"out_path": str(out_path)}),
+                req(5, "decompiler/decompile", {"addresses": ["ovl:OVB:2000:0000"], "out_dir": str(root / "c")}),
+                req(6, "shutdown"),
+            )
+            self.assertEqual(by_id(out, 3)["result"]["applied"], 4, by_id(out, 3))
+            data = json.loads(out_path.read_text(encoding="utf-8"))
+            starts = {f["start"]: f.get("name") for f in data["functions"]}
+            for address, name in (("ovl:OVA:2000:0000", "a_main"), ("ovl:OVA:2000:0010", "a_helper"),
+                                  ("ovl:OVB:2000:0000", "b_main"), ("ovl:OVB:2000:0010", "b_helper")):
+                self.assertEqual(starts.get(address), name, data["functions"])
+            calls = {(c["caller"], c["callee"]) for c in data["calls"]}
+            self.assertEqual(
+                calls,
+                {("ovl:OVA:2000:0000", "ovl:OVA:2000:0010"), ("ovl:OVB:2000:0000", "ovl:OVB:2000:0010")},
+            )
+            decompiled = by_id(out, 5)["result"][0]
+            self.assertIn("path", decompiled, decompiled)
+            self.assertIn("b_helper", Path(decompiled["path"]).read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()
