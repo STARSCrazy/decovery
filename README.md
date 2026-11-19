@@ -39,6 +39,7 @@ decovery build --function <name> --function-source f.c
                                                    # candidate definition of the function alone
 decovery diagnose <name|address>                   # why a rebuilt function differs and what to try
 decovery diagnose <name> --deep registers          # plus Decomp's model: context, structure, registers, slots, joint
+decovery diagnose --deep <name>                    # --deep without a mode runs joint (structure and registers)
 decovery search <name> --strategy chain --minutes 20
                                                    # Decomp's search; decovery builds the candidate (--apply writes it)
 decovery verify <name> --check equivalence         # Decomp's evidence (equivalence, behavior --run <name>)

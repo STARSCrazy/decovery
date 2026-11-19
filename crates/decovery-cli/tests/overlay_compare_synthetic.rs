@@ -95,11 +95,24 @@ fn deep_diagnosis_rejects_overlay_functions_and_unknown_modes() {
     assert_eq!(out.status.code(), Some(2), "{t}");
     assert!(t.contains("not available for overlay functions"), "{t}");
     assert!(!t.contains("not a decovery address"), "{t}");
-    // a function name where the mode belongs is an error naming the modes, not a mode
-    let out = decovery(dir.path(), &["diagnose", "--deep", "A_ovmain"]);
+    // `--deep` without a mode: a following name is the function, the mode is `joint`
+    for args in [
+        &["diagnose", "--deep", "A_ovmain"][..],
+        &["diagnose", "A_ovmain", "--deep"],
+    ] {
+        let out = decovery(dir.path(), args);
+        let t = text(&out);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {t}");
+        assert!(
+            t.contains("not available for overlay functions"),
+            "{args:?}: {t}"
+        );
+    }
+    // a word that is no mode next to a function is an error naming the modes
+    let out = decovery(dir.path(), &["diagnose", "A_ovmain", "--deep", "bogus"]);
     let t = text(&out);
     assert_eq!(out.status.code(), Some(2), "{t}");
-    assert!(t.contains("invalid value 'A_ovmain'"), "{t}");
+    assert!(t.contains("invalid value 'bogus'"), "{t}");
     for mode in ["context", "structure", "registers", "slots", "joint"] {
         assert!(t.contains(mode), "{t}");
     }

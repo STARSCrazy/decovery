@@ -82,11 +82,12 @@ enum Command {
     /// its report is German). Progress goes to stderr.
     Diagnose {
         /// Function name or address.
-        target: String,
+        target: Option<String>,
         /// Decomp's deeper analysis: context package, structure comparison, Watcom register allocation, stack
-        /// slots, or both together.
-        #[arg(long, value_enum)]
-        deep: Option<Deep>,
+        /// slots, or structure and registers together (`joint`, the default when `--deep` has no mode). A value
+        /// that is no mode is the function: `diagnose --deep NAME` is `diagnose NAME --deep joint`.
+        #[arg(long, value_name = "MODE", num_args = 0..=1, default_missing_value = "joint")]
+        deep: Option<String>,
         /// A candidate source of the function to analyze instead of the current one (`structure`, `registers`,
         /// `slots`, `joint`).
         #[arg(long, value_name = "FILE", requires = "deep")]
@@ -528,7 +529,10 @@ enum Sort {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    if let Err(e) = resolve_deep(&mut cli.command) {
+        e.exit();
+    }
     if let Some(jobs) = cli.jobs {
         decovery_toolchain::set_global_jobs(jobs);
     }
@@ -541,6 +545,50 @@ fn main() -> ExitCode {
         log_call(&workspace, &mut record, started, code);
     }
     code
+}
+
+/// Settles `diagnose`'s target and `--deep` mode: a `--deep` value that is no mode is the function when no other
+/// target is given (`diagnose --deep NAME` runs `joint`); afterwards the target is set and the mode is valid.
+fn resolve_deep(command: &mut Command) -> Result<(), clap::Error> {
+    use clap::CommandFactory;
+    let Command::Diagnose { target, deep, .. } = command else {
+        return Ok(());
+    };
+    let modes = || {
+        Deep::value_variants()
+            .iter()
+            .filter_map(|d| d.to_possible_value())
+            .map(|v| v.get_name().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    if let Some(value) = deep.clone()
+        && Deep::from_str(&value, true).is_err()
+    {
+        if target.is_some() {
+            return Err(Cli::command().error(
+                clap::error::ErrorKind::InvalidValue,
+                format!(
+                    "invalid value '{value}' for '--deep [<MODE>]' (possible values: {})",
+                    modes()
+                ),
+            ));
+        }
+        *target = Some(value);
+        *deep = Some("joint".into());
+    }
+    if target.is_none() {
+        return Err(Cli::command().error(
+            clap::error::ErrorKind::MissingRequiredArgument,
+            "diagnose needs a function name or address",
+        ));
+    }
+    Ok(())
+}
+
+/// The mode of a `--deep` value checked by [`resolve_deep`].
+fn deep_mode(value: &str) -> Deep {
+    Deep::from_str(value, true).unwrap_or(Deep::Joint)
 }
 
 /// The call-log record of a workspace command (`None` for `migrate`, `mcp` and `setup`, which log nothing or
@@ -556,8 +604,8 @@ fn call_record(command: &Command) -> Option<CallRecord> {
         Command::Show { target, .. } => ("show", Some(target), None),
         Command::Diagnose { target, deep, .. } => (
             "diagnose",
-            Some(target),
-            deep.map(|d| match d {
+            target.as_deref(),
+            deep.as_deref().map(|d| match deep_mode(d) {
                 Deep::Context => "context",
                 Deep::Structure => "structure",
                 Deep::Registers => "registers",
@@ -689,7 +737,11 @@ fn run(cli: Cli) -> ExitCode {
         Command::Show { target, lines } => finish(show(&cli.workspace, &target, lines, cli.json)),
         Command::Diagnose {
             target, deep: None, ..
-        } => finish(diagnose(&cli.workspace, &target, cli.json)),
+        } => finish(diagnose(
+            &cli.workspace,
+            &target.unwrap_or_default(),
+            cli.json,
+        )),
         Command::Diagnose {
             target,
             deep: Some(deep),
@@ -697,14 +749,14 @@ fn run(cli: Cli) -> ExitCode {
             all,
             minutes,
         } => {
-            let operation = match deep {
+            let operation = match deep_mode(&deep) {
                 Deep::Context => LegacyOperation::Context,
                 Deep::Structure => LegacyOperation::Structure,
                 Deep::Registers => LegacyOperation::Registers,
                 Deep::Slots => LegacyOperation::Slots,
                 Deep::Joint => LegacyOperation::Joint,
             };
-            let mut call = LegacyCall::new(target, operation);
+            let mut call = LegacyCall::new(target.unwrap_or_default(), operation);
             call.options.source = source;
             call.options.all = all;
             call.options.minutes = minutes;

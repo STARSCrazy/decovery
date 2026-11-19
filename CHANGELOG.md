@@ -43,6 +43,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
   identical with WLINK 10.6 in DOSBox (`dosbox-lab`).
 
 ### Fixed
+- `diagnose --deep` works without a mode (`joint`, structure and registers together); `diagnose --deep NAME` takes
+  NAME as the function, `--deep registers` etc. still select a mode.
 - Overlay `diagnose` (Aztec C86) agreed with `build` only when no relocated field changed a branch: relocated fields
   of the function now take the original's bytes (link gaps, as in `build`), and the module's functions take the
   analysis' names at their placed addresses, so short jumps and calls inside the module compare by where they lead.
