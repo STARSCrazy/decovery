@@ -67,6 +67,18 @@ class AztecTests(unittest.TestCase):
         self.assertEqual(aztec.case_labels([0x52, 0x53, 7], [0x19, 0x19, 0x21, 0x21]),
                          {0x19: "0x52: case 0x53", 0x21: "0x7: default"})
 
+    def test_case_label_for_a_token(self):
+        labels = aztec.case_labels([0, 0x12, 0x64], [0x89, 0x91, 0x99, 0xA0])
+        self.assertEqual(aztec.case_label(labels, 0x91, 0x91), "0x12")
+        self.assertEqual(aztec.case_label(labels, 0xFFFF0091, 0x91), "0x12")  # sign-extended address
+        # the decompiler could not back the switch value up to the table: the case token sits at its target, or
+        # past it when the first instruction of the case was folded away
+        self.assertEqual(aztec.case_label(labels, aztec.BAD_LABEL, 0x99), "0x64")
+        self.assertEqual(aztec.case_label(labels, aztec.BAD_LABEL, 0x9C), "0x64")
+        self.assertIsNone(aztec.case_label(labels, aztec.BAD_LABEL, 0x80))
+        self.assertIsNone(aztec.case_label(labels, aztec.BAD_LABEL, None))
+        self.assertIsNone(aztec.case_label(labels, 7, 0x91))  # a value the decompiler recovered itself
+
     def test_expected_warnings(self):
         lines = [
             "/* WARNING: Function: fun_1000_0200 replaced with injection: decovery_aztec_switch */",

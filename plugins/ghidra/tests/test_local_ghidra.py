@@ -318,6 +318,52 @@ class LocalGhidraTests(unittest.TestCase):
             self.assertNotIn("Removing unreachable block", code)
             self.assertIn("switch (AX): 0x1 -> 0019, 0x2 -> 001D; default -> 0021", code)
 
+    def test_aztec_switch_on_a_byte(self):
+        """`mov al,[x]; sub ah,ah; mov cx,3; call $swt`: the decompiler switches on the byte and cannot back the
+        targets up to it (labels 0xbad1abe1...); the cases still get the table's values."""
+        from test_aztec import SWITCH, near_call
+
+        image = bytearray(b"\xcc" * 0x400)
+        image[0x000:0x005] = b"\xa0\x80\x03\x2a\xe4"  # mov al,[0x380]; sub ah,ah
+        image[0x005:0x008] = b"\xb9\x03\x00"  # mov cx,3
+        image[0x008:0x00B] = near_call(0x008, 0x200)  # call $swt
+        image[0x00B:0x015] = struct.pack("<5H", 0x12, 0x15, 0x15, 0x19, 0x1D)
+        image[0x015:0x018] = near_call(0x015, 0x300)  # case 0x12: call g1
+        image[0x018] = 0xC3
+        image[0x019:0x01C] = near_call(0x019, 0x310)  # case 0x15: call g2
+        image[0x01C] = 0xC3
+        image[0x01D:0x021] = b"\xb8\x00\x00\xc3"  # default: return 0
+        image[0x200:0x200 + len(SWITCH)] = SWITCH
+        image[0x300] = image[0x310] = 0xC3
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            program = {
+                "format": "mz",
+                "entry_points": ["seg:1000:0000"],
+                "regions": [{"name": "image", "start": "seg:1000:0000", "size": len(image), "arch": "x86-real-16",
+                             "permissions": "rwx", "blob": inline_blob(bytes(image))}],
+            }
+            symbols = [{"address": a, "kind": "function", "name": n, "locals": [], "line_comments": []}
+                       for a, n in (("seg:1000:0300", "g1"), ("seg:1000:0310", "g2"))]
+            out = run(
+                build_plugin(),
+                req(2, "analyzer/open", {"program": program, "project_dir": str(root / "ghidra"),
+                                         "program_hash": "a1" * 32}),
+                req(3, "analyzer/apply", {"symbols": symbols, "types_h": "", "references": []}),
+                req(4, "decompiler/decompile", {"addresses": ["seg:1000:0000"], "out_dir": str(root / "c")}),
+                req(5, "shutdown"),
+            )
+            decompiled = by_id(out, 4)["result"][0]
+            self.assertIn("path", decompiled, decompiled)
+            code = Path(decompiled["path"]).read_text(encoding="utf-8")
+            self.assertNotIn("bad1abe1", code)
+            self.assertIn("case 0x12:", code)
+            self.assertIn("case 0x15:", code)
+            self.assertIn("default:", code)
+            self.assertNotIn("case default", code)
+            self.assertIn("g1", code)
+            self.assertIn("g2", code)
+
     def test_aztec_runtime_helpers(self):
         """`$ldv` takes DX:AX and BX:CX and returns DX:AX; helpers decompile to a stub; no injection notices; an
         unreachable `ret` after an endless loop belongs to its function."""

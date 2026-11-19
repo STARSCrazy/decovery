@@ -56,6 +56,23 @@ def case_labels(cases: list[int], targets: list[int]) -> dict[int, str]:
     return labels
 
 
+# The decompiler's label for a case it could not trace back to the switch variable (jumptable.cc).
+BAD_LABEL = 0xBAD1ABE1BAD1ABE1
+
+
+def case_label(labels: dict[int, str], value: int, address: int | None) -> str | None:
+    """The label (from `case_labels`) for a case token the decompiler printed as `value` at `address` (the
+    offset of its first statement, None when unknown). The decompiler prints the target address as the value, or
+    BAD_LABEL when it cannot back the value up to the switch; then the case is the nearest target at or below the
+    token's address (the first instruction of a case may be folded into the next statement)."""
+    if value != BAD_LABEL:
+        return labels.get(value) or next((labels[t] for t in labels if (t & 0xFFFF) == (value & 0xFFFF)), None)
+    if address is None:
+        return None
+    below = [t for t in labels if t <= address]
+    return labels[max(below)] if below else None
+
+
 def _find_all(data: bytes, pattern: bytes) -> list[int]:
     found, at = [], data.find(pattern)
     while at >= 0:

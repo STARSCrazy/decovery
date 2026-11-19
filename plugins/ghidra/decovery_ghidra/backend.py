@@ -675,8 +675,8 @@ class GhidraBackend(Backend):
                 value = int(str(token.getText()), 0)
             except ValueError:
                 value = int(token.getValue())
-            label = labels.get(value) or next(
-                (labels[t] for t in labels if (t & 0xFFFF) == (value & 0xFFFF)), None)
+            at = token.getMinAddress()
+            label = aztec.case_label(labels, value, None if at is None else int(at.getOffset()))
             if label is None:
                 continue
             text.set(token, label)
