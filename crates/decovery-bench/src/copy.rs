@@ -96,6 +96,18 @@ pub fn prepare_copy(
     tools: ToolSet,
     into: &Path,
 ) -> Result<TaskCopy, BenchError> {
+    prepare_copy_with(task, start, tools, true, into)
+}
+
+/// [`prepare_copy`] with the exemplar switch: `exemplars = false` writes `[rebuild] exemplars = false` into the
+/// copy's `decovery.toml`, so `show` and `find similar` offer no exemplars.
+pub fn prepare_copy_with(
+    task: &SuiteTask,
+    start: StartPoint,
+    tools: ToolSet,
+    exemplars: bool,
+    into: &Path,
+) -> Result<TaskCopy, BenchError> {
     let selected = super::suite::selected(task)?;
     let root = destination(task, into)?;
     if root.starts_with(&selected.workspace.root) {
@@ -263,6 +275,18 @@ pub fn prepare_copy(
             }
             None
         };
+        if !exemplars {
+            let table = config
+                .as_table_mut()
+                .ok_or_else(|| copy_error(task, "decovery.toml is not a table"))?;
+            let rebuild = table
+                .entry("rebuild")
+                .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+            let rebuild = rebuild
+                .as_table_mut()
+                .ok_or_else(|| copy_error(task, "[rebuild] of decovery.toml is not a table"))?;
+            rebuild.insert("exemplars".into(), toml::Value::Boolean(false));
+        }
         secrets.sanitize_toml(&mut config);
         write_toml(&root.join("decovery.toml"), &config)?;
         // A generated stub/pseudo-C may itself equal a trivial known solution. Only its generated span is exempt.

@@ -1,6 +1,7 @@
 //! Persistent benchmark records and bounded scheduling of isolated task evaluations.
 use super::{
-    BenchError, DriverConfig, Suite, SuiteTask, ToolSet, canonical, copies_dir, io, prepare_copy,
+    BenchError, DriverConfig, Suite, SuiteTask, ToolSet, canonical, copies_dir, io,
+    prepare_copy_with,
 };
 use decovery_core::{
     BenchUsage, VerdictId, archive_load, attempt_distance, distance_of, now_utc, read_attempts,
@@ -31,6 +32,8 @@ pub struct RunOptions {
     pub decovery_exe: PathBuf,
     pub copies_dir: Option<PathBuf>,
     pub keep: bool,
+    /// `Some(false)` hides exemplars in every task (`bench run --no-exemplars`); `None` follows the suite.
+    pub exemplars: Option<bool>,
 }
 impl RunOptions {
     pub fn new(driver: impl Into<String>, decovery_exe: PathBuf) -> Self {
@@ -46,6 +49,7 @@ impl RunOptions {
             decovery_exe,
             copies_dir: None,
             keep: false,
+            exemplars: None,
         }
     }
 }
@@ -77,6 +81,9 @@ pub struct TaskResult {
     /// Driver sessions started after the first one because the agent ended with budget left (ADR 0009, 10).
     #[serde(default)]
     pub continuations: u32,
+    /// The task's copy offered exemplars (older records: true).
+    #[serde(default = "default_true")]
+    pub exemplars: bool,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -106,10 +113,15 @@ impl TaskResult {
             exit: "not-run".into(),
             log: None,
             continuations: 0,
+            exemplars: task.exemplars.unwrap_or(true),
             extra: Map::new(),
         }
     }
 }
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Totals {
@@ -142,6 +154,9 @@ pub struct RunRecord {
     pub model: Option<String>,
     pub tools: String,
     pub seed: u64,
+    /// The run's default exemplar setting (suite default or `--no-exemplars`; older records: true).
+    #[serde(default = "default_true")]
+    pub exemplars: bool,
     pub totals: Totals,
     pub tasks: Vec<TaskResult>,
     #[serde(flatten)]
@@ -286,7 +301,7 @@ pub fn run_suite(
         .clone()
         .or(user.bench.copies_dir)
         .unwrap_or_else(copies_dir);
-    let config = json!({"suite":suite,"driver":driver,"seed":options.seed,"repeat":options.repeat,"only":options.only,"max_total_tokens":options.max_total_tokens,"max_total_cost_usd":options.max_total_cost_usd});
+    let config = json!({"suite":suite,"driver":driver,"seed":options.seed,"repeat":options.repeat,"only":options.only,"max_total_tokens":options.max_total_tokens,"max_total_cost_usd":options.max_total_cost_usd,"exemplars":options.exemplars});
     let config_hash = hash(
         &serde_json::to_vec(&config).map_err(|e| BenchError::Driver {
             task: suite.name.clone(),
@@ -341,6 +356,7 @@ pub fn run_suite(
             model: None,
             tools: tools.into(),
             seed: options.seed,
+            exemplars: options.exemplars.unwrap_or(suite.defaults.exemplars),
             totals: Totals::default(),
             tasks: suite
                 .tasks
@@ -497,16 +513,21 @@ fn evaluate(
 ) -> TaskResult {
     let began = Instant::now();
     let mut result = TaskResult::pending(task, repeat);
+    result.exemplars = options
+        .exemplars
+        .or(task.exemplars)
+        .unwrap_or(suite.defaults.exemplars);
     result.exit = "driver-error".into();
     let key = format!("{}-{repeat}", key(&task.id));
     let copy_parent = copies.join(format!("{key}-attempt-{attempt}"));
     let log_dir = logs.join(&key).join(format!("attempt-{attempt}"));
     let outcome = (|| -> Result<(), BenchError> {
         std::fs::create_dir_all(&log_dir).map_err(|e| io(&log_dir, e))?;
-        let copy = prepare_copy(
+        let copy = prepare_copy_with(
             task,
             task.start.unwrap_or(suite.defaults.start),
             suite.defaults.tools,
+            result.exemplars,
             &copy_parent.join("workspace"),
         )?;
         result.profile = copy.profile.clone();

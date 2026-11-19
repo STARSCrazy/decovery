@@ -162,6 +162,11 @@ fn similar(
     limit: usize,
     budget: Budget,
 ) -> Result<Response, FacadeError> {
+    if !crate::exemplars::exemplars_enabled(session) {
+        return Err(FacadeError::Invalid(
+            crate::exemplars::EXEMPLARS_DISABLED.into(),
+        ));
+    }
     let start = resolve(session, target)?.function;
     let name = session.name_of(start).name;
     let index = crate::exemplar_index(session)?;

@@ -330,6 +330,9 @@ pub struct RebuildConfig {
     /// Frame (stack segment) bases by name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub frames: BTreeMap<String, Address>,
+    /// `false` hides exemplars from `show` and `find similar` (bench runs without exemplars); default true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exemplars: Option<bool>,
 }
 
 /// Linker settings of a rebuild.

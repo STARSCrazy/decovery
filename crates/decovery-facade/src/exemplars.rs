@@ -395,6 +395,20 @@ fn intern(strings: &[String], ids: &mut HashMap<String, u32>, table: &mut Vec<St
         .collect()
 }
 
+/// The hint of `show` and `find similar` when `[rebuild] exemplars = false`.
+pub(crate) const EXEMPLARS_DISABLED: &str = "exemplars are disabled in this workspace";
+
+/// Whether the workspace offers exemplars (`[rebuild] exemplars`, default true).
+pub(crate) fn exemplars_enabled(session: &Session) -> bool {
+    session
+        .workspace
+        .config
+        .rebuild
+        .as_ref()
+        .and_then(|r| r.exemplars)
+        .unwrap_or(true)
+}
+
 /// The identical functions from C sources that are not library-classified and have an analysed range.
 fn members(session: &Session) -> BTreeMap<Address, &RebuildRecord> {
     let index = session.analysis.index();

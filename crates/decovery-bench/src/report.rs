@@ -265,12 +265,25 @@ pub struct RunComparison {
     pub b: String,
     /// Both runs hold the same (task, repeat) pairs, so differences are taken per task.
     pub paired: bool,
+    /// The exemplar setting of run A and run B.
+    #[serde(default = "default_true")]
+    pub exemplars_a: bool,
+    #[serde(default = "default_true")]
+    pub exemplars_b: bool,
     pub warnings: Vec<String>,
     pub metrics: Vec<MetricComparison>,
     /// Names of the metrics whose interval excludes 0.
     pub differing: Vec<String>,
     /// Every interval contains 0.
     pub consistent: bool,
+}
+
+fn on_off(enabled: bool) -> &'static str {
+    if enabled { "on" } else { "off" }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 type TaskKey<'a> = (&'a str, u32);
@@ -301,6 +314,13 @@ pub fn compare(a: &RunRecord, b: &RunRecord) -> RunComparison {
     let mut warnings = Vec::new();
     if a.tools != b.tools {
         warnings.push(format!("tools differ: {} vs {}", a.tools, b.tools));
+    }
+    if a.exemplars != b.exemplars {
+        warnings.push(format!(
+            "exemplars differ: {} vs {}",
+            on_off(a.exemplars),
+            on_off(b.exemplars)
+        ));
     }
     if a.driver != b.driver {
         warnings.push(format!("driver differs: {} vs {}", a.driver, b.driver));
@@ -358,6 +378,8 @@ pub fn compare(a: &RunRecord, b: &RunRecord) -> RunComparison {
     RunComparison {
         a: a.id.clone(),
         b: b.id.clone(),
+        exemplars_a: a.exemplars,
+        exemplars_b: b.exemplars,
         paired,
         warnings,
         metrics,
@@ -378,6 +400,12 @@ impl RunComparison {
             } else {
                 "unpaired"
             }
+        );
+        let _ = writeln!(
+            out,
+            "exemplars: A {}, B {}",
+            on_off(self.exemplars_a),
+            on_off(self.exemplars_b)
         );
         for w in &self.warnings {
             let _ = writeln!(out, "warning: {w}");

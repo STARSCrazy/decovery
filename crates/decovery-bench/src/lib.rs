@@ -8,7 +8,7 @@ mod run;
 mod stats;
 mod suite;
 
-pub use copy::{TaskCopy, copies_dir, prepare_copy};
+pub use copy::{TaskCopy, copies_dir, prepare_copy, prepare_copy_with};
 pub use driver::DriverConfig;
 pub use report::{
     GroupBy, GroupReport, MetricComparison, MetricSummary, Report, RunComparison, compare, report,
