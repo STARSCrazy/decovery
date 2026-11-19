@@ -60,6 +60,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Overlay module comparison: every object's data starts on a word, as the Aztec linker places it (one zero byte
   after an object with an odd data size). Before, the string literals of a later file were compared one byte early
   and their references counted as wrong.
+- Overlay module comparison: an external name is bound to the address most of its uses agree on (before: its first
+  use), and each disagreeing use names its expression, the field's content and the address it implies (e.g.
+  `t_: bound at 84AA by its other uses; the field at E751 (t_) holds 84AC, as if t_ were at 84AC`).
 - The header of an archived `comparison.txt` counted other instructions than its listing (2 against 1 for one
   inserted instruction): both now give the listing's counts, changed, inserted and removed instructions separately.
 - `find similar` and `show` named exemplars by the rebuild record's name (`fun_…`) instead of the knowledge's name.

@@ -363,6 +363,26 @@ fn extern_at_a_fixed_offset_binds_once() {
 }
 
 #[test]
+fn disagreeing_extern_use_names_its_addend_and_field() {
+    // the original reads tbl_+0 where E reads tbl_-2 (a source error): the message says what the field holds
+    let (e, f) = extern_with_addends(false);
+    let mut file = addend_overlay(0x84AA, 0);
+    file[14 + 1..14 + 3].copy_from_slice(&0x84AAu16.to_le_bytes());
+    let ovl = read_overlay(&file, "T").expect("overlay");
+    let v = compare_overlay_module(&[&object(&e), &object(&f)], &ovl);
+    assert_eq!(v.code.metrics.refs_wrong, 1, "{v:#?}");
+    assert_eq!(
+        v.ambiguous,
+        [
+            "tbl_: bound at 84AA by its other uses; the field at 1001 (tbl_-2) holds 84AA, as if tbl_ were at 84AC"
+        ]
+    );
+    // the majority of the uses binds the name: the one disagreeing use is the wrong reference
+    assert_eq!(v.code.blockers, [Blocker::WrongAbsoluteRef { at: 1 }]);
+    assert_eq!(v.externals.get("tbl_"), Some(&0x84AA));
+}
+
+#[test]
 fn common_at_a_fixed_offset_uses_the_addend() {
     // F declares tbl_ as a common of 4 bytes: placed at the BSS start (2000), E's uses at 1FFE and 2002
     let (e, f) = extern_with_addends(true);

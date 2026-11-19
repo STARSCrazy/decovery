@@ -9,8 +9,8 @@
 //! Every relocated field is resolved before the bytes are compared:
 //! - targets inside the module (code, data and BSS symbols of any of its objects, unnamed positions) are computed
 //!   from the placement and must equal the original field (`refs_ok` / `refs_wrong`);
-//! - external names take their binding from the original field; every further use of the same name must lead to
-//!   the same address, otherwise the use is a wrong reference;
+//! - external names take their binding from the original fields (field less the object's number): the address most
+//!   uses of a name lead to binds it (the first on a tie), every other use is a wrong reference;
 //! - common symbols (uninitialised globals no object defines) are placed behind the objects' own BSS in the order
 //!   of their first appearance (ADR 0013) and count into the BSS size;
 //! - segment paragraphs and far pointers (the loader's CS/DS) are link gaps.
@@ -151,6 +151,19 @@ fn place_commons<'a>(
     bss
 }
 
+/// One use of an external name: the address it binds the name to (the original field less the object's number).
+struct ExternUse<'a> {
+    name: &'a str,
+    bound: i64,
+    number: i64,
+    orig: i64,
+    place: i64,
+    /// Offset of the field from the code origin (for the blocker).
+    at: u32,
+    code: bool,
+    relative: bool,
+}
+
 fn read_field(bytes: &[u8], at: usize, width: usize) -> Option<i64> {
     let field = bytes.get(at..at.checked_add(width)?)?;
     Some(
@@ -209,6 +222,8 @@ pub fn compare_overlay_module(objects: &[&ObjectFile], overlay: &Overlay) -> Mod
     let mut blockers = Vec::new();
     let mut externals: BTreeMap<String, u16> = BTreeMap::new();
     let mut ambiguous = Vec::new();
+    // the uses of external names, judged once every use is known
+    let mut uses: Vec<ExternUse> = Vec::new();
     let mut gaps_code = BTreeSet::new();
     let mut gaps_data = BTreeSet::new();
     // every relocated code field: judged as a reference, never as differing bytes
@@ -317,21 +332,16 @@ pub fn compare_overlay_module(objects: &[&ObjectFile], overlay: &Overlay) -> Mod
                         let field = if relative { sign(orig, width) } else { orig };
                         let bound =
                             ((if relative { end + field } else { field }) - number) & 0xFFFF;
-                        match externals.get(n) {
-                            Some(&b) if i64::from(b) != bound => {
-                                metrics.refs_wrong += 1;
-                                ambiguous.push(format!(
-                                    "{n}: {b:04X} and {bound:04X} (field at {place:04X})"
-                                ));
-                                if part == Part::Code {
-                                    wrong(&mut blockers);
-                                }
-                            }
-                            _ => {
-                                externals.insert(n.to_string(), bound as u16);
-                                metrics.refs_ok += 1;
-                            }
-                        }
+                        uses.push(ExternUse {
+                            name: n,
+                            bound,
+                            number,
+                            orig,
+                            place,
+                            at: (place - corg).max(0) as u32,
+                            code: part == Part::Code,
+                            relative,
+                        });
                         write_field(rebuilt, at, width, orig);
                     }
                     (None, None) => {
@@ -342,6 +352,52 @@ pub fn compare_overlay_module(objects: &[&ObjectFile], overlay: &Overlay) -> Mod
             }
         }
     }
+
+    // external names: the address most of a name's uses agree on binds it (the first such use on a tie); every
+    // other use is a wrong reference
+    let mut votes: BTreeMap<&str, Vec<(i64, u32)>> = BTreeMap::new();
+    for u in &uses {
+        let v = votes.entry(u.name).or_default();
+        match v.iter_mut().find(|(b, _)| *b == u.bound) {
+            Some((_, n)) => *n += 1,
+            None => v.push((u.bound, 1)),
+        }
+    }
+    for (name, v) in &votes {
+        // max_by_key keeps the last maximum: search the reversed list for the first
+        if let Some(&(b, _)) = v.iter().rev().max_by_key(|(_, n)| *n) {
+            externals.insert((*name).to_string(), b as u16);
+        }
+    }
+    for u in &uses {
+        let b = i64::from(externals[u.name]);
+        if u.bound == b {
+            metrics.refs_ok += 1;
+            continue;
+        }
+        metrics.refs_wrong += 1;
+        let n = u.name;
+        let expr = match u.number {
+            0 => n.to_string(),
+            k if k > 0 => format!("{n}+{k}"),
+            k => format!("{n}{k}"),
+        };
+        ambiguous.push(format!(
+            "{n}: bound at {b:04X} by its other uses; the field at {:04X} ({expr}) holds {:04X}, as if {n} were at {:04X}",
+            u.place, u.orig, u.bound
+        ));
+        if u.code {
+            blockers.push(if u.relative {
+                Blocker::WrongRelativeRef { at: u.at }
+            } else {
+                Blocker::WrongAbsoluteRef { at: u.at }
+            });
+        }
+    }
+    blockers.sort_by_key(|b| match *b {
+        Blocker::WrongRelativeRef { at } | Blocker::WrongAbsoluteRef { at } => at,
+        _ => 0,
+    });
 
     // code
     let code_size = (
