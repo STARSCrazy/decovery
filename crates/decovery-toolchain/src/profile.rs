@@ -671,7 +671,8 @@ mod tests {
             let p = profile(id).unwrap();
             assert_eq!((p.family.as_str(), p.bits), ("aztec-c86", 16), "{id}");
             assert_eq!(p.object_format, ObjectFormat::Aztec);
-            assert!(p.linker.is_none(), "{id}");
+            // only 4.2b's LN is verified on the real tool (ADR 0018)
+            assert_eq!(p.linker.is_some(), id == "aztec-c86-4.2b", "{id}");
             // only 4.2b's AS invocation is verified on the real tool
             let assembler = assembler_profile(&p).unwrap().map(|a| a.command);
             let expected = (id == "aztec-c86-4.2b").then(|| "AS {input}".to_string());
