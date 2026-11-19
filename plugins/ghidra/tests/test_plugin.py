@@ -260,7 +260,7 @@ class PluginTests(unittest.TestCase):
                 "program_hash": "a" * 64,
                 "ghidra_version": EXPECTED_GHIDRA_VERSION,
                 "calling_convention": None,
-                "import_setup": 4,
+                "import_setup": 5,
             },
         )
         before = (self.root / "proj" / "project.json").read_bytes()

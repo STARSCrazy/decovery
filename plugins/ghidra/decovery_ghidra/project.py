@@ -58,7 +58,8 @@ def project_location(
 # 2: data segment, Aztec C86 `$csav` and switch helpers (aztec.py).
 # 3: switch case values kept for decompiling (`decovery.aztec.switch` property).
 # 4: dense switch tables (`cmp ax,n; ... jmp cs:[bx+table]`).
-IMPORT_SETUP = 4
+# 5: run-time helpers tagged LIBRARY (long helpers with register arguments, swapmem named).
+IMPORT_SETUP = 5
 
 
 def project_key(program_hash: str, ghidra_version: str, calling_convention: str | None) -> dict:
