@@ -323,3 +323,15 @@ confidence = \"confirmed\"
     assert!(hint.contains("g (ovl:C:0000:5004) comes after pre"), "{}", r.data);
     assert!(r.summary.contains(hint), "{}", r.summary);
 }
+
+#[test]
+fn show_with_asm_gives_the_original_disassembly() {
+    let dir = workspace(false);
+    let session = Session::open(dir.path()).unwrap();
+    let r = decovery_facade::show_with_asm(&session, "A_ovmain", Budget::default(), false).unwrap();
+    let asm = r.data["asm"].as_str().unwrap();
+    assert!(asm.starts_with(&format!("{A_AT}  ")), "{asm}");
+    assert!(asm.contains("mov ax,"), "{asm}");
+    let plain = decovery_facade::show(&session, "A_ovmain", Budget::default()).unwrap();
+    assert!(plain.data.get("asm").is_none());
+}

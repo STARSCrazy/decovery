@@ -75,6 +75,9 @@ enum Command {
         /// Print the instruction address ranges each pseudo-C line came from in front of it.
         #[arg(long)]
         lines: bool,
+        /// Print the original's disassembly of the function after the pseudo-C.
+        #[arg(long)]
+        asm: bool,
     },
     /// Why a rebuilt function differs from the original and what to try: findings of the diagnosis rules, the
     /// kind of deviation and the instructions side by side. Reads the object of the last `build`.
@@ -737,7 +740,9 @@ fn run(cli: Cli) -> ExitCode {
                 }
             }
         }
-        Command::Show { target, lines } => finish(show(&cli.workspace, &target, lines, cli.json)),
+        Command::Show { target, lines, asm } => {
+            finish(show(&cli.workspace, &target, lines, asm, cli.json))
+        }
         Command::Diagnose {
             target, deep: None, ..
         } => finish(diagnose(
@@ -1537,10 +1542,18 @@ fn print_json(response: &Response) -> Result<(), FacadeError> {
     Ok(())
 }
 
-fn show(workspace: &Path, target: &str, lines: bool, json: bool) -> Result<(), FacadeError> {
+fn show(
+    workspace: &Path,
+    target: &str,
+    lines: bool,
+    asm: bool,
+    json: bool,
+) -> Result<(), FacadeError> {
     let session = Session::open(workspace)?;
     let run = |budget| {
-        if lines {
+        if asm {
+            decovery_facade::show_with_asm(&session, target, budget, lines)
+        } else if lines {
             decovery_facade::show_with_lines(&session, target, budget)
         } else {
             decovery_facade::show(&session, target, budget)
@@ -1555,6 +1568,11 @@ fn show(workspace: &Path, target: &str, lines: bool, json: bool) -> Result<(), F
     }
     if let Some(text) = response.data["text"].as_str() {
         print!("{text}");
+    }
+    if let Some(asm) = response.data["asm"].as_str().filter(|a| !a.is_empty()) {
+        println!("
+/* original disassembly */");
+        print!("{asm}");
     }
     for warning in response.data["warnings"].as_array().into_iter().flatten() {
         if let Some(text) = warning.as_str() {

@@ -6,6 +6,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `show --asm` (MCP `show` with `asm`): the original's disassembly of the function after the pseudo-C (address, bytes,
+  instruction, the known name of a branch target), decoded as `diagnose` does; in the data as `asm`.
 - The module verdict lists the commons its BSS layout places (`commons`: name, size, address, declaring files); when
   the BSS size differs, a finding says that extern declarations with a size (`extern int x[3];`) count into it.
 - A module verdict whose BSS is smaller than the original's lists every external name bound inside the original BSS
