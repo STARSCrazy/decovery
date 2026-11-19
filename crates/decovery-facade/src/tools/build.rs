@@ -335,6 +335,11 @@ pub fn build(
 ) -> Result<Response, FacadeError> {
     let started = Instant::now();
     control.check()?;
+    let mut named = request.clone();
+    for file in &mut named.files {
+        *file = super::source_path::source_file_name(root, file)?;
+    }
+    let request = &named;
     if !request.variants.is_empty() {
         return build_variants(root, request, control, started);
     }

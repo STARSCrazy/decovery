@@ -519,8 +519,10 @@ mod tests {
         let mut d = data(&f, Some(&s));
         d.name = "short_name".to_string();
         assert!(
-            header(&d).contains("@signature  unsigned int short_name(int a, char *b)
-"),
+            header(&d).contains(
+                "@signature  unsigned int short_name(int a, char *b)
+"
+            ),
             "{}",
             header(&d)
         );
@@ -528,8 +530,10 @@ mod tests {
         s.signature = Some("int (*get(void))(int)".to_string());
         let mut d = data(&f, Some(&s));
         d.name = "short_name".to_string();
-        assert!(header(&d).contains("@signature  int (*get(void))(int)
-"));
+        assert!(header(&d).contains(
+            "@signature  int (*get(void))(int)
+"
+        ));
     }
 
     #[test]

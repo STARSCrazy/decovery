@@ -12,6 +12,7 @@ mod legacy;
 mod link;
 mod link_symbols;
 mod show;
+mod source_path;
 mod status;
 mod variants;
 
