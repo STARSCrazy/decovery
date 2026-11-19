@@ -24,6 +24,9 @@ pub struct ObjectModule {
     pub groups: Vec<Group>,
     /// Program start address of a main module (OMF `MODEND`): section index and offset.
     pub start: Option<(u32, u32)>,
+    /// Common symbols (Aztec: undefined named symbols with a size): name and size in bytes, in symbol-table order.
+    /// The linker places each name once, in uninitialised data (ADR 0013).
+    pub commons: Vec<(String, u32)>,
 }
 
 /// A segment group: the member sections share one frame.
@@ -133,6 +136,7 @@ impl ObjectModule {
             symbols,
             groups: Vec::new(),
             start: None,
+            commons: Vec::new(),
         }
     }
 

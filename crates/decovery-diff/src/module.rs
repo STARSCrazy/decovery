@@ -11,6 +11,8 @@
 //!   from the placement and must equal the original field (`refs_ok` / `refs_wrong`);
 //! - external names take their binding from the original field; every further use of the same name must lead to
 //!   the same address, otherwise the use is a wrong reference;
+//! - common symbols (uninitialised globals no object defines) are placed behind the objects' own BSS in the order
+//!   of their first appearance (ADR 0013) and count into the BSS size;
 //! - segment paragraphs and far pointers (the loader's CS/DS) are link gaps.
 //!
 //! The module is identical when code and data are byte-equal after that, every reference agrees, the code ends
@@ -113,6 +115,37 @@ fn layout(modules: &[&ObjectModule], corg: i64, dorg: i64, bss_start: i64) -> La
     }
 }
 
+/// Places the common symbols no module defines behind the modules' own BSS (ADR 0013): each name once, in the
+/// order of its first appearance (objects in link order, each in symbol-table order), with the largest size any
+/// object declares, without alignment. Returns the BSS size including them.
+fn place_commons<'a>(
+    modules: &[&'a ObjectModule],
+    public: &mut BTreeMap<&'a str, i64>,
+    bss_start: i64,
+    own_bss: u32,
+) -> u32 {
+    let mut order: Vec<&str> = Vec::new();
+    let mut sizes: BTreeMap<&str, u32> = BTreeMap::new();
+    for m in modules {
+        for (name, size) in &m.commons {
+            if public.contains_key(name.as_str()) {
+                continue;
+            }
+            let entry = sizes.entry(name.as_str()).or_insert_with(|| {
+                order.push(name.as_str());
+                0
+            });
+            *entry = (*entry).max(*size);
+        }
+    }
+    let mut bss = own_bss;
+    for name in order {
+        public.insert(name, bss_start + i64::from(bss));
+        bss = bss.saturating_add(sizes[name]);
+    }
+    bss
+}
+
 fn read_field(bytes: &[u8], at: usize, width: usize) -> Option<i64> {
     let field = bytes.get(at..at.checked_add(width)?)?;
     Some(
@@ -151,7 +184,7 @@ pub fn compare_overlay_module(objects: &[&ObjectFile], overlay: &Overlay) -> Mod
         bases,
         mut code,
         mut data,
-        bss,
+        bss: own_bss,
     } = layout(&modules, corg, dorg, bss_start);
 
     // symbols: public ones for every module, local ones for their own
@@ -165,6 +198,7 @@ pub fn compare_overlay_module(objects: &[&ObjectFile], overlay: &Overlay) -> Mod
             }
         }
     }
+    let bss = place_commons(&modules, &mut public, bss_start, own_bss);
 
     let mut metrics = Metrics::default();
     let mut blockers = Vec::new();

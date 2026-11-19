@@ -608,5 +608,6 @@ fn finish(name: String, mut st: State) -> ObjectModule {
         symbols: st.symbols,
         groups: st.groups,
         start: st.start,
+        commons: Vec::new(),
     }
 }

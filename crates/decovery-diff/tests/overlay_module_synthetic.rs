@@ -237,3 +237,65 @@ fn findings_have_no_indentation_inside() {
         assert!(!f.contains("  "), "{f:?}");
     }
 }
+
+/// C declares the commons `cnt_` (2) and `tbl_` (4) and reads `tbl_`; D declares `cnt_` and `z_` (2) and reads both.
+fn commons() -> (AztecModuleSpec, AztecModuleSpec) {
+    let c = AztecModuleSpec {
+        name: "C".into(),
+        code: vec![0xA1, 0, 0, 0xC3],
+        named: vec![
+            sym("cnt_", AztecSection::Extern, 2),
+            sym("tbl_", AztecSection::Extern, 4),
+        ],
+        refs: vec![r(AztecSection::Code, 1, false, AztecTarget::Named(1))],
+        ..AztecModuleSpec::default()
+    };
+    let d = AztecModuleSpec {
+        name: "D".into(),
+        code: vec![0xA1, 0, 0, 0xA1, 0, 0, 0xC3],
+        named: vec![
+            sym("z_", AztecSection::Extern, 2),
+            sym("cnt_", AztecSection::Extern, 2),
+        ],
+        refs: vec![
+            r(AztecSection::Code, 1, false, AztecTarget::Named(0)),
+            r(AztecSection::Code, 4, false, AztecTarget::Named(1)),
+        ],
+        ..AztecModuleSpec::default()
+    };
+    (c, d)
+}
+
+/// Overlay of C and D with `cnt_`, `tbl_`, `z_` at the given addresses and no data.
+fn commons_overlay(tbl: u16, z: u16, cnt: u16, bss: u16) -> Vec<u8> {
+    let mut code = vec![0xA1];
+    code.extend(tbl.to_le_bytes());
+    code.push(0xC3);
+    code.push(0xA1);
+    code.extend(z.to_le_bytes());
+    code.push(0xA1);
+    code.extend(cnt.to_le_bytes());
+    code.extend([0xC3, 0xC3]);
+    let mut file = Vec::new();
+    for w in [0xF2, CORG, code.len() as u16, DORG, 0, bss, CORG + 11] {
+        file.extend(u16::to_le_bytes(w));
+    }
+    file.extend(code);
+    file
+}
+
+#[test]
+fn common_symbols_are_placed_in_bss_in_order_of_first_appearance() {
+    let (c, d) = commons();
+    let ovl = read_overlay(&commons_overlay(0x2002, 0x2006, 0x2000, 8), "T").expect("overlay");
+    let v = compare_overlay_module(&[&object(&c), &object(&d)], &ovl);
+    assert!(v.identical, "{v:#?}");
+    assert_eq!(v.bss, (8, 8));
+    assert_eq!(v.code.metrics.refs_ok, 3);
+    assert!(v.externals.is_empty(), "commons are bound by the layout");
+    // a common placed elsewhere in the original is a wrong reference
+    let ovl = read_overlay(&commons_overlay(0x2004, 0x2006, 0x2000, 8), "T").expect("overlay");
+    let v = compare_overlay_module(&[&object(&c), &object(&d)], &ovl);
+    assert!(!v.identical);
+    assert_eq!(v.code.metrics.refs_wrong, 1);
+}

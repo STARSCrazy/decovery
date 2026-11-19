@@ -411,3 +411,25 @@ fn read_object_dispatches_by_format() {
     assert!(read_object(ObjectFormat::Omf, &omf, "M.OBJ").is_ok());
     assert!(read_object(ObjectFormat::Aztec, &omf, "M.OBJ").is_err());
 }
+
+#[test]
+fn undefined_names_with_a_size_are_common_symbols() {
+    let spec = AztecModuleSpec {
+        name: "C".into(),
+        code: vec![0xC3],
+        named: vec![
+            sym("f_", AztecSection::Code, 0, true),
+            sym("b_", AztecSection::Extern, 4, true),
+            sym("x_", AztecSection::Extern, 0, true),
+            sym("a_", AztecSection::Extern, 0x50, true),
+        ],
+        ..Default::default()
+    };
+    let file = read_aztec(&write_aztec(&spec), "c.o").unwrap();
+    let m = &file.modules[0];
+    assert_eq!(
+        m.commons,
+        vec![("b_".to_string(), 4), ("a_".to_string(), 0x50)]
+    );
+    assert!(m.symbols.iter().all(|s| s.name != "b_" && s.name != "a_"));
+}
