@@ -63,6 +63,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
   identical with WLINK 10.6 in DOSBox (`dosbox-lab`).
 
 ### Fixed
+- `diagnose` no longer marks an equal branch as differing in main-program functions: the rebuild is
+  decoded at the original's address (both columns show the same targets), and a short branch whose target lies inside
+  the function on one side and beyond its (cut) length on the other is equal when its bytes are.
 - `build` warns about missing files only for `[[rebuild.module]]`s that take part in the build, not about
   unrelated modules.
 - Overlay module comparison: every object's data starts on a word, as the Aztec linker places it (one zero byte

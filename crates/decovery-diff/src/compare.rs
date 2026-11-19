@@ -918,8 +918,10 @@ fn instruction_comparison(
         .map(|(&o, raw)| (o, rebuild_name(symbols, decoration, raw)))
         .collect();
     let section_start = u64::from(f.start);
+    // the rebuild is decoded at the original's address, so both columns show the same branch targets; a target
+    // outside the function is looked up at its section offset
     let rebuild_target = |t: u64| -> Option<String> {
-        let t = u32::try_from(t).ok()?;
+        let t = u32::try_from((t as i64).checked_sub(base as i64)? + section_start as i64).ok()?;
         rebuild
             .internal
             .get(&t)
@@ -945,7 +947,7 @@ fn instruction_comparison(
     let no_gaps = BTreeSet::new();
     let rebuild_side = Side {
         code,
-        base: section_start,
+        base,
         gaps: &rebuild.gaps,
         naming: Naming {
             names: &names,
