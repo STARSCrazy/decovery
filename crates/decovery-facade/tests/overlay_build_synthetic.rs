@@ -60,7 +60,9 @@ fn find_similar_reads_overlay_functions() {
 
 /// An Aztec object with `amain_` = `call ext_; ret`, the call's field relocated against the external `ext_`.
 fn calling_object() -> Vec<u8> {
-    use decovery_objects::{AztecModuleSpec, AztecRefSpec, AztecSection, AztecSymbolSpec, AztecTarget};
+    use decovery_objects::{
+        AztecModuleSpec, AztecRefSpec, AztecSection, AztecSymbolSpec, AztecTarget,
+    };
     decovery_objects::write_aztec(&AztecModuleSpec {
         name: "M".into(),
         code: vec![0xE8, 0, 0, 0xC3],
@@ -105,7 +107,11 @@ fn function_variant_with_an_external_call_is_judged_like_the_build() {
     let mut request = BuildRequest::default();
     request.files = vec!["a.c".into()];
     let full = run(ws.path(), &request);
-    assert_eq!(full.data["functions"][0]["verdict"], "identical", "{}", full.data);
+    assert_eq!(
+        full.data["functions"][0]["verdict"], "identical",
+        "{}",
+        full.data
+    );
     let source = "int amain()\n{\n    ext();\n}\n";
     let response = run(ws.path(), &function_variant("amain", source));
     let v = &response.data["variants"][0];
@@ -116,7 +122,11 @@ fn function_variant_with_an_external_call_is_judged_like_the_build() {
 fn function_source_for_a_function_not_in_the_file_says_what_is_expected() {
     let python = python_or_skip!();
     let (ws, _objects) = buildable(&python);
-    std::fs::write(ws.path().join("src/a.c"), "int other()\n{\n    return 0;\n}\n").unwrap();
+    std::fs::write(
+        ws.path().join("src/a.c"),
+        "int other()\n{\n    return 0;\n}\n",
+    )
+    .unwrap();
     let source = "int amain()\n{\n    return 1;\n}\n";
     let mut request = function_variant("amain", source);
     request.files = vec!["a.c".into()];
@@ -142,7 +152,8 @@ fn comparison_of_a_differing_function_lists_its_differing_region() {
         .as_str()
         .unwrap_or_else(|| panic!("{}", listed.data))
         .to_string();
-    let archive = decovery_facade::history_archive(ws.path(), "amain", &id, Budget::default()).unwrap();
+    let archive =
+        decovery_facade::history_archive(ws.path(), "amain", &id, Budget::default()).unwrap();
     let text = archive.data["comparison"].as_str().unwrap();
     assert!(text.contains("rebuild against original"), "{text}");
     let differing = text
@@ -172,7 +183,9 @@ fn overlay_with_data(code: &[u8], data: &[u8]) -> Vec<u8> {
 /// `amain_` = `mov ax, [field]; ret`, the field relocated against the data position `field` (the data is 4
 /// bytes; the field holds 0, as the assembler leaves it).
 fn loading_object(field: u16) -> Vec<u8> {
-    use decovery_objects::{AztecModuleSpec, AztecRefSpec, AztecSection, AztecSymbolSpec, AztecTarget};
+    use decovery_objects::{
+        AztecModuleSpec, AztecRefSpec, AztecSection, AztecSymbolSpec, AztecTarget,
+    };
     decovery_objects::write_aztec(&AztecModuleSpec {
         name: "M".into(),
         code: vec![0xA1, 0, 0, 0xC3],
@@ -210,11 +223,19 @@ fn wrong_relocated_field_found_by_the_module_makes_the_function_differ() {
 
     std::fs::write(objects.path().join("A.OBJ"), loading_object(4)).unwrap();
     let right = run(ws.path(), &request);
-    assert_eq!(right.data["functions"][0]["verdict"], "identical", "{}", right.data);
+    assert_eq!(
+        right.data["functions"][0]["verdict"], "identical",
+        "{}",
+        right.data
+    );
 
     // the rebuild loads x + 0: the function's bytes outside the field are equal, the module finds the field
     std::fs::write(objects.path().join("A.OBJ"), loading_object(0)).unwrap();
-    std::fs::write(ws.path().join("src/a.c"), "int amain()\n{\n    return 6;\n}\n").unwrap();
+    std::fs::write(
+        ws.path().join("src/a.c"),
+        "int amain()\n{\n    return 6;\n}\n",
+    )
+    .unwrap();
     let wrong = run(ws.path(), &request);
     let f = &wrong.data["functions"][0];
     assert_eq!(f["verdict"], "differs", "{}", wrong.data);
@@ -239,7 +260,9 @@ fn build_does_not_warn_about_a_stale_analysis() {
 /// A shifted overlay A: `f1` (5000) calls `f3`, `f2` (5004) is one byte longer in the rebuild (the first real
 /// difference, at 5007), `f3` (5008) follows; the entry (`ret`) is at 5009.
 fn shifted_overlay(ws: &std::path::Path, objects: &std::path::Path) {
-    use decovery_objects::{AztecModuleSpec, AztecRefSpec, AztecSection, AztecSymbolSpec, AztecTarget};
+    use decovery_objects::{
+        AztecModuleSpec, AztecRefSpec, AztecSection, AztecSymbolSpec, AztecTarget,
+    };
     // original: call f3 (field 5008 - 5003), mov ax,1; ret, ret, entry
     std::fs::write(
         ws.join("A.OVR"),
@@ -252,8 +275,12 @@ fn shifted_overlay(ws: &std::path::Path, objects: &std::path::Path) {
         std::fs::write(path, f(text)).unwrap();
     };
     edit("decovery.toml", &|t| {
-        t.replacen("length = 4\nfile_offset = 14", "length = 9\nfile_offset = 14", 1)
-            .replacen("size = 18", "size = 24", 1)
+        t.replacen(
+            "length = 4\nfile_offset = 14",
+            "length = 9\nfile_offset = 14",
+            1,
+        )
+        .replacen("size = 18", "size = 24", 1)
     });
     let mut symbols = String::from("schema = 1\n\n");
     for (at, name, size) in [

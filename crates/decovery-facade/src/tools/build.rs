@@ -902,7 +902,9 @@ fn add_modules(
                 if f["verdict"] == "identical" || f["cause"] == true {
                     continue;
                 }
-                let Some(start) = f["address"].as_str().and_then(|a| a.parse::<Address>().ok())
+                let Some(start) = f["address"]
+                    .as_str()
+                    .and_then(|a| a.parse::<Address>().ok())
                 else {
                     continue;
                 };
@@ -910,9 +912,9 @@ fn add_modules(
                 let only_relative = f["blockers"].as_array().is_some_and(|b| {
                     !b.is_empty() && b.iter().all(|b| b["kind"] == "wrong-relative-ref")
                 });
-                let into_shift = relative_targets.get(&start).is_some_and(|targets| {
-                    !targets.is_empty() && targets.iter().all(behind)
-                });
+                let into_shift = relative_targets
+                    .get(&start)
+                    .is_some_and(|targets| !targets.is_empty() && targets.iter().all(behind));
                 if behind(&start) || (only_relative && into_shift) {
                     f["consequence"] = json!(true);
                 }
@@ -2148,7 +2150,7 @@ size = 21
             (at("ovl:B:0000:5340"), "elsewhere".to_string()),
             (at("ovl:A:0000:5400"), "later".to_string()),
         ];
-        add_modules(&mut response, vec![module], &functions);
+        add_modules(&mut response, vec![module], &functions, &HashMap::new());
         assert!(
             response.summary.contains(
                 "(A: module code is 1085 bytes longer than the original (rebuilt 39965, original 38880); \
@@ -2181,7 +2183,7 @@ size = 21
             })
         };
         let mut shifted = Response::new("", json!({ "functions": functions }));
-        add_modules(&mut shifted, vec![module(101)], &[]);
+        add_modules(&mut shifted, vec![module(101)], &[], &HashMap::new());
         let marked: Vec<bool> = shifted.data["functions"]
             .as_array()
             .unwrap()
@@ -2190,7 +2192,7 @@ size = 21
             .collect();
         assert_eq!(marked, [false, true, false, false]);
         let mut same_size = Response::new("", json!({ "functions": functions }));
-        add_modules(&mut same_size, vec![module(100)], &[]);
+        add_modules(&mut same_size, vec![module(100)], &[], &HashMap::new());
         assert!(
             same_size.data["functions"]
                 .as_array()

@@ -183,8 +183,16 @@ pub fn write_buildable(root: &Path, python: &str, objects: &Path) {
     std::fs::write(root.join("tools/BIN/CC.EXE"), b"fake compiler").unwrap();
     std::fs::write(root.join("src/a.c"), A_C).unwrap();
     std::fs::write(root.join("src/b.c"), "int bmain()\n{\n    return 2;\n}\n").unwrap();
-    std::fs::write(objects.join("A.OBJ"), named_object("amain", &[0xB8, 5, 0, 0xC3])).unwrap();
-    std::fs::write(objects.join("B.OBJ"), named_object("bmain", &[0xB8, 2, 0, 0xC3])).unwrap();
+    std::fs::write(
+        objects.join("A.OBJ"),
+        named_object("amain", &[0xB8, 5, 0, 0xC3]),
+    )
+    .unwrap();
+    std::fs::write(
+        objects.join("B.OBJ"),
+        named_object("bmain", &[0xB8, 2, 0, 0xC3]),
+    )
+    .unwrap();
 }
 
 /// The source of A's `amain` (it loads 5; the original loads 1).

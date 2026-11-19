@@ -532,7 +532,11 @@ fn build_exit_codes() {
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(value["summary"], "a.c: 2 functions, 2 identical");
     // with --json the output is the JSON alone: no progress lines, not even on stderr
-    assert!(out.stderr.is_empty(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let mut sub = build_fixture::SUB.to_vec();
     sub[6] = 0x33;

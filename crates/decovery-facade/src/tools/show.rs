@@ -73,7 +73,10 @@ fn show_impl(
         summary.push_str(&format!("; signature: {signature}"));
     }
     // once per call, as a warning (not in the summary too)
-    let mut warnings: Vec<String> = stale.then(|| STALE_ANALYSIS.to_string()).into_iter().collect();
+    let mut warnings: Vec<String> = stale
+        .then(|| STALE_ANALYSIS.to_string())
+        .into_iter()
+        .collect();
     let exemplars = match exemplar_index(session).and_then(|ix| ix.similar(session, start, 3)) {
         Ok(found) => found,
         Err(e) => {
