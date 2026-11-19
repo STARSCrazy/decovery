@@ -71,6 +71,19 @@ fn workspace(profile: &str) -> tempfile::TempDir {
 fn task(root: &Path) -> SuiteTask {
     SuiteTask::new(root.to_path_buf(), "solve")
 }
+/// The long, canonical spelling of an existing path: Windows temp dirs may come in 8.3 form (`RUNNER~1`).
+fn long(path: &Path) -> PathBuf {
+    // the file itself need not exist; its directory does
+    let canonical = match (path.parent(), path.file_name()) {
+        (Some(dir), Some(name)) if !path.exists() => dir.canonicalize().unwrap().join(name),
+        _ => path.canonicalize().unwrap(),
+    };
+    match canonical.to_str().and_then(|t| t.strip_prefix(r"\\?\")) {
+        Some(rest) => PathBuf::from(rest),
+        None => canonical,
+    }
+}
+
 fn destination() -> (tempfile::TempDir, PathBuf) {
     let parent = tempfile::tempdir().unwrap();
     let path = parent.path().join("case-1/workspace");
@@ -148,7 +161,10 @@ fn suite_reads_defaults_and_tasks() {
         (40, 120, 0, 15)
     );
     assert_eq!(result.defaults.max_tokens, Some(500));
-    assert_eq!(result.defaults.prompt, Some(suite.path().join("prompt.md")));
+    assert_eq!(
+        result.defaults.prompt.as_deref().map(long),
+        Some(long(&suite.path().join("prompt.md")))
+    );
     assert_eq!(result.tasks[0].tags, ["tiny"]);
     assert!(result.tasks[0].id.ends_with("/solve"));
 }
@@ -403,7 +419,10 @@ fn legacy_view_has_no_trace_of_the_solution() {
     )
     .unwrap();
     let view = copy.legacy_view.unwrap();
-    assert_eq!(view, into.parent().unwrap().join("legacy-view"));
+    assert_eq!(
+        long(&view),
+        long(&into.parent().unwrap().join("legacy-view"))
+    );
     assert_no_solution(&into);
     assert_no_solution(&view);
     assert!(!view.join("nachbau").exists());
