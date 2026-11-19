@@ -196,12 +196,15 @@ fn show_reports_stale_analysis() {
     std::fs::write(d.path().join("knowledge/types.h"), "struct x;\n").unwrap();
     let r = show(&s, "alpha", Budget::default()).unwrap();
     assert_eq!(r.data["analysis_stale"], true);
-    assert!(
-        r.summary
-            .ends_with(" (analysis is older than the knowledge; run `decovery analyze`)"),
-        "{}",
-        r.summary
-    );
+    // once: as a warning, not in the summary too
+    let stale: Vec<&serde_json::Value> = r.data["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|w| w.as_str().unwrap().contains("older than the knowledge"))
+        .collect();
+    assert_eq!(stale.len(), 1, "{}", r.data["warnings"]);
+    assert!(!r.summary.contains("older than"), "{}", r.summary);
 }
 
 #[test]

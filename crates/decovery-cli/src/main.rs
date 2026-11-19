@@ -1540,8 +1540,10 @@ fn show(workspace: &Path, target: &str, lines: bool, json: bool) -> Result<(), F
     if let Some(text) = response.data["text"].as_str() {
         print!("{text}");
     }
-    if response.data["analysis_stale"] == true {
-        eprintln!("note: {}", decovery_facade::output::STALE_ANALYSIS);
+    for warning in response.data["warnings"].as_array().into_iter().flatten() {
+        if let Some(text) = warning.as_str() {
+            eprintln!("note: {text}");
+        }
     }
     Ok(())
 }
@@ -1558,6 +1560,11 @@ fn diagnose(workspace: &Path, target: &str, json: bool) -> Result<(), FacadeErro
     let response = decovery_facade::diagnose(&session, target, Budget { chars: usize::MAX })?;
     let d = &response.data;
     println!("{}", response.summary);
+    for warning in d["warnings"].as_array().into_iter().flatten() {
+        if let Some(text) = warning.as_str() {
+            eprintln!("note: {text}");
+        }
+    }
     for f in d["findings"].as_array().into_iter().flatten() {
         println!(
             "  [{}] {} → {}",

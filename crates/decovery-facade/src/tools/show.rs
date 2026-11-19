@@ -69,13 +69,11 @@ fn show_impl(
     let name = session.name_of(start).name;
     let lines = text.lines().count();
     let mut summary = format!("{name} at {start}: {lines} lines");
-    if stale {
-        summary.push_str(&format!(" ({STALE_ANALYSIS})"));
-    }
     if let Some(signature) = &signature {
         summary.push_str(&format!("; signature: {signature}"));
     }
-    let mut warnings = Vec::new();
+    // once per call, as a warning (not in the summary too)
+    let mut warnings: Vec<String> = stale.then(|| STALE_ANALYSIS.to_string()).into_iter().collect();
     let exemplars = match exemplar_index(session).and_then(|ix| ix.similar(session, start, 3)) {
         Ok(found) => found,
         Err(e) => {

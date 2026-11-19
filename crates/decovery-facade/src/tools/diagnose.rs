@@ -143,6 +143,10 @@ pub fn diagnose_tool(
             "pairs_text": shown,
         }),
     );
+    // the names and lengths come from the analysis: say once when it is older than the knowledge
+    if crate::output::analysis_stale(session)? {
+        response.data["warnings"] = json!([crate::output::STALE_ANALYSIS]);
+    }
     response.handles = handles;
     Ok(response)
 }

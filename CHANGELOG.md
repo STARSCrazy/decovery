@@ -46,6 +46,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
   identical with WLINK 10.6 in DOSBox (`dosbox-lab`).
 
 ### Fixed
+- "analysis is older than the knowledge" is said once per command and only where the analysis is used: in the
+  `status` summary, as a warning of `show` (no longer in its summary as well) and of `diagnose` (new); `build` never
+  says it. The CLI prints the warning of `show` and `diagnose` once as a `note:` on stderr.
 - `--json build` (and `link`, `analyze`) prints no progress lines: the output is the JSON alone, also when stdout
   and stderr are read together.
 - `build` on Aztec C86 overlays: a function whose relocated field the overlay module comparison finds wrong (a

@@ -207,3 +207,16 @@ fn overlay_function_inside_its_module_compares_branch_targets_at_its_address() {
         r.data["pairs_text"]
     );
 }
+
+#[test]
+fn stale_analysis_is_one_warning_of_diagnose() {
+    let dir = workspace(false);
+    std::fs::write(dir.path().join("knowledge/types.h"), "struct x;\n").unwrap();
+    let session = Session::open(dir.path()).unwrap();
+    let r = decovery_facade::diagnose(&session, "A_ovmain", Budget::default()).unwrap();
+    assert_eq!(
+        r.data["warnings"],
+        serde_json::json!([decovery_facade::output::STALE_ANALYSIS])
+    );
+    assert!(!r.summary.contains("older than"), "{}", r.summary);
+}

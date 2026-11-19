@@ -221,3 +221,17 @@ fn wrong_relocated_field_found_by_the_module_makes_the_function_differ() {
     assert_eq!(f["blockers"][0]["kind"], "wrong-absolute-ref", "{f}");
     assert_eq!(f["blockers"][0]["at"], 1, "{f}");
 }
+
+#[test]
+fn build_does_not_warn_about_a_stale_analysis() {
+    let python = python_or_skip!();
+    // the buildable workspace renames functions after its analysis: the analysis is stale
+    let (ws, _objects) = buildable(&python);
+    let session = Session::open(ws.path()).unwrap();
+    assert!(decovery_facade::output::analysis_stale(&session).unwrap());
+    let mut request = BuildRequest::default();
+    request.files = vec!["a.c".into()];
+    let response = run(ws.path(), &request);
+    let text = format!("{} {}", response.summary, response.data);
+    assert!(!text.contains("older than the knowledge"), "{text}");
+}
