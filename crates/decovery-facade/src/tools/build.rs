@@ -535,39 +535,21 @@ pub fn build(
                 originals.insert(p.at, super::history::hex(bytes));
             }
         }
-        // the diagnosis reads the instruction pairs of the comparison: no second decode
         let compiled: Vec<&ObjectFile> = objects
             .iter()
             .filter(|(i, _)| sources[*i].compiler == profile.id && is_c(&sources[*i].name))
             .map(|(_, object)| object)
             .collect();
-        let mut options = ModuleOptions::new(profile.padding, rebuild.frames.clone())
-            .with_startup_frames(startup_frames(&ws, &profile, &program, &mut warnings))
-            .with_diagnosis(profile.family.clone());
-        if let Some(literals) = literal_sections(&profile, &compiled) {
-            options = options.with_literals(literals);
-        }
-        let module = decovery_diff::compare_module(
-            &placements,
-            &program,
+        compare_placed(
+            &ws,
+            &profile,
+            &rebuild.frames,
             &knowledge,
-            &profile.decoration,
-            &options,
-        );
-        warnings.extend(module.warnings);
-        if profile.object_format == ObjectFormat::Aztec {
-            // no linker (phase 4): object against image, relocated fields are link gaps
-            placements
-                .iter()
-                .map(|p| {
-                    let len = p.function.code().len();
-                    let image = program.read(p.at, len).unwrap_or(&[]);
-                    decovery_diff::compare_with_gaps(&p.function, image, p.at)
-                })
-                .collect()
-        } else {
-            module.functions
-        }
+            &program,
+            &placements,
+            &compiled,
+            &mut warnings,
+        )
     };
     drop(placements);
 
@@ -769,6 +751,49 @@ pub fn build(
     })
 }
 
+/// Compares the placed functions with the original. An Aztec object has no linker (phase 4): each function is
+/// compared against the image with its relocated fields as link gaps, and the module comparison's data anchors
+/// are not computed (their warnings would describe a comparison the verdicts do not come from; an overlay's data
+/// and BSS are judged by [`overlay_modules`]).
+#[allow(clippy::too_many_arguments)]
+fn compare_placed(
+    ws: &Workspace,
+    profile: &Profile,
+    frames: &BTreeMap<String, Address>,
+    knowledge: &KnowledgeView<'_>,
+    program: &Program,
+    placements: &[Placement<'_>],
+    compiled: &[&ObjectFile],
+    warnings: &mut Vec<String>,
+) -> Vec<Comparison> {
+    if profile.object_format == ObjectFormat::Aztec {
+        return placements
+            .iter()
+            .map(|p| {
+                let len = p.function.code().len();
+                let image = program.read(p.at, len).unwrap_or(&[]);
+                decovery_diff::compare_with_gaps(&p.function, image, p.at)
+            })
+            .collect();
+    }
+    // the diagnosis reads the instruction pairs of the comparison: no second decode
+    let mut options = ModuleOptions::new(profile.padding, frames.clone())
+        .with_startup_frames(startup_frames(ws, profile, program, warnings))
+        .with_diagnosis(profile.family.clone());
+    if let Some(literals) = literal_sections(profile, compiled) {
+        options = options.with_literals(literals);
+    }
+    let module = decovery_diff::compare_module(
+        placements,
+        program,
+        knowledge,
+        &profile.decoration,
+        &options,
+    );
+    warnings.extend(module.warnings);
+    module.functions
+}
+
 /// Adds the overlay module verdicts to a build response (data `modules`, a note in the summary).
 fn add_modules(response: &mut Response, modules: Vec<Value>) {
     if modules.is_empty() {
@@ -814,6 +839,14 @@ pub(super) fn overlay_modules(
         };
         let v = decovery_diff::compare_overlay_module(&objects, &overlay);
         let m = &v.code.metrics;
+        // data whose every byte is a link gap was not compared: it is unchecked, not equal
+        let data_state = if v.data_size.1 > 0 && v.data_gaps >= v.data_size.1 {
+            "unchecked"
+        } else if v.data_equal {
+            "equal"
+        } else {
+            "differs"
+        };
         out.push(json!({
             "overlay": name.as_str(),
             "identical": v.identical,
@@ -832,13 +865,20 @@ pub(super) fn overlay_modules(
                 }).collect::<Vec<_>>(),
             },
             "data": {
-                "equal": v.data_equal,
+                "state": data_state,
+                "equal": data_state == "equal",
                 "bytes": v.data_size.1,
+                "gaps": v.data_gaps,
                 "overlay_bytes": v.data_size.0,
                 "differing": v.data_diffs.len(),
                 "first_differences": v.data_diffs.iter().take(16).collect::<Vec<_>>(),
             },
-            "bss": { "original": v.bss.0, "rebuilt": v.bss.1 },
+            "bss": {
+                "original": v.bss.0,
+                "rebuilt": v.bss.1,
+                "state": if v.bss.0 == v.bss.1 { "equal" } else { "differs" },
+                "checked": "size",
+            },
             "externals": v.externals.len(),
             "ambiguous": v.ambiguous,
             "findings": v.findings,
@@ -1651,6 +1691,11 @@ size = 21
             assert_eq!(modules[0]["code"]["bytes"], 4);
             assert_eq!(modules[0]["bss"]["original"], bss);
             assert_eq!(modules[0]["data"]["equal"], true);
+            assert_eq!(modules[0]["data"]["state"], "equal");
+            assert_eq!(modules[0]["data"]["gaps"], 0);
+            assert_eq!(modules[0]["bss"]["checked"], "size");
+            let bss_state = if identical { "equal" } else { "differs" };
+            assert_eq!(modules[0]["bss"]["state"], bss_state);
         }
     }
 
@@ -1766,6 +1811,119 @@ size = 21
             ["ovmain: no counterpart in the original"],
             "no overlay to qualify the name with"
         );
+    }
+
+    #[test]
+    fn data_of_link_gaps_only_is_unchecked_not_equal() {
+        use decovery_objects::{AztecRefSpec, AztecTarget};
+        // the module's two data bytes are a segment paragraph: a link gap, nothing is compared
+        let spec = AztecModuleSpec {
+            name: "A".into(),
+            code: vec![0xB8, 1, 0, 0xC3],
+            data: vec![0, 0],
+            bss: 2,
+            named: vec![AztecSymbolSpec {
+                name: "f_".into(),
+                section: AztecSection::Code,
+                value: 0,
+                public: true,
+            }],
+            refs: vec![AztecRefSpec {
+                section: AztecSection::Data,
+                offset: 0,
+                width: 2,
+                relative: false,
+                target: AztecTarget::Paragraph(AztecSection::Data),
+                addend: 0,
+            }],
+            ..AztecModuleSpec::default()
+        };
+        let object = read_aztec(&write_aztec(&spec), "A.O").unwrap();
+        let dir = workspace(2);
+        let ws = Workspace::open(dir.path()).unwrap();
+        let mut warnings = Vec::new();
+        let modules = overlay_modules(
+            &ws,
+            &[(OverlayName::new("A").unwrap(), &object)],
+            &mut warnings,
+        );
+        let data = &modules[0]["data"];
+        assert_eq!(data["state"], "unchecked", "{}", modules[0]);
+        assert_eq!(data["equal"], false);
+        assert_eq!(data["gaps"], 2);
+    }
+
+    #[test]
+    fn aztec_functions_carry_no_data_anchor_warnings() {
+        use decovery_objects::{AztecRefSpec, AztecTarget};
+        // `mov ax, [x]; ret` with its data field relocated: the data lies in the overlay, not in a frame
+        let spec = AztecModuleSpec {
+            name: "A".into(),
+            code: vec![0xA1, 0, 0, 0xA1, 0, 0, 0xC3],
+            data: vec![b'x'],
+            named: vec![AztecSymbolSpec {
+                name: "f_".into(),
+                section: AztecSection::Code,
+                value: 0,
+                public: true,
+            }],
+            refs: [1u16, 4]
+                .map(|offset| AztecRefSpec {
+                    section: AztecSection::Code,
+                    offset,
+                    width: 2,
+                    relative: false,
+                    target: AztecTarget::Section(AztecSection::Data, 0),
+                    addend: 0,
+                })
+                .to_vec(),
+            ..AztecModuleSpec::default()
+        };
+        let object = read_aztec(&write_aztec(&spec), "A.O").unwrap();
+        let dir = workspace(2);
+        // the original's two fields name different positions of the same item: no anchor for its frame
+        let mut ovr = Vec::new();
+        for w in [0xF2u16, 0x5000, 8, 0x9000, 2, 2, 0x5007] {
+            ovr.extend(w.to_le_bytes());
+        }
+        ovr.extend([0xA1, 0x00, 0x90, 0xA1, 0x01, 0x90, 0xC3, 0xC3, b'x', 0xEE]);
+        std::fs::write(dir.path().join("A.OVR"), &ovr).unwrap();
+        let toml = dir.path().join("decovery.toml");
+        let config = std::fs::read_to_string(&toml).unwrap().replace(
+            "[[overlay]]",
+            "[[target.segment]]\nname = \"A.code\"\nstart = \"ovl:A:0000:5000\"\nlength = 8\n\
+             file_offset = 14\npermissions = \"rx\"\n\n[[overlay]]",
+        );
+        std::fs::write(&toml, config).unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
+        let knowledge = KnowledgeView::new(&ws, None);
+        let program = crate::program::load(&ws).unwrap();
+        let profile = decovery_toolchain::profile("aztec-c86-4.2b").unwrap();
+        let at: Address = "ovl:A:0000:5000".parse().unwrap();
+        let view = functions(&object.modules[0]).remove(0);
+        let placements = [Placement::new(view, at, Some(7))];
+        // the module comparison would anchor the data in a frame and warn about it
+        let module = decovery_diff::compare_module(
+            &placements,
+            &program,
+            &knowledge,
+            &profile.decoration,
+            &ModuleOptions::new(profile.padding, BTreeMap::new()),
+        );
+        assert!(!module.warnings.is_empty(), "the case must provoke a warning: {:?}", module.functions);
+        let mut warnings = Vec::new();
+        let compared = compare_placed(
+            &ws,
+            &profile,
+            &BTreeMap::new(),
+            &knowledge,
+            &program,
+            &placements,
+            &[&object],
+            &mut warnings,
+        );
+        assert_eq!(compared.len(), 1);
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 
     #[test]

@@ -38,7 +38,10 @@ pub struct ModuleVerdict {
     pub data_diffs: Vec<u32>,
     /// Data size of the overlay (module plus library part) and of the rebuilt module.
     pub data_size: (u32, u32),
-    /// BSS size: overlay header, rebuilt.
+    /// Rebuilt data bytes not compared: relocated fields that are link gaps (segment paragraphs, far pointers,
+    /// targets the module cannot place).
+    pub data_gaps: u32,
+    /// BSS size: overlay header, rebuilt. BSS has no bytes: only its size and the references into it are checked.
     pub bss: (u16, u16),
     /// External names and the address the original binds them to (code offset for calls, DS offset for data).
     pub externals: BTreeMap<String, u16>,
@@ -367,6 +370,7 @@ pub fn compare_overlay_module(objects: &[&ObjectFile], overlay: &Overlay) -> Mod
         ambiguous,
         identical,
         findings,
+        data_gaps: u32::try_from(gaps_data.len()).unwrap_or(u32::MAX),
     }
 }
 

@@ -43,6 +43,12 @@ and the project uses [Semantic Versioning](https://semver.org/).
   identical with WLINK 10.6 in DOSBox (`dosbox-lab`).
 
 ### Fixed
+- Aztec C86 `build` no longer warns that frame `DATA` or section `DATA` has no anchor: those warnings came from the
+  module comparison of linked targets, whose verdicts an Aztec build discards (functions are compared with link
+  gaps, overlay data and BSS by the module comparison). The module JSON says what it checked: `data.state`
+  (`equal`, `differs`, or `unchecked` when every rebuilt data byte is a link gap) and `data.gaps`; `bss.state` and
+  `bss.checked = "size"` (BSS has no bytes, only its size and references into it are checked). Changed meaning:
+  `data.equal` is now `false` for data that was not compared (it was `true`).
 - `build` reports a function by its knowledge name: a source that still defines it under its default name
   (`fun_VPCVW_0000_6096`) no longer hides the name given with `annotate`; the rebuild record takes the knowledge's
   name, the source's name is the fallback, and `build --function` also accepts the default name.
