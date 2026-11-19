@@ -3,8 +3,8 @@
 use decovery_core::RelocKind;
 use decovery_objects::{
     AztecModuleSpec, AztecRefSpec, AztecSection, AztecSymbolSpec, AztecTarget, Frame, ObjectError,
-    ObjectFormat, RefTarget, SectionKind, functions, public_functions, read_aztec, read_object,
-    write_aztec, write_aztec_library,
+    ObjectFormat, RefTarget, SectionKind, functions, public_functions, read_aztec,
+    read_aztec_library, read_object, write_aztec, write_aztec_library,
 };
 
 fn sym(name: &str, section: AztecSection, value: u16, public: bool) -> AztecSymbolSpec {
@@ -306,6 +306,54 @@ fn library_lists_modules() {
 }
 
 #[test]
+fn library_members_list_publics_and_extract_as_objects() {
+    let mut second = sample();
+    second.name = "U".into();
+    second.named[0].name = "h_".into();
+    let lib = write_aztec_library(&[sample(), second]);
+    let members = read_aztec_library(&lib, "T.LIB").unwrap();
+    let names: Vec<_> = members.iter().map(|m| m.name.as_str()).collect();
+    assert_eq!(names, ["T", "U"]);
+    assert_eq!(members[0].publics, ["f_", "buf_", "v_"]);
+    assert_eq!(members[1].publics, ["h_", "buf_", "v_"]);
+    // members start on 128-byte units behind the dictionary block and run to the next member
+    assert_eq!(members[0].offset, 2048);
+    assert_eq!(members[0].offset + members[0].len, members[1].offset);
+    assert_eq!(members[1].offset + members[1].len, lib.len() as u64);
+    // the extracted member reads like the object the assembler writes
+    let single = read_aztec(&write_aztec(&sample()), "T.O").unwrap();
+    assert_eq!(members[0].object().modules, single.modules);
+    let bytes = members[1].bytes(&lib).unwrap();
+    assert_eq!(
+        read_aztec(&lib, "T.LIB").unwrap().modules[1],
+        read_aztec_library(&lib, "T.LIB").unwrap()[1].module
+    );
+    assert_eq!(bytes.len() as u64, members[1].len);
+    // a single object is a library of one member
+    let one = read_aztec_library(&write_aztec(&sample()), "T.O").unwrap();
+    assert_eq!(one.len(), 1);
+    assert_eq!(one[0].publics, ["f_", "buf_", "v_"]);
+}
+
+#[test]
+fn malformed_library_members_name_the_offset() {
+    let lib = write_aztec_library(&[sample(), sample()]);
+    for n in 0..lib.len() {
+        if let Err(e) = read_aztec_library(&lib[..n], "T.LIB") {
+            assert!(matches!(
+                e,
+                ObjectError::Truncated { .. } | ObjectError::Malformed { .. }
+            ));
+        }
+    }
+    let err = read_aztec_library(b" junk", "X.LIB").unwrap_err();
+    assert!(
+        matches!(err, ObjectError::Malformed { offset: 0, .. }),
+        "{err}"
+    );
+}
+
+#[test]
 fn library_block_past_end_is_error() {
     let mut lib = write_aztec_library(&[sample()]);
     // a next dictionary block beyond the file
@@ -464,4 +512,24 @@ fn local_labels_do_not_end_an_assembler_function() {
     );
     assert_eq!(functions(module).len(), 4);
     assert_eq!(functions(module)[0].len, 2);
+}
+
+/// The real libraries of a registered Aztec C86 toolchain read without error (`DECOVERY_AZTEC_DIR` = its directory).
+#[test]
+#[ignore = "local: needs an Aztec C86 toolchain (DECOVERY_AZTEC_DIR)"]
+fn local_toolchain_libraries_read() {
+    let dir = std::path::PathBuf::from(std::env::var("DECOVERY_AZTEC_DIR").unwrap()).join("LIB");
+    for name in ["C.LIB", "M.LIB", "OVLD.O", "OVBGN.O"] {
+        let bytes = std::fs::read(dir.join(name)).unwrap();
+        let members = read_aztec_library(&bytes, name).unwrap();
+        assert!(!members.is_empty(), "{name}");
+        let publics: usize = members.iter().map(|m| m.publics.len()).sum();
+        println!(
+            "{name}: {} members, {publics} public symbols",
+            members.len()
+        );
+        for m in members.iter().take(3) {
+            println!("  {} at {:#x}: {:?}", m.name, m.offset, m.publics);
+        }
+    }
 }
