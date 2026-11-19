@@ -283,6 +283,8 @@ class LocalGhidraTests(unittest.TestCase):
             }
             symbols = [{"address": a, "kind": "function", "name": n, "locals": [], "line_comments": []}
                        for a, n in (("seg:1000:0300", "g1"), ("seg:1000:0310", "g2"))]
+            symbols.append({"address": "seg:1000:0000", "kind": "function", "name": "dispatch",
+                            "signature": "int dispatch(int key, char *text)", "locals": [], "line_comments": []})
             out_path = root / "export.json"
             out = run(
                 build_plugin(),
@@ -305,7 +307,8 @@ class LocalGhidraTests(unittest.TestCase):
             self.assertIn("g1", code)
             self.assertIn("g2", code)
             self.assertNotIn("unaff_BP", code)
-            self.assertIn("param_1", code)
+            self.assertIn("int __cdecl16near dispatch(int key,char *text)", code)
+            self.assertIn("switch(key)", code)
             self.assertIn("case 0x1:", code)
             self.assertIn("case 0x2:", code)
             self.assertIn("default:", code)
