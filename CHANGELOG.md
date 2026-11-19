@@ -6,6 +6,14 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `annotate --kind function|global|label` (MCP `annotate` with `kind`): corrects a record's kind without editing
+  `symbols.toml`. A claim ranked below the record needs `--force`; the old kind goes to the record's history with
+  the evidence (ADR 0017).
+- `annotate` takes several actions in one call: `--name`, `--kind`, `--signature`, `--type`, `--comment` and
+  `--local` combine and are applied in that order (the name first, so the others find a renamed target).
+  `--refute` and `--add-type` stand alone; a wrong combination says why. MCP `annotate` accepts the same.
+- `status` lists records of kind `function` that lie in data (`functions_in_data`) and names the fix
+  (`decovery annotate --kind global <target>`).
 - Aztec C86 library members: `[rebuild] libraries = ["C.LIB"]` and `library_objects = ["OVLD.O", "OVBGN.O"]` (files
   in the toolchain's `LIB/`). A full `build` places each member at the knowledge function one of its code symbols
   names (undecorated, or `<OVERLAY>_<name>`) or where its whole code matches a function no source rebuilds, compares
@@ -118,6 +126,11 @@ and the project uses [Semantic Versioning](https://semver.org/).
   the extension); README and ADR 0013 document the rule for split module files.
 
 ### Fixed
+- `annotate --name` on a data address no function starts at (a segment without execute permission, or a real-mode
+  address in a data frame of `[rebuild] frames` such as `DATA`, or the data segment an Aztec startup loads) records
+  a `global` and reports the old name as `DAT_…` instead of a `function` named after `fun_…` (ADR 0017).
+- Command-line errors end with their reason (`error: …; see --help`) instead of only the `--help` tip, so a caller
+  that keeps the last line of stderr still sees why.
 - A `build` that leaves functions without counterpart in the original no longer looks complete: the summary says
   `N functions without counterpart` (`counts.unmatched`), the CLI exits 1, and an overlay module whose files have
   such functions does not count as identical (`modules[].unmatched_functions`, `bytes identical, but …`).

@@ -336,6 +336,55 @@ fn annotate_names_and_rejects_bad_input() {
     assert_eq!(json["data"]["changed"], true);
 }
 
+#[test]
+fn annotate_combines_actions_and_errors_end_with_their_reason() {
+    let d = workspace();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_decovery"))
+            .arg("annotate")
+            .args(args)
+            .arg("--workspace")
+            .arg(d.path())
+            .output()
+            .expect("run decovery")
+    };
+    // name and comment in one call; the flags may come before the target
+    let out = run(&["--name", "helper", "--comment", "helps", "flat:00010020"]);
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    // the type of a named record, flag first
+    let out = run(&["--type", "int", "helper"]);
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    let symbols = std::fs::read_to_string(d.path().join("knowledge/symbols.toml")).unwrap();
+    assert!(
+        symbols.contains("helps") && symbols.contains("type = \"int\""),
+        "{symbols}"
+    );
+    // a wrong combination says why
+    let out = run(&["helper", "--name", "x", "--refute", "no"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("refute cannot be combined"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // a clap error: the last line carries the reason, not only the --help tip
+    let out = run(&["--type", "unsigned", "int", "helper"]);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let last = stderr.trim_end().lines().last().unwrap_or("");
+    assert!(
+        last.starts_with("error: unexpected argument") && last.ends_with("see --help"),
+        "{stderr}"
+    );
+    // --kind
+    let out = run(&["helper", "--kind", "global", "--json"]);
+    assert_eq!(out.status.code(), Some(0));
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["data"]["action"], "kind");
+}
+
 /// `decovery analyze` with the user config directories pointed at an empty temp dir.
 fn analyze_isolated(dir: &tempfile::TempDir, args: &[&str]) -> std::process::Output {
     let home = tempfile::tempdir().unwrap();

@@ -19,7 +19,7 @@ mod status;
 mod variants;
 
 pub use analyze::{AnalyzeOptions, analyze, analyze_with_user_plugins, program_description};
-pub use annotate::{AnnotateAction, Annotation, annotate};
+pub use annotate::{AnnotateAction, Annotation, annotate, annotate_many};
 pub use build::{BuildRequest, OBJECT_FORMAT, OBJECTS_DIR, RUNS_DIR, SOURCE_DIR, build};
 pub use detail::detail;
 pub use diagnose::diagnose_tool as diagnose;
