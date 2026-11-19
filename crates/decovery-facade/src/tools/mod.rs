@@ -17,6 +17,7 @@ mod show;
 mod source_path;
 mod status;
 mod variants;
+mod whole_link;
 
 pub use analyze::{AnalyzeOptions, analyze, analyze_with_user_plugins, program_description};
 pub use annotate::{AnnotateAction, Annotation, annotate, annotate_many};

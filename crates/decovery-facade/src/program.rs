@@ -2,7 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
-use decovery_core::{ArchMode, Permissions, Program, Region, TargetFormat, Workspace};
+use decovery_core::{
+    ArchMode, OverlayConfig, Permissions, Program, Region, TargetFormat, Workspace,
+};
 
 use crate::FacadeError;
 
@@ -18,6 +20,28 @@ fn locate(path: &Path, root: &Path) -> PathBuf {
 /// The file of the target of `ws`.
 pub fn target_path(ws: &Workspace) -> PathBuf {
     locate(Path::new(&ws.config.target.file), &ws.root)
+}
+
+/// The bytes of overlay `o` from its file (`file_offset`, `size`; a file of its own is read whole).
+pub fn overlay_bytes(ws: &Workspace, o: &OverlayConfig) -> Result<Vec<u8>, String> {
+    let path = locate(Path::new(&o.file), &ws.root);
+    let bytes = std::fs::read(&path)
+        .map_err(|e| format!("cannot read overlay {} ({}): {e}", o.name, path.display()))?;
+    if o.file_offset == 0 {
+        return Ok(bytes);
+    }
+    let start = usize::try_from(o.file_offset).unwrap_or(usize::MAX);
+    let end = start.saturating_add(usize::try_from(o.size).unwrap_or(usize::MAX));
+    bytes
+        .get(start..end.min(bytes.len()))
+        .map(<[u8]>::to_vec)
+        .ok_or_else(|| {
+            format!(
+                "overlay {}: file offset {start} past the end of {}",
+                o.name,
+                path.display()
+            )
+        })
 }
 
 /// Loads the target of `ws`, dispatching on its format.
