@@ -1074,6 +1074,14 @@ fn assign_overlay_objects<'a>(
     let mut out = Vec::new();
     let mut taken = BTreeSet::new();
     for m in modules {
+        // a module none of whose files takes part in this build is not compared: no warnings about it
+        if !m.files.iter().any(|file| {
+            objects
+                .iter()
+                .any(|(_, name, _)| name.eq_ignore_ascii_case(file))
+        }) {
+            continue;
+        }
         // (file, first function address, code size) of the files present, in link order
         let mut ranges: Vec<(&str, Option<u16>, u32)> = Vec::new();
         for file in &m.files {
@@ -2152,6 +2160,28 @@ size = 21
             &mut warnings,
         );
         assert!(warnings[0].contains("overlaps"), "{warnings:?}");
+    }
+
+    #[test]
+    fn modules_outside_the_build_are_not_warned_about() {
+        let (v, w) = (
+            OverlayName::new("V").unwrap(),
+            OverlayName::new("W").unwrap(),
+        );
+        let a = code_object("a", vec![0xC3; 4]);
+        let modules = [
+            ModuleConfig::new(v, vec!["a.c".into()]),
+            ModuleConfig::new(w, vec!["w1.c".into(), "w2.c".into()]),
+        ];
+        let at = Address::Ovl {
+            overlay: v,
+            seg: 0,
+            off: 0x5000,
+        };
+        let mut warnings = Vec::new();
+        let out = assign_overlay_objects(&modules, &[(0, "a.c", &a)], &[(0, at)], &mut warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(out.len(), 1);
     }
 
     #[test]

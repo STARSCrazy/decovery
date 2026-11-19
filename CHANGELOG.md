@@ -54,6 +54,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
   identical with WLINK 10.6 in DOSBox (`dosbox-lab`).
 
 ### Fixed
+- `build` warns about missing files only for `[[rebuild.module]]`s that take part in the build, not about
+  unrelated modules.
 - The header of an archived `comparison.txt` counted other instructions than its listing (2 against 1 for one
   inserted instruction): both now give the listing's counts, changed, inserted and removed instructions separately.
 - `find similar` and `show` named exemplars by the rebuild record's name (`fun_…`) instead of the knowledge's name.
