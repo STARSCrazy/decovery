@@ -16,7 +16,7 @@ pub const A_AT: &str = "ovl:A:0000:5000";
 pub const B_AT: &str = "ovl:B:0000:5000";
 
 /// An Aztec overlay file: header (magic, code base, code size, data base, data size, BSS, entry), then code.
-fn overlay_file(code: &[u8]) -> Vec<u8> {
+pub fn overlay_file(code: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     for w in [0xF2u16, 0x5000, code.len() as u16, 0x9000, 0, 0, 0x5000] {
         out.extend(w.to_le_bytes());
@@ -27,11 +27,16 @@ fn overlay_file(code: &[u8]) -> Vec<u8> {
 
 /// An Aztec object with the public function `ovmain_` = `code`.
 pub fn object(code: &[u8]) -> Vec<u8> {
+    named_object("ovmain", code)
+}
+
+/// An Aztec object with the public function `<name>_` = `code`.
+pub fn named_object(name: &str, code: &[u8]) -> Vec<u8> {
     write_aztec(&AztecModuleSpec {
         name: "M".into(),
         code: code.to_vec(),
         named: vec![AztecSymbolSpec {
-            name: "ovmain_".into(),
+            name: format!("{name}_"),
             section: AztecSection::Code,
             value: 0,
             public: true,
@@ -138,3 +143,49 @@ result = \"identical\"
     ];
     a.save(root, &lock).unwrap();
 }
+
+/// [`write`] plus what `build` needs, with names a build places by themselves: the knowledge and the rebuild
+/// records name A's function `amain` and B's `bmain`. `src/a.c` and `src/b.c`, a fake tool directory and the fake
+/// runner `tests/fixtures/omf_runner.py` (Aztec objects `X.O`), which serves the objects in `objects` as
+/// `<stem>.OBJ` (`A.OBJ` and `B.OBJ` are written: A loads 5, B is identical).
+pub fn write_buildable(root: &Path, python: &str, objects: &Path) {
+    write(root, false);
+    let edit = |file: &str, f: &dyn Fn(String) -> String| {
+        let path = root.join(file);
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(path, f(text)).unwrap();
+    };
+    edit("knowledge/symbols.toml", &|t| {
+        t.replace("A_ovmain", "amain").replace("B_ovmain", "bmain")
+    });
+    edit("knowledge/rebuild.toml", &|t| {
+        t.replacen("\"ovmain\"", "\"amain\"", 1)
+            .replacen("\"ovmain\"", "\"bmain\"", 1)
+    });
+    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../decovery-facade/tests/fixtures/omf_runner.py");
+    let script = std::path::absolute(script).unwrap();
+    let quote = |s: &str| toml::Value::String(s.to_string()).to_string();
+    let objects_dir = quote(objects.to_str().unwrap());
+    let (python, script) = (quote(python), quote(script.to_str().unwrap()));
+    edit("decovery.toml", &|t| {
+        format!(
+            "{}\n[plugins.fake]\ncommand = [{python}, {script}]\n\
+             env = {{ FAKE_OMF_DIR = {objects_dir}, FAKE_OBJ_EXT = \"O\" }}\n",
+            t.replace(
+                "compiler = \"aztec-c86-4.2b\"\n",
+                "compiler = \"aztec-c86-4.2b\"\nrunners = [\"fake\"]\ntool_dir = \"tools\"\n",
+            )
+        )
+    });
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("tools/BIN")).unwrap();
+    std::fs::write(root.join("tools/BIN/CC.EXE"), b"fake compiler").unwrap();
+    std::fs::write(root.join("src/a.c"), A_C).unwrap();
+    std::fs::write(root.join("src/b.c"), "int bmain()\n{\n    return 2;\n}\n").unwrap();
+    std::fs::write(objects.join("A.OBJ"), named_object("amain", &[0xB8, 5, 0, 0xC3])).unwrap();
+    std::fs::write(objects.join("B.OBJ"), named_object("bmain", &[0xB8, 2, 0, 0xC3])).unwrap();
+}
+
+/// The source of A's `amain` (it loads 5; the original loads 1).
+pub const A_C: &str = "int amain()\n{\n    return 5;\n}\n";

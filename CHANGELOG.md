@@ -43,6 +43,11 @@ and the project uses [Semantic Versioning](https://semver.org/).
   identical with WLINK 10.6 in DOSBox (`dosbox-lab`).
 
 ### Fixed
+- `build --function <f> --function-source` on an Aztec C86 overlay function judges the variant like `build` (against
+  the image, relocated fields as link gaps) instead of reporting "the original bytes … are not in the program"; the
+  function may be given by its knowledge name (`VPCVW_ovmain`) when its rebuild record holds the C name. `find
+  similar` reads overlay functions (they have no linear address). A function source for a function that the current
+  file does not define yet says so: the function must be in the file already, or the whole file is passed.
 - `build` per function: blockers are counted per kind (`blocker_counts` in JSON, `wrong-relative-ref ×20` in the
   text, kinds separated by `, `), and after a code size change of an overlay module the differing functions behind
   its first real difference carry `consequence: true` and `(follow-on)` in the text.

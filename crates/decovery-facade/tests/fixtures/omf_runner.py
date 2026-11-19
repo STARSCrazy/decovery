@@ -15,6 +15,8 @@ A job whose last command runs WLINK is an LE link job: its command line goes to 
 (`NB.OBJ`, `NB.LNK`, `STUB.EXE`) are copied to `linked/` in FAKE_OMF_DIR, and `REBUILD.EXE` from FAKE_OMF_DIR is
 copied into the C mount as the program `NB.LNK` names (exit 0); without it the job prints an error and exits 1.
 
+With FAKE_OBJ_EXT set (`O` for Aztec C86), the served object is written as `X.<ext>` instead of `X.OBJ`.
+
 With FAKE_OMF_BLOCK=1 a call appends its job count to `block.log` and waits (up to 60 s) for `$/cancel`; when
 cancelled it appends `cancelled` to `cancel.log` and answers -32002.
 
@@ -104,7 +106,8 @@ def run_job(job, c_root):
             obj = os.path.join(OBJECTS, (stem if found else "FALLBACK") + ".OBJ")
     if not os.path.isfile(obj):
         return {"status": "done", "exit_code": 1, "stdout": f"{source}(1): Error: no object\r\n"}
-    shutil.copyfile(obj, os.path.join(c_root, cd or "", stem + ".OBJ"))
+    ext = os.environ.get("FAKE_OBJ_EXT", "OBJ")
+    shutil.copyfile(obj, os.path.join(c_root, cd or "", stem + "." + ext))
     return {"status": "done", "exit_code": 0, "stdout": ""}
 
 

@@ -168,7 +168,7 @@ pub fn exemplar_index(session: &Session) -> Result<ExemplarIndex, FacadeError> {
             else {
                 continue;
             };
-            let base = record.address.linear().unwrap_or(0);
+            let base = code_base(record.address);
             let forms = intern(
                 &instruction_forms(code, bits, base),
                 &mut ids,
@@ -325,7 +325,7 @@ impl ExemplarIndex {
             ))
         })?;
         let bits = bits(&session.workspace);
-        let base = target.linear().unwrap_or(0);
+        let base = code_base(target);
         let mut local = HashMap::new();
         let forms = self.lookup(&instruction_forms(code, bits, base), &mut local);
         let coarse = self.lookup(&coarse_forms(code, bits, base), &mut local);
@@ -435,8 +435,17 @@ fn bits(ws: &Workspace) -> u32 {
 
 /// The original bytes from `start` through `end` (inclusive).
 fn original_code(program: &decovery_core::Program, start: Address, end: Address) -> Option<&[u8]> {
-    let len = end.linear()?.checked_sub(start.linear()?)?.checked_add(1)?;
+    // `bytes_from` covers overlay addresses, which have no linear address
+    let len = end.bytes_from(start)?.checked_add(1)?;
     program.read(start, usize::try_from(len).ok()?)
+}
+
+/// The address instructions at `at` are decoded at: the linear address, for an overlay address its offset.
+fn code_base(at: Address) -> u64 {
+    match at {
+        Address::Ovl { off, .. } => u64::from(off),
+        _ => at.linear().unwrap_or(0),
+    }
 }
 
 /// The definition of `name` in the source `file` of `src/` (searched like `build` finds sources).

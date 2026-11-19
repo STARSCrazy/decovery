@@ -248,7 +248,7 @@ fn history_lists_newest_first_with_best_and_budget() {
     assert_eq!(
         d["failures"],
         json!([{
-            "message": "variant 1 (broken): the function source must define exactly one function, sub; it defines none",
+            "message": "variant 1 (broken): a.c: the function source must define exactly one function, sub; it defines none",
             "count": 2
         }])
     );

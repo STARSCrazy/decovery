@@ -245,7 +245,7 @@ pub fn splice_function(
         [one] => one,
         [] => {
             return Err(ToolchainError::Invalid(format!(
-                "the file does not define {name}"
+                "the file does not define {name} yet: a function source replaces the function's definition in the current file, so {name} must be in it already (add it, or pass the whole file as a variant)"
             )));
         }
         more => {

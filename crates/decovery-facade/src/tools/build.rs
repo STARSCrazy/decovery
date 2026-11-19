@@ -755,6 +755,14 @@ pub fn build(
     })
 }
 
+/// Compares one placed function of an Aztec object with the image, its relocated fields as link gaps (no linker
+/// step): what `build`, its variants and `diagnose` judge an Aztec function by.
+pub(super) fn compare_aztec(p: &Placement<'_>, program: &Program) -> Comparison {
+    let len = p.function.code().len();
+    let image = program.read(p.at, len).unwrap_or(&[]);
+    decovery_diff::compare_with_gaps(&p.function, image, p.at)
+}
+
 /// Compares the placed functions with the original. An Aztec object has no linker (phase 4): each function is
 /// compared against the image with its relocated fields as link gaps, and the module comparison's data anchors
 /// are not computed (their warnings would describe a comparison the verdicts do not come from; an overlay's data
@@ -773,11 +781,7 @@ fn compare_placed(
     if profile.object_format == ObjectFormat::Aztec {
         return placements
             .iter()
-            .map(|p| {
-                let len = p.function.code().len();
-                let image = program.read(p.at, len).unwrap_or(&[]);
-                decovery_diff::compare_with_gaps(&p.function, image, p.at)
-            })
+            .map(|p| compare_aztec(p, program))
             .collect();
     }
     // the diagnosis reads the instruction pairs of the comparison: no second decode
