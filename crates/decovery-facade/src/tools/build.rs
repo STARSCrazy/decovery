@@ -335,6 +335,11 @@ pub fn build(
 ) -> Result<Response, FacadeError> {
     let started = Instant::now();
     control.check()?;
+    let mut named = request.clone();
+    for file in &mut named.files {
+        *file = super::source_path::source_file_name(root, file)?;
+    }
+    let request = &named;
     if !request.variants.is_empty() {
         return build_variants(root, request, control, started);
     }
@@ -343,7 +348,8 @@ pub fn build(
     let ws = Workspace::open(root)?;
     let analysis = Analysis::load(root)?.filter(|a| a.target_sha256 == ws.config.target.sha256);
     let (profile, default_flags) = rebuild_profile(&ws).map_err(toolchain)?;
-    let rebuild = ws.config.rebuild.clone().unwrap_or_default();
+    let mut rebuild = ws.config.rebuild.clone().unwrap_or_default();
+    let flag_warnings = super::file_flags::apply_source_flags(root, &mut rebuild);
     let all = request.files.is_empty() && request.function.is_none();
     let files = match (&request.function, request.files.is_empty()) {
         (Some(function), true) => vec![file_of_function(root, function)?],
@@ -448,6 +454,7 @@ pub fn build(
         mut warnings,
         closing,
     } = compile_jobs(&ws, &profile, &jobs_input, &run_dir.0, control, opening)?;
+    warnings.splice(0..0, flag_warnings);
     if let Some(Some((asm_ws, asm_profile))) =
         assembler.as_ref().filter(|_| !assembler_jobs.is_empty())
     {

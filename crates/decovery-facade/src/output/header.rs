@@ -54,7 +54,12 @@ pub(crate) fn header(d: &HeaderData<'_>) -> String {
         .and_then(|s| s.signature.as_deref())
         .filter(|t| !t.is_empty())
     {
-        lines.push(line("@signature", sig));
+        let sig = if named {
+            with_name(sig, &d.name)
+        } else {
+            sig.to_string()
+        };
+        lines.push(line("@signature", &sig));
     }
     if let Some(lib) = symbol
         .and_then(|s| s.library.as_deref())
@@ -85,6 +90,28 @@ pub(crate) fn header(d: &HeaderData<'_>) -> String {
         lines.push(line("@evidence", evidence));
     }
     safe(&lines.join("\n")) + "\n */\n"
+}
+
+/// The prototype `sig` with the function name replaced by `name`, so the line follows a rename. Text whose
+/// name cannot be told (no type before the name, function-pointer results) is returned unchanged.
+fn with_name(sig: &str, name: &str) -> String {
+    let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let Some(open) = sig.find('(') else {
+        return sig.to_string();
+    };
+    let head = sig[..open].trim_end();
+    let start = head.rfind(|c: char| !ident(c)).map_or(0, |i| i + 1);
+    let old = &head[start..];
+    let before = head[..start].trim_end();
+    let valid = !old.is_empty()
+        && !old.starts_with(|c: char| c.is_ascii_digit())
+        && !before.is_empty()
+        && !before.ends_with('(')
+        && !sig[open + 1..].trim_start().starts_with('*');
+    if !valid {
+        return sig.to_string();
+    }
+    format!("{}{name}{}", &sig[..start], &sig[head.len()..])
 }
 
 /// `*/` inside generated comments would end them early.
@@ -482,6 +509,31 @@ mod tests {
              * @evidence   seen\n \
              */\n"
         );
+    }
+
+    #[test]
+    fn signature_line_uses_the_knowledge_name() {
+        let f = AnalyzedFunction::new(flat(0x10200), flat(0x1023F), 64);
+        let mut s = Symbol::new(flat(0x10200), SymbolKind::Function, "short_name");
+        s.signature = Some("unsigned int very_long_old_name(int a, char *b)".to_string());
+        let mut d = data(&f, Some(&s));
+        d.name = "short_name".to_string();
+        assert!(
+            header(&d).contains(
+                "@signature  unsigned int short_name(int a, char *b)
+"
+            ),
+            "{}",
+            header(&d)
+        );
+        // function pointer results keep their text
+        s.signature = Some("int (*get(void))(int)".to_string());
+        let mut d = data(&f, Some(&s));
+        d.name = "short_name".to_string();
+        assert!(header(&d).contains(
+            "@signature  int (*get(void))(int)
+"
+        ));
     }
 
     #[test]

@@ -5,6 +5,7 @@ mod annotate;
 mod build;
 mod detail;
 mod diagnose;
+mod file_flags;
 mod find;
 mod history;
 mod job;
@@ -12,6 +13,7 @@ mod legacy;
 mod link;
 mod link_symbols;
 mod show;
+mod source_path;
 mod status;
 mod variants;
 

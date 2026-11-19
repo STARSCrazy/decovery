@@ -45,7 +45,12 @@ pub(crate) fn locate(session: &Session, input: &str) -> Result<Address, FacadeEr
             AddressInput::FileOffset(off) => from_file_offset(session, off)?,
         }
     } else {
-        address_of_name(session, input)?
+        match address_of_name(session, input) {
+            Err(FacadeError::NotFound(_)) if bare_hex(input).is_some() => {
+                address_of_bare_offset(session, input)?
+            }
+            other => other?,
+        }
     };
     check_overlay(session, requested)?;
     if segment_of(session, requested).is_none() {
@@ -86,6 +91,56 @@ fn address_of_name(session: &Session, name: &str) -> Result<Address, FacadeError
         return Ok(a);
     }
     Err(FacadeError::NotFound(name.to_string()))
+}
+
+/// The value of a bare hexadecimal target (`9D6B`, `0x9D6B`): 1 to 8 hex digits.
+fn bare_hex(input: &str) -> Option<u32> {
+    let digits = input
+        .strip_prefix("0x")
+        .or_else(|| input.strip_prefix("0X"))
+        .unwrap_or(input);
+    (digits.len() <= 8 && !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_hexdigit()))
+        .then(|| u32::from_str_radix(digits, 16).ok())
+        .flatten()
+}
+
+/// The offset part of a function start: a segment offset (also of an overlay) or the flat address itself.
+fn offset_part(a: Address) -> u32 {
+    match a {
+        Address::Flat(v) => v,
+        Address::Seg { off, .. } | Address::Ovl { off, .. } => u32::from(off),
+        Address::Sel { off, .. } => off,
+        _ => 0,
+    }
+}
+
+/// The function whose start has the offset `input` (bare hex) in the main program or any overlay. Several are
+/// an error listing their full addresses with names.
+fn address_of_bare_offset(session: &Session, input: &str) -> Result<Address, FacadeError> {
+    let value = bare_hex(input).ok_or_else(|| FacadeError::NotFound(input.to_string()))?;
+    let mut found: Vec<Address> = session
+        .analysis
+        .functions
+        .iter()
+        .map(|f| f.start)
+        .filter(|a| offset_part(*a) == value)
+        .collect();
+    found.sort();
+    found.dedup();
+    match found.as_slice() {
+        [] => Err(FacadeError::NotFound(input.to_string())),
+        [one] => Ok(*one),
+        many => {
+            let listed: Vec<String> = many
+                .iter()
+                .map(|a| format!("{} ({a})", session.name_of(*a).name))
+                .collect();
+            Err(FacadeError::Invalid(format!(
+                "{input} is ambiguous: {}; give the full address",
+                listed.join(", ")
+            )))
+        }
+    }
 }
 
 fn from_file_offset(session: &Session, off: u64) -> Result<Address, FacadeError> {

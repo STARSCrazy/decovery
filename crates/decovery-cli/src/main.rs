@@ -151,8 +151,8 @@ enum Command {
         /// Order of the function list.
         #[arg(long, value_enum, default_value = "address")]
         sort: Sort,
-        /// Maximum number of rows (default 100; `similar`: 3); the rest is stored as a handle.
-        #[arg(long)]
+        /// Maximum number of rows (default 100; `similar`: 3), or `all`; the rest is stored as a handle.
+        #[arg(long, value_parser = parse_limit)]
         limit: Option<usize>,
     },
     /// Record knowledge: a name, comment, signature, type, local, refutation or type definition.
@@ -1182,6 +1182,15 @@ fn parse_hex_u16(text: &str) -> Result<u16, String> {
         .or_else(|| text.strip_prefix("0X"))
         .unwrap_or(text);
     u16::from_str_radix(digits, 16).map_err(|e| format!("{text:?}: {e}"))
+}
+
+/// `--limit` of `find`: a row count or `all`.
+fn parse_limit(text: &str) -> Result<usize, String> {
+    if text.eq_ignore_ascii_case("all") {
+        return Ok(usize::MAX);
+    }
+    text.parse::<usize>()
+        .map_err(|_| format!("`{text}` is not a number or `all`"))
 }
 
 fn finish(result: Result<(), FacadeError>) -> ExitCode {
