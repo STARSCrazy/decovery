@@ -271,6 +271,8 @@ pub(super) struct Built {
     pub(super) label: String,
     pub(super) address: Address,
     code_hash: String,
+    /// How the function was paired with the original when not by name (`matched by address; …`).
+    note: Option<String>,
 }
 
 /// `[rebuild] file_flags` for a source: by its name, else by its DOS name, else case-insensitively.
@@ -535,13 +537,15 @@ pub fn build(
         .iter()
         .map(|(i, object)| (*i, sources[*i].name.as_str(), object))
         .collect();
-    let (placements, placed) = place_objects(
+    let mut unmatched: Vec<(usize, String)> = Vec::new();
+    let (placements, placed) = place_objects_reporting(
         &knowledge,
         &profile,
         index.as_ref(),
         &symbol_sizes,
         &refs,
         &mut hints,
+        &mut unmatched,
     );
     drop(refs);
     let mut originals: HashMap<Address, String> = HashMap::new();
@@ -829,6 +833,25 @@ pub fn build(
         ("attempts", record_ended, ended),
     ];
     add_timeline(&mut timing, started, &phases, &sources);
+    // a build of one function reports that function only
+    // (file, overlay of its placed functions) of each function without counterpart
+    let unmatched_files: Vec<(&str, Option<OverlayName>)> = if request.function.is_none() {
+        unmatched
+            .iter()
+            .map(|(i, _)| {
+                let overlay = placed
+                    .iter()
+                    .filter(|b| b.source == *i)
+                    .find_map(|b| b.address.overlay());
+                (sources[*i].name.as_str(), overlay)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let by_address = placed.iter().filter(|b| b.note.is_some()).count();
+    let mut modules = modules;
+    mark_unmatched_modules(&mut modules, &rebuild.modules, &unmatched_files);
     respond(
         root,
         request,
@@ -839,6 +862,7 @@ pub fn build(
         timing,
     )
     .map(|mut response| {
+        add_unmatched(&mut response, unmatched_files.len(), by_address);
         add_modules(&mut response, modules, &functions, &relative_targets);
         add_main_data(&mut response, main_data);
         add_leading(&mut response, leading);
@@ -1255,9 +1279,10 @@ fn add_modules(
             }
         }
     }
+    // a module with functions left without counterpart is not complete, however its bytes compare
     let same = modules
         .iter()
-        .filter(|m| m["identical"] == json!(true))
+        .filter(|m| m["identical"] == json!(true) && m["unmatched_functions"].is_null())
         .count();
     response.summary.push_str(&format!(
         "; overlay modules: {same} of {} identical",
@@ -1278,6 +1303,14 @@ fn add_modules(
         {
             notes.push(located_difference(m, at));
         }
+        if let Some(n) = m["unmatched_functions"].as_u64() {
+            let state = if m["identical"] == json!(true) {
+                "bytes identical, but "
+            } else {
+                ""
+            };
+            notes.push(format!("{state}{}", without_counterpart(n as usize)));
+        }
         if !notes.is_empty() {
             response
                 .summary
@@ -1285,6 +1318,62 @@ fn add_modules(
         }
     }
     response.data["modules"] = json!(modules);
+}
+
+/// `N function(s) without counterpart`.
+fn without_counterpart(n: usize) -> String {
+    format!(
+        "{n} function{} without counterpart",
+        if n == 1 { "" } else { "s" }
+    )
+}
+
+/// Counts the functions left without counterpart in the original (`counts.unmatched`) and names them in the
+/// summary: a build with such functions is not complete. Functions paired by address are counted too
+/// (`counts.matched_by_address`), with the advice to record their source names.
+fn add_unmatched(response: &mut Response, n: usize, by_address: usize) {
+    response.data["counts"]["unmatched"] = json!(n);
+    response.data["counts"]["matched_by_address"] = json!(by_address);
+    if by_address > 0 {
+        response.summary.push_str(&format!(
+            "; {by_address} matched by address (record the source names with `annotate --name`)"
+        ));
+    }
+    if n > 0 {
+        response
+            .summary
+            .push_str(&format!("; {}", without_counterpart(n)));
+    }
+}
+
+/// Notes on every overlay module how many functions of its files were left without counterpart
+/// (`unmatched_functions`), so a module of identical bytes does not read as complete.
+fn mark_unmatched_modules(
+    modules: &mut [Value],
+    config: &[ModuleConfig],
+    unmatched: &[(&str, Option<OverlayName>)],
+) {
+    for m in modules {
+        let Some(name) = m["overlay"].as_str().map(str::to_string) else {
+            continue;
+        };
+        let files = config
+            .iter()
+            .find(|c| c.overlay.as_str() == name)
+            .map(|c| c.files.as_slice())
+            .unwrap_or_default();
+        // a file of the module, by the configured module or by the overlay its other functions lie in
+        let n = unmatched
+            .iter()
+            .filter(|(file, overlay)| {
+                overlay.is_some_and(|o| o.as_str() == name)
+                    || files.iter().any(|g| g.eq_ignore_ascii_case(file))
+            })
+            .count();
+        if n > 0 {
+            m["unmatched_functions"] = json!(n);
+        }
+    }
 }
 
 /// `first real difference at <address>`, with ` in <function> +0x<offset>` when a built function holds it.
@@ -1741,6 +1830,32 @@ pub(super) fn place_objects<'o>(
     objects: &[(usize, &str, &'o ObjectFile)],
     hints: &mut Vec<String>,
 ) -> (Vec<Placement<'o>>, Vec<Built>) {
+    let mut unmatched = Vec::new();
+    place_objects_reporting(
+        knowledge,
+        profile,
+        index,
+        symbol_sizes,
+        objects,
+        hints,
+        &mut unmatched,
+    )
+}
+
+/// [`place_objects`], also naming each function left without counterpart (object id, source name).
+///
+/// A function whose name has no counterpart is placed by address when its section's placement is known: every
+/// by-name placed function of the section puts the section at the same original address, and exactly one
+/// knowledge function starts at the function's offset from there. Its verdict notes both names.
+pub(super) fn place_objects_reporting<'o>(
+    knowledge: &KnowledgeView<'_>,
+    profile: &Profile,
+    index: Option<&decovery_core::AnalysisIndex<'_>>,
+    symbol_sizes: &HashMap<Address, Option<u64>>,
+    objects: &[(usize, &str, &'o ObjectFile)],
+    hints: &mut Vec<String>,
+    unmatched: &mut Vec<(usize, String)>,
+) -> (Vec<Placement<'o>>, Vec<Built>) {
     let mut placements = Vec::new();
     let mut placed = Vec::new();
     let mut taken: HashMap<Address, String> = HashMap::new();
@@ -1754,16 +1869,49 @@ pub(super) fn place_objects<'o>(
             functions
         };
         for module in &object.modules {
-            for view in split(module).into_iter().filter(|f| is_public(f)) {
+            let views: Vec<_> = split(module).into_iter().filter(|f| is_public(f)).collect();
+            let found: Vec<Option<(String, Address)>> = views
+                .iter()
+                .map(|view| {
+                    overlay
+                        .and_then(|o| place_in_overlay(knowledge, profile, view.name, o))
+                        .or_else(|| place_name(knowledge, profile, view.name))
+                        .map(|(n, a)| (n.to_string(), a))
+                })
+                .collect();
+            // the original address of each section, where all its by-name placed functions agree on it
+            let mut bases: HashMap<u32, Option<Address>> = HashMap::new();
+            for (view, f) in views.iter().zip(&found) {
+                let Some((_, at)) = f else { continue };
+                let base = at.offset_by(-i64::from(view.start)).ok();
+                bases
+                    .entry(view.section)
+                    .and_modify(|b| {
+                        if *b != base {
+                            *b = None;
+                        }
+                    })
+                    .or_insert(base);
+            }
+            for (view, f) in views.into_iter().zip(found) {
                 let raw = view.name;
-                let found = overlay
-                    .and_then(|o| place_in_overlay(knowledge, profile, raw, o))
-                    .or_else(|| place_name(knowledge, profile, raw));
-                let Some((name, address)) = found else {
-                    hints.push(format!(
-                        "{}: no counterpart in the original",
-                        profile.decoration.undecorate(raw)
+                let source_name = profile.decoration.undecorate(raw);
+                let mut note = None;
+                let found = f.or_else(|| {
+                    let base = bases.get(&view.section).copied().flatten()?;
+                    let at = base.offset_by(i64::from(view.start)).ok()?;
+                    let known = knowledge.function_name_at(at)?;
+                    note = Some(format!(
+                        "matched by address; knowledge name {known}, source name {source_name}"
                     ));
+                    hints.push(format!(
+                        "{source_name}: matched by address {at}; knowledge name {known}, source name                          {source_name}; record the source name with `annotate --name`"
+                    ));
+                    Some((source_name.to_string(), at))
+                });
+                let Some((name, address)) = found else {
+                    hints.push(format!("{source_name}: no counterpart in the original"));
+                    unmatched.push((id, source_name.to_string()));
                     continue;
                 };
                 if let Some(other) = taken.get(&address) {
@@ -1778,13 +1926,14 @@ pub(super) fn place_objects<'o>(
                 let label = knowledge
                     .name_at(address)
                     .filter(|n| !n.is_default)
-                    .map_or_else(|| name.to_string(), |n| n.name);
+                    .map_or_else(|| name.clone(), |n| n.name);
                 placed.push(Built {
                     source: id,
-                    name: name.to_string(),
+                    name,
                     label,
                     address,
                     code_hash,
+                    note,
                 });
                 placements.push(Placement::new(view, address, original_len));
             }
@@ -2151,6 +2300,15 @@ fn record(built: &Built, c: &Comparison, source: &Source, date: &str) -> Rebuild
     if result == RebuildResult::Error {
         r.message = Some("the original bytes of the function are not in the program".into());
     }
+    if let Some(note) = &built.note {
+        r.message = Some(match r.message.take() {
+            Some(before) => format!(
+                "{note}
+{before}"
+            ),
+            None => note.clone(),
+        });
+    }
     r.bytes = m.bytes;
     r.equal = m.equal;
     r.gaps = m.gaps;
@@ -2324,6 +2482,9 @@ fn function_json(root: &Path, r: &RebuildRecord) -> Value {
     }
     if !r.diagnoses.is_empty() {
         v["diagnoses"] = json!(r.diagnoses);
+    }
+    if let Some(m) = &r.message {
+        v["message"] = json!(m);
     }
     if r.result == RebuildResult::Differs
         && let Some(offset) = r.first_difference
