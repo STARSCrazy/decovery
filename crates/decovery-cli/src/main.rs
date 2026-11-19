@@ -1581,8 +1581,7 @@ fn show(
         print!("{text}");
     }
     if let Some(asm) = response.data["asm"].as_str().filter(|a| !a.is_empty()) {
-        println!("
-/* original disassembly */");
+        println!("\n/* original disassembly */");
         print!("{asm}");
     }
     for warning in response.data["warnings"].as_array().into_iter().flatten() {

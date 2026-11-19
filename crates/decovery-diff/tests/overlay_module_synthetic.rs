@@ -435,9 +435,9 @@ fn extern_whose_name_says_another_address_is_a_finding() {
     let v = compare_overlay_module(&[&object(&e), &object(&f)], &ovl);
     assert_eq!(v.externals.get("word_84a0_"), Some(&0x84AA), "{v:#?}");
     assert!(
-        v.findings.iter().any(|x| x.starts_with(
-            "word_84a0_: bound at 84AA, but its name says 84A0"
-        )),
+        v.findings
+            .iter()
+            .any(|x| x.starts_with("word_84a0_: bound at 84AA, but its name says 84A0")),
         "{:?}",
         v.findings
     );
@@ -465,8 +465,10 @@ fn commons_counted_into_a_differing_bss_are_named() {
     let v = compare_overlay_module(&[&object(&c), &object(&d)], &ovl);
     assert_eq!(v.commons.len(), 3, "{v:#?}");
     assert!(
-        v.findings.iter().any(|f| f.starts_with("BSS counts 8 bytes of commons")
-            && f.contains("cnt_ 2 bytes at 2000 (C, D)")),
+        v.findings
+            .iter()
+            .any(|f| f.starts_with("BSS counts 8 bytes of commons")
+                && f.contains("cnt_ 2 bytes at 2000 (C, D)")),
         "{:?}",
         v.findings
     );

@@ -714,7 +714,10 @@ fn existing_install(
             expect.join(", ")
         ));
     }
-    log(&format!("step: using the existing {key} at {}", dir.display()));
+    log(&format!(
+        "step: using the existing {key} at {}",
+        dir.display()
+    ));
     Ok((dir.to_path_buf(), true))
 }
 

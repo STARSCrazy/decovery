@@ -548,8 +548,14 @@ fn analyze_without_plugin_config_explains_setup() {
                 message.starts_with("no analyzer configured; run decovery setup ghidra"),
                 "{message}"
             );
-            assert!(message.contains("decovery.toml and the user config"), "{message}");
-            assert!(message.contains("[plugins.ghidra] with a command"), "{message}");
+            assert!(
+                message.contains("decovery.toml and the user config"),
+                "{message}"
+            );
+            assert!(
+                message.contains("[plugins.ghidra] with a command"),
+                "{message}"
+            );
         }
         other => panic!("{other:?}"),
     }

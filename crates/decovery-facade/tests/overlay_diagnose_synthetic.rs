@@ -320,7 +320,11 @@ confidence = \"confirmed\"
     let session = Session::open(dir.path()).unwrap();
     let r = decovery_facade::diagnose(&session, "ovl:C:0000:5004", Budget::default()).unwrap();
     let hint = r.data["order"].as_str().unwrap_or_default();
-    assert!(hint.contains("g (ovl:C:0000:5004) comes after pre"), "{}", r.data);
+    assert!(
+        hint.contains("g (ovl:C:0000:5004) comes after pre"),
+        "{}",
+        r.data
+    );
     assert!(r.summary.contains(hint), "{}", r.summary);
 }
 

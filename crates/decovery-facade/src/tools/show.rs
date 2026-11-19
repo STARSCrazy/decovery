@@ -174,7 +174,9 @@ fn show_impl(
                 warnings
                     .iter()
                     .cloned()
-                    .chain(["no disassembly: the function's length or bytes are unknown".to_string()])
+                    .chain([
+                        "no disassembly: the function's length or bytes are unknown".to_string()
+                    ])
                     .collect::<Vec<_>>()
             );
         }

@@ -1485,12 +1485,21 @@ impl Site<'_> {
 /// known name of a branch target outside the default names (`; name`). Empty when the bytes are not in the
 /// program. Flat code is decoded as 32-bit, segmented code as 16-bit.
 pub fn disassembly(program: &Program, at: Address, len: u32, symbols: &dyn SymbolView) -> String {
-    let bits = if matches!(at, Address::Flat(_)) { 32 } else { 16 };
+    let bits = if matches!(at, Address::Flat(_)) {
+        32
+    } else {
+        16
+    };
     let (Some(code), Some(base)) = (program.read(at, len as usize), base_of(at)) else {
         return String::new();
     };
     let mut out = String::new();
-    for d in decode_detailed(code, bits, base, &DecodeOptions::new(BTreeSet::new(), false)) {
+    for d in decode_detailed(
+        code,
+        bits,
+        base,
+        &DecodeOptions::new(BTreeSet::new(), false),
+    ) {
         let address = at
             .offset_by(i64::from(d.offset))
             .map_or_else(|_| format!("+{:04X}", d.offset), |a| a.to_string());

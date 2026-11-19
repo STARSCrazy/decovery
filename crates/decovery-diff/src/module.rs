@@ -352,7 +352,9 @@ pub fn compare_overlay_module(objects: &[&ObjectFile], overlay: &Overlay) -> Mod
                                 format!(
                                     "{} {}",
                                     m.name,
-                                    m.sections.get(*index as usize).map_or("?", |x| x.name.as_str())
+                                    m.sections
+                                        .get(*index as usize)
+                                        .map_or("?", |x| x.name.as_str())
                                 ),
                                 at,
                             ),
@@ -398,23 +400,28 @@ pub fn compare_overlay_module(objects: &[&ObjectFile], overlay: &Overlay) -> Mod
                     metrics.refs_unchecked += 1;
                     continue;
                 };
-                let wrong = |blockers: &mut Vec<Blocker>, wrong_refs: &mut Vec<WrongRef>, t: i64| {
-                    let at = (place - corg).max(0) as u32;
-                    wrong_refs.push(WrongRef {
-                        at,
-                        place,
-                        symbol: symbol.clone(),
-                        addend,
-                        original: if relative { end + sign(orig, width) } else { orig },
-                        rebuilt: t,
-                        relative,
-                    });
-                    blockers.push(if relative {
-                        Blocker::WrongRelativeRef { at }
-                    } else {
-                        Blocker::WrongAbsoluteRef { at }
-                    });
-                };
+                let wrong =
+                    |blockers: &mut Vec<Blocker>, wrong_refs: &mut Vec<WrongRef>, t: i64| {
+                        let at = (place - corg).max(0) as u32;
+                        wrong_refs.push(WrongRef {
+                            at,
+                            place,
+                            symbol: symbol.clone(),
+                            addend,
+                            original: if relative {
+                                end + sign(orig, width)
+                            } else {
+                                orig
+                            },
+                            rebuilt: t,
+                            relative,
+                        });
+                        blockers.push(if relative {
+                            Blocker::WrongRelativeRef { at }
+                        } else {
+                            Blocker::WrongAbsoluteRef { at }
+                        });
+                    };
                 match (internal, name) {
                     (Some(t), _) => {
                         let value = to_field(t);
