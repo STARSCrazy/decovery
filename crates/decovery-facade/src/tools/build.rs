@@ -1938,7 +1938,7 @@ pub(super) fn place_objects_reporting<'o>(
                         "matched by address; knowledge name {known}, source name {source_name}"
                     ));
                     hints.push(format!(
-                        "{source_name}: matched by address {at}; knowledge name {known}, source name                          {source_name}; record the source name with `annotate --name`"
+                        "{source_name}: matched by address {at}; knowledge name {known}, source name {source_name}; record the source name with `annotate --name`"
                     ));
                     Some((source_name.to_string(), at))
                 });
