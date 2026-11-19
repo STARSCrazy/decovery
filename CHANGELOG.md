@@ -6,6 +6,14 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `[[rebuild.module]]` (ADR 0013): an overlay module built from several source files in link order. Building one of
+  the files builds the others and compares the whole module; gaps and overlaps between the files' code are warned.
+- Aztec common symbols (uninitialised globals shared between files) are placed in the overlay module's BSS (order of
+  first appearance, largest size) and counted into its size; references to them are checked against that layout.
+- Profile key `name_length` (31 for the Aztec profiles): a name the compiler cut is matched with the longer knowledge
+  name; `annotate --name` warns about a name longer than that.
+- The memory behind an MZ load image (`minalloc` paragraphs: uninitialised data in DS, stack) is part of the memory
+  map as segment `uninitialized` (derived at session open, `decovery.toml` unchanged).
 - The archived `comparison.txt` of a differing attempt (`build`, its variants) lists the differing region side by
   side, as `diagnose` shows it (rebuild against original, differing lines marked, equal runs collapsed), cut after
   60 lines.
@@ -46,6 +54,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
   identical with WLINK 10.6 in DOSBox (`dosbox-lab`).
 
 ### Fixed
+- The header of an archived `comparison.txt` counted other instructions than its listing (2 against 1 for one
+  inserted instruction): both now give the listing's counts, changed, inserted and removed instructions separately.
+- `find similar` and `show` named exemplars by the rebuild record's name (`fun_…`) instead of the knowledge's name.
 - Overlay module findings in the build JSON name the first real difference like the text (`first real difference
   at ovl:VPCVW:0000:5344 in cvw_show_message +0x2D; …`; the structured fields stay, plus
   `code.first_difference_function_address`). The function holding it is `cause: true` (`(cause)` in the text). After

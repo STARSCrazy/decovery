@@ -128,6 +128,21 @@ overlay list over unchanged.
 its C name when that is unique; a C name used in several overlays (`ovmain`) is an error that lists the candidates.
 `diagnose --deep` is not available for overlay functions (the `decomp-legacy` plugin takes `flat:` and `seg:` only).
 
+An overlay module too large for the compiler in one piece is split into several source files and listed in link
+order (ADR 0013); building any of them builds the others too and compares the whole module:
+
+```toml
+[[rebuild.module]]
+overlay = "NPC"
+files = ["npc.c", "npc_b.c"]
+```
+
+The build warns when the code of one file does not end where the functions of the next begin. Uninitialised globals
+the files share (Aztec common symbols) are placed in the module's BSS in order of first appearance and count into its
+size. Aztec cuts identifiers to 31 characters (profile key `name_length`); the build matches a cut name with the longer
+knowledge name, and `annotate --name` warns about a longer name. The memory DOS allocates behind an MZ image
+(`minalloc`: uninitialised data, stack) belongs to the memory map, so globals there can be named.
+
 The compilers run in an emulator plugin:
 
 - `decovery setup unicorn-dos` creates a venv with the `unicorn-dos` plugin and the unicorn emulator (installed by pip)
