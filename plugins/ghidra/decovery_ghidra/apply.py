@@ -183,16 +183,20 @@ def without_keyword(type_text: str) -> str:
     return re.sub(r"\b(?:struct|union|enum)\s+(?=\w)", "", type_text)
 
 
-def signature_for_ghidra(signature: str) -> tuple[str, str | None]:
+def signature_for_ghidra(signature: str, name: str | None = None) -> tuple[str, str | None]:
     """A prototype in the form Ghidra's FunctionSignatureParser understands, and its calling convention apart.
     The parser knows no calling convention ('int __cdecl f(...)' -> return type 'int __cdecl') and splits return
-    type and name at the last space ('char *strcpy(...)' -> name '*strcpy')."""
+    type and name at the last space ('char *strcpy(...)' -> name '*strcpy'). With `name`, the prototype's own
+    function name is replaced by it: Ghidra renames the function to the prototype's name, so a knowledge name that
+    differs from its prototype's would be lost."""
     signature = without_keyword(signature.strip().rstrip(";"))
     head, paren, rest = signature.partition("(")
     convention = None
     if m := _OWN_CALLING_CONVENTION.search(head):
         convention, head = m.group(0), head[: m.start()] + " " + head[m.end() :]
     head = re.sub(r"\*(\w+\s*)$", r"* \1", re.sub(r"\s+", " ", head).strip())
+    if name and paren:
+        head = re.sub(r"\w+$", lambda _: name, head.rstrip())
     return head + paren + rest, convention
 
 
@@ -398,7 +402,9 @@ class GhidraApplier:
                     continue
                 s = active.get(a)
                 default = mapping.default_name(a)
-                if not (s and s.name) and str(f.getName()) != default:
+                library = f.getSymbol().getSource() == SourceType.ANALYSIS and any(
+                    str(t.getName()) == "LIBRARY" for t in f.getTags())  # named by its bytes (aztec.py)
+                if not (s and s.name) and str(f.getName()) != default and not library:
                     try:
                         f.setName(default, SourceType.ANALYSIS)
                     except Exception as exc:
@@ -465,6 +471,8 @@ class GhidraApplier:
         for sym in list(st.getAllSymbols(True)):
             if sym.getSource() != SourceType.USER_DEFINED or sym.getSymbolType() != SymbolType.LABEL:
                 continue
+            if not sym.getParentNamespace().isGlobal():
+                continue  # knowledge labels are global; e.g. jump-table overrides live in their function
             a = self.to_spec(sym.getAddress()) if sym.getAddress().isMemoryAddress() else None
             s = active.get(a) if a else None
             if s and s.kind != "function" and s.name == str(sym.getName()):
@@ -592,7 +600,7 @@ class GhidraApplier:
             if s.name:  # before the signature: a prototype Ghidra rejects costs only the prototype
                 f.setName(s.name, SourceType.USER_DEFINED)
             if s.signature:
-                text, convention = signature_for_ghidra(s.signature)
+                text, convention = signature_for_ghidra(s.signature, s.name)
                 signature = FunctionSignatureParser(p.getDataTypeManager(), None).parse(f.getSignature(), text)
                 if convention:
                     signature.setCallingConvention(convention)

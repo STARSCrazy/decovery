@@ -207,7 +207,12 @@ class PluginTests(unittest.TestCase):
             self.assertEqual(language_id, language)
             self.assertEqual(Path(location), (self.root / arch).resolve())
             self.assertEqual(
-                options, {"calling_convention": None, "aggressive_instruction_finder": arch == "x86-flat-32"}
+                options,
+                {
+                    "calling_convention": None,
+                    "aggressive_instruction_finder": arch == "x86-flat-32",
+                    "decompiler_parameter_id": arch == "x86-real-16",
+                },
             )
             self.assertEqual(len(blocks), 1)
             self.assertEqual(blocks[0].name, "code")
@@ -255,6 +260,7 @@ class PluginTests(unittest.TestCase):
                 "program_hash": "a" * 64,
                 "ghidra_version": EXPECTED_GHIDRA_VERSION,
                 "calling_convention": None,
+                "import_setup": 5,
             },
         )
         before = (self.root / "proj" / "project.json").read_bytes()
@@ -482,6 +488,7 @@ class PluginTests(unittest.TestCase):
             backend = FakeBackend()
             run(self.plugin_for(backend), self.open_msg(arch=arch, project_dir=self.root / arch))
             self.assertIs(backend.opened[4]["aggressive_instruction_finder"], expected, arch)
+            self.assertIs(backend.opened[4]["decompiler_parameter_id"], not expected, arch)
 
     def test_io_errors_are_32012(self):
         blocker = self.root / "blocker"
@@ -641,6 +648,7 @@ class PluginTests(unittest.TestCase):
     def test_backend_reads_markup_and_high_function_without_starting_ghidra(self):
         backend = GhidraBackend()
         backend._program = mock.Mock()
+        backend._program.getUsrPropertyManager.return_value.getStringPropertyMap.return_value = None
         backend._pyghidra = mock.Mock()
         backend._decompiler = mock.Mock()
         backend._to_g = lambda address: address
@@ -823,6 +831,9 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(
             apply_mod.signature_for_ghidra("struct foo *__watcall g(void)"), ("foo * g(void)", "__watcall")
         )
+        self.assertEqual(apply_mod.signature_for_ghidra("unsigned long read_rec(int r)", "read_record"),
+                         ("unsigned long read_record(int r)", None))
+        self.assertEqual(apply_mod.signature_for_ghidra("char *f(void)", "g"), ("char * g(void)", None))
 
     def test_clean_c_and_declarations(self):
         text = "#include <x.h>\n/* c */ typedef int far score; // trailing\nstruct s { int a; /* +0x0 */ };\n"

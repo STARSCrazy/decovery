@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import os
+import struct
 import sys
 import tempfile
 import unittest
@@ -150,6 +151,328 @@ class LocalGhidraTests(unittest.TestCase):
             # the saved project is reused by the next open
             again = run(build_plugin(), opening, req(3, "shutdown"))
             self.assertEqual(by_id(again, 2)["result"]["reused"], True)
+
+    def test_two_overlays_at_one_address(self):
+        """ADR 0011: overlays sharing a processor address get their own address spaces and `ovl:` addresses."""
+
+        def overlay_code(filler: int) -> bytes:
+            code = bytearray([filler]) * 32
+            code[0:4] = b"\xe8\x0d\x00\xc3"  # call 0010; ret
+            code[0x10] = 0xC3  # ret
+            return bytes(code)
+
+        def region(name, start, data):
+            return {"name": name, "start": start, "size": len(data), "arch": "x86-real-16", "permissions": "r-x",
+                    "blob": inline_blob(data)}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            program = {
+                "format": "mz",
+                "entry_points": ["seg:1000:0000"],
+                "regions": [
+                    region("image", "seg:1000:0000", b"\xc3" + b"\x90" * 15),
+                    region("OVA.code", "ovl:OVA:2000:0000", overlay_code(0x90)),
+                    region("OVB.code", "ovl:OVB:2000:0000", overlay_code(0xCC)),
+                ],
+            }
+            symbols = [
+                {"address": a, "kind": "function", "name": n, "locals": [], "line_comments": []}
+                for a, n in (("ovl:OVA:2000:0000", "a_main"), ("ovl:OVA:2000:0010", "a_helper"),
+                             ("ovl:OVB:2000:0000", "b_main"), ("ovl:OVB:2000:0010", "b_helper"))
+            ]
+            out_path = root / "export.json"
+            out = run(
+                build_plugin(),
+                req(2, "analyzer/open", {"program": program, "project_dir": str(root / "ghidra"),
+                                         "program_hash": "e" * 64}),
+                req(3, "analyzer/apply", {"symbols": symbols, "types_h": "", "references": []}),
+                req(4, "analyzer/export", {"out_path": str(out_path)}),
+                req(5, "decompiler/decompile", {"addresses": ["ovl:OVB:2000:0000"], "out_dir": str(root / "c")}),
+                req(6, "shutdown"),
+            )
+            self.assertEqual(by_id(out, 3)["result"]["applied"], 4, by_id(out, 3))
+            data = json.loads(out_path.read_text(encoding="utf-8"))
+            starts = {f["start"]: f.get("name") for f in data["functions"]}
+            for address, name in (("ovl:OVA:2000:0000", "a_main"), ("ovl:OVA:2000:0010", "a_helper"),
+                                  ("ovl:OVB:2000:0000", "b_main"), ("ovl:OVB:2000:0010", "b_helper")):
+                self.assertEqual(starts.get(address), name, data["functions"])
+            calls = {(c["caller"], c["callee"]) for c in data["calls"]}
+            self.assertEqual(
+                calls,
+                {("ovl:OVA:2000:0000", "ovl:OVA:2000:0010"), ("ovl:OVB:2000:0000", "ovl:OVB:2000:0010")},
+            )
+            decompiled = by_id(out, 5)["result"][0]
+            self.assertIn("path", decompiled, decompiled)
+            self.assertIn("b_helper", Path(decompiled["path"]).read_text(encoding="utf-8"))
+
+    def test_aztec_overlay_reads_its_data_segment(self):
+        """Overlay data blocks give DS: `mov ax,[0x0020]` reads OVA.data, and the label shows the DS offset."""
+
+        def region(name, start, data, permissions):
+            return {"name": name, "start": start, "size": len(data), "arch": "x86-real-16",
+                    "permissions": permissions, "blob": inline_blob(data)}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            program = {
+                "format": "mz",
+                "entry_points": ["ovl:OVA:0000:0100"],
+                "regions": [
+                    region("image", "seg:1000:0000", b"\xc3" + b"\x90" * 15, "rwx"),
+                    # mov ax,[0x0020]; add ax,[0x0300]; ret
+                    region("OVA.code", "ovl:OVA:0000:0100", b"\xa1\x20\x00\x03\x06\x00\x03\xc3", "r-x"),
+                    region("OVA.data", "ovl:OVA:0050:0000", b"\x07" * 0x40, "rw-"),
+                ],
+            }
+            out_path = root / "export.json"
+            out = run(
+                build_plugin(),
+                req(2, "analyzer/open", {"program": program, "project_dir": str(root / "ghidra"),
+                                         "program_hash": "d" * 64}),
+                req(3, "analyzer/export", {"out_path": str(out_path)}),
+                req(4, "decompiler/decompile", {"addresses": ["ovl:OVA:0000:0100"], "out_dir": str(root / "c")}),
+                req(5, "analyzer/apply", {"symbols": [
+                    {"address": "seg:0050:0300", "kind": "global", "name": "word_0300", "locals": [],
+                     "line_comments": []},
+                    {"address": "ovl:OVA:0050:0020", "kind": "global", "name": "ova_word", "locals": [],
+                     "line_comments": []},
+                ], "types_h": "", "references": []}),
+                req(6, "decompiler/decompile", {"addresses": ["ovl:OVA:0000:0100"], "out_dir": str(root / "c2")}),
+                req(7, "shutdown"),
+            )
+            data = json.loads(out_path.read_text(encoding="utf-8"))
+            self.assertIn({"function": "ovl:OVA:0000:0100", "address": "ovl:OVA:0050:0020", "kind": "read"},
+                          data["data_accesses"])
+            decompiled = by_id(out, 4)["result"][0]
+            self.assertIn("path", decompiled, decompiled)
+            code = Path(decompiled["path"]).read_text(encoding="utf-8")
+            self.assertIn("DAT_OVA_0050_0020", code)
+            self.assertIn("DAT_0050_0300", code)  # outside the overlay's data: the main program's DS
+            self.assertIn("result", by_id(out, 5), by_id(out, 5))
+            named = Path(by_id(out, 6)["result"][0]["path"]).read_text(encoding="utf-8")
+            self.assertIn("word_0300", named)
+            self.assertIn("ova_word", named)
+
+    def test_aztec_csav_frame_and_inline_switch_table(self):
+        """`mov ax,-4; call $csav` gives BP; `mov cx,3; call $swt` with an inline table becomes a switch."""
+        from test_aztec import CSAV, SWITCH, near_call
+
+        image = bytearray(b"\xcc" * 0x400)
+        image[0x000:0x003] = b"\xb8\xfc\xff"  # mov ax,-4
+        image[0x003:0x006] = near_call(0x003, 0x100)  # call $csav
+        image[0x006:0x009] = b"\x8b\x46\x04"  # mov ax,[bp+4]
+        image[0x009:0x00C] = b"\xb9\x03\x00"  # mov cx,3
+        image[0x00C:0x00F] = near_call(0x00C, 0x200)  # call $swt
+        image[0x00F:0x019] = struct.pack("<5H", 1, 2, 0x19, 0x1D, 0x21)
+        image[0x019:0x01C] = near_call(0x019, 0x300)  # case 1: call g1
+        image[0x01C] = 0xC3
+        image[0x01D:0x020] = near_call(0x01D, 0x310)  # case 2: call g2
+        image[0x020] = 0xC3
+        image[0x021:0x025] = b"\xb8\x00\x00\xc3"  # default: return 0
+        image[0x100:0x100 + len(CSAV)] = CSAV
+        image[0x200:0x200 + len(SWITCH)] = SWITCH
+        image[0x300] = image[0x310] = 0xC3
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            program = {
+                "format": "mz",
+                "entry_points": ["seg:1000:0000"],
+                "regions": [{"name": "image", "start": "seg:1000:0000", "size": len(image), "arch": "x86-real-16",
+                             "permissions": "rwx", "blob": inline_blob(bytes(image))}],
+            }
+            symbols = [{"address": a, "kind": "function", "name": n, "locals": [], "line_comments": []}
+                       for a, n in (("seg:1000:0300", "g1"), ("seg:1000:0310", "g2"))]
+            symbols.append({"address": "seg:1000:0000", "kind": "function", "name": "dispatch",
+                            "signature": "int dispatch(int key, char *text)", "locals": [], "line_comments": []})
+            out_path = root / "export.json"
+            out = run(
+                build_plugin(),
+                req(2, "analyzer/open", {"program": program, "project_dir": str(root / "ghidra"),
+                                         "program_hash": "c" * 64}),
+                req(3, "analyzer/apply", {"symbols": symbols, "types_h": "", "references": []}),
+                req(4, "analyzer/export", {"out_path": str(out_path)}),
+                req(5, "decompiler/decompile", {"addresses": ["seg:1000:0000"], "out_dir": str(root / "c")}),
+                req(6, "shutdown"),
+            )
+            self.assertIn("result", by_id(out, 2), by_id(out, 2))
+            data = json.loads(out_path.read_text(encoding="utf-8"))
+            calls = {(c["caller"], c["callee"]) for c in data["calls"]}
+            self.assertIn(("seg:1000:0000", "seg:1000:0300"), calls)
+            self.assertIn(("seg:1000:0000", "seg:1000:0310"), calls)
+            self.assertNotIn("seg:1000:000F", [f["start"] for f in data["functions"]])
+            decompiled = by_id(out, 5)["result"][0]
+            self.assertIn("path", decompiled, decompiled)
+            code = Path(decompiled["path"]).read_text(encoding="utf-8")
+            self.assertIn("g1", code)
+            self.assertIn("g2", code)
+            self.assertNotIn("unaff_BP", code)
+            self.assertIn("int __cdecl16near dispatch(int key,char *text)", code)
+            self.assertIn("switch(key)", code)
+            self.assertIn("case 0x1:", code)
+            self.assertIn("case 0x2:", code)
+            self.assertIn("default:", code)
+            self.assertNotIn("case 0x1001", code)
+            self.assertNotIn("case default", code)
+            self.assertNotIn("Switch is manually overridden", code)
+            self.assertNotIn("Removing unreachable block", code)
+            self.assertIn("switch (AX): 0x1 -> 0019, 0x2 -> 001D; default -> 0021", code)
+
+    def test_aztec_switch_on_a_byte(self):
+        """`mov al,[x]; sub ah,ah; mov cx,3; call $swt`: the decompiler switches on the byte and cannot back the
+        targets up to it (labels 0xbad1abe1...); the cases still get the table's values."""
+        from test_aztec import SWITCH, near_call
+
+        image = bytearray(b"\xcc" * 0x400)
+        image[0x000:0x005] = b"\xa0\x80\x03\x2a\xe4"  # mov al,[0x380]; sub ah,ah
+        image[0x005:0x008] = b"\xb9\x03\x00"  # mov cx,3
+        image[0x008:0x00B] = near_call(0x008, 0x200)  # call $swt
+        image[0x00B:0x015] = struct.pack("<5H", 0x12, 0x15, 0x15, 0x19, 0x1D)
+        image[0x015:0x018] = near_call(0x015, 0x300)  # case 0x12: call g1
+        image[0x018] = 0xC3
+        image[0x019:0x01C] = near_call(0x019, 0x310)  # case 0x15: call g2
+        image[0x01C] = 0xC3
+        image[0x01D:0x021] = b"\xb8\x00\x00\xc3"  # default: return 0
+        image[0x200:0x200 + len(SWITCH)] = SWITCH
+        image[0x300] = image[0x310] = 0xC3
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            program = {
+                "format": "mz",
+                "entry_points": ["seg:1000:0000"],
+                "regions": [{"name": "image", "start": "seg:1000:0000", "size": len(image), "arch": "x86-real-16",
+                             "permissions": "rwx", "blob": inline_blob(bytes(image))}],
+            }
+            symbols = [{"address": a, "kind": "function", "name": n, "locals": [], "line_comments": []}
+                       for a, n in (("seg:1000:0300", "g1"), ("seg:1000:0310", "g2"))]
+            out = run(
+                build_plugin(),
+                req(2, "analyzer/open", {"program": program, "project_dir": str(root / "ghidra"),
+                                         "program_hash": "a1" * 32}),
+                req(3, "analyzer/apply", {"symbols": symbols, "types_h": "", "references": []}),
+                req(4, "decompiler/decompile", {"addresses": ["seg:1000:0000"], "out_dir": str(root / "c")}),
+                req(5, "shutdown"),
+            )
+            decompiled = by_id(out, 4)["result"][0]
+            self.assertIn("path", decompiled, decompiled)
+            code = Path(decompiled["path"]).read_text(encoding="utf-8")
+            self.assertNotIn("bad1abe1", code)
+            self.assertIn("case 0x12:", code)
+            self.assertIn("case 0x15:", code)
+            self.assertIn("default:", code)
+            self.assertNotIn("case default", code)
+            self.assertIn("g1", code)
+            self.assertIn("g2", code)
+
+    def test_aztec_runtime_helpers(self):
+        """`$ldv` takes DX:AX and BX:CX and returns DX:AX; helpers decompile to a stub; no injection notices; an
+        unreachable `ret` after an endless loop belongs to its function."""
+        from test_aztec import CSAV, LONG_DIVIDE, near_call
+
+        from decovery_ghidra import aztec
+
+        image = bytearray(b"\xcc" * 0x400)
+        image[0x000:0x003] = b"\xb8\x00\x00"  # mov ax,0
+        image[0x003:0x006] = near_call(0x003, 0x100)  # call $csav
+        image[0x006:0x012] = bytes.fromhex("8B 46 04 99 8B 4E 06 BB 00 00 90 90")  # ax=[bp+4]; cwd; cx=[bp+6]; bx=0
+        image[0x012:0x015] = near_call(0x012, 0x200)  # call $ldv
+        image[0x015] = 0xC3
+        image[0x020:0x023] = b"\xb8\x00\x00"  # mov ax,0
+        image[0x023:0x026] = near_call(0x023, 0x100)  # call $csav
+        image[0x026:0x029] = near_call(0x026, 0x310)  # loop: call g
+        image[0x029:0x02B] = b"\xeb\xfb"  # jmp loop
+        image[0x02B] = 0xC3  # unreachable ret
+        image[0x100:0x100 + len(CSAV)] = CSAV
+        image[0x200:0x200 + len(LONG_DIVIDE)] = LONG_DIVIDE
+        image[0x21E:0x221] = near_call(0x21E, 0x280)
+        image[0x221:0x223] = b"\x5f\xc3"  # pop di; ret
+        image[0x280:0x283] = b"\x33\xdb\xc3"  # unsigned divider (stand-in): xor bx,bx; ret
+        image[0x310] = 0xC3
+        image[0x340:0x340 + len(aztec.SWAPMEM)] = aztec.SWAPMEM
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            program = {
+                "format": "mz",
+                "entry_points": ["seg:1000:0000", "seg:1000:0020"],
+                "regions": [{"name": "image", "start": "seg:1000:0000", "size": len(image), "arch": "x86-real-16",
+                             "permissions": "rwx", "blob": inline_blob(bytes(image))}],
+            }
+            symbols = [{"address": "seg:1000:0200", "kind": "function", "name": "ldv", "locals": [],
+                        "line_comments": []},
+                       {"address": "seg:1000:0000", "kind": "function", "name": "ratio",
+                        "signature": "long ratio_old(int a, int b)", "locals": [], "line_comments": []}]
+            out_path = root / "export.json"
+            out = run(
+                build_plugin(),
+                req(2, "analyzer/open", {"program": program, "project_dir": str(root / "ghidra"),
+                                         "program_hash": "f" * 64}),
+                req(3, "analyzer/apply", {"symbols": symbols, "types_h": "", "references": [],
+                                          "calling_convention": "__cdecl"}),
+                req(4, "analyzer/export", {"out_path": str(out_path)}),
+                req(5, "decompiler/decompile", {"addresses": ["seg:1000:0000", "seg:1000:0200", "seg:1000:0100"],
+                                                "out_dir": str(root / "c")}),
+                req(6, "shutdown"),
+            )
+            self.assertIn("result", by_id(out, 3), by_id(out, 3))
+            data = json.loads(out_path.read_text(encoding="utf-8"))
+            ends = {f["start"]: f["end"] for f in data["functions"]}
+            self.assertEqual(ends.get("seg:1000:0020"), "seg:1000:002B")
+            names = {f["start"]: f["name"] for f in data["functions"]}
+            self.assertEqual(names.get("seg:1000:0340"), "swapmem", names)
+            caller, helper, csav = (Path(r["path"]).read_text(encoding="utf-8") for r in by_id(out, 5)["result"])
+            self.assertIn("ratio(int a,int b)", caller)
+            self.assertNotIn("replaced with injection", caller)
+            self.assertRegex(caller, r"ldv\([^)]")
+            self.assertIn("Aztec C86 run-time helper: $ldv", helper)
+            self.assertIn("long ldv(long a, long b);", helper)
+            self.assertIn("Aztec C86 run-time helper: $csav", csav)
+
+    def test_aztec_dense_switch_in_an_overlay(self):
+        """`cmp ax,n; jae; xchg ax,bx; shl bx,1; jmp cs:[bx+table]` with the table in front, in an overlay at
+        offsets above 0x8000: a switch on the values, not code, and no negative address labels."""
+        from test_aztec import near_call
+
+        code = bytearray(b"\xcc" * 0x40)
+        code[0x00:0x03] = b"\xa1\x10\x00"  # mov ax,[0x0010]
+        code[0x03:0x05] = b"\xeb\x06"  # jmp 0x800B
+        code[0x05:0x0B] = struct.pack("<3H", 0x8020, 0x8024, 0x8028)
+        code[0x0B:0x0E] = b"\x3d\x03\x00"  # cmp ax,3
+        code[0x0E:0x18] = bytes.fromhex("73 08 93 D1 E3 2E FF A7 05 80")
+        code[0x18:0x1C] = b"\xb8\x00\x00\xc3"  # default: return 0
+        code[0x20:0x23] = near_call(0x8020, 0x8030)  # case 0: call g1
+        code[0x23] = 0xC3
+        code[0x24:0x27] = near_call(0x8024, 0x8034)  # case 1: call g2
+        code[0x27] = 0xC3
+        code[0x28:0x2C] = b"\xb8\x07\x00\xc3"  # case 2: return 7
+        code[0x30] = code[0x34] = 0xC3
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            program = {
+                "format": "mz",
+                "entry_points": ["ovl:OVA:0000:8000"],
+                "regions": [
+                    {"name": "image", "start": "seg:1000:0000", "size": 16, "arch": "x86-real-16",
+                     "permissions": "rwx", "blob": inline_blob(b"\xc3" + b"\x90" * 15)},
+                    {"name": "OVA.code", "start": "ovl:OVA:0000:8000", "size": len(code), "arch": "x86-real-16",
+                     "permissions": "r-x", "blob": inline_blob(bytes(code))},
+                ],
+            }
+            symbols = [{"address": a, "kind": "function", "name": n, "locals": [], "line_comments": []}
+                       for a, n in (("ovl:OVA:0000:8030", "g1"), ("ovl:OVA:0000:8034", "g2"))]
+            out = run(
+                build_plugin(),
+                req(2, "analyzer/open", {"program": program, "project_dir": str(root / "ghidra"),
+                                         "program_hash": "e" * 64}),
+                req(3, "analyzer/apply", {"symbols": symbols, "types_h": "", "references": []}),
+                req(4, "decompiler/decompile", {"addresses": ["ovl:OVA:0000:8000"], "out_dir": str(root / "c")}),
+                req(5, "shutdown"),
+            )
+            decompiled = by_id(out, 4)["result"][0]
+            self.assertIn("path", decompiled, decompiled)
+            text = Path(decompiled["path"]).read_text(encoding="utf-8")
+            for wanted in ("g1", "g2", "case 0x0:", "case 0x1:", "case 0x2:", "return 7;"):
+                self.assertIn(wanted, text)
+            self.assertNotIn("case -0x", text)
 
 
 if __name__ == "__main__":
