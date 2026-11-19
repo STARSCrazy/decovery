@@ -465,6 +465,8 @@ class GhidraApplier:
         for sym in list(st.getAllSymbols(True)):
             if sym.getSource() != SourceType.USER_DEFINED or sym.getSymbolType() != SymbolType.LABEL:
                 continue
+            if not sym.getParentNamespace().isGlobal():
+                continue  # knowledge labels are global; e.g. jump-table overrides live in their function
             a = self.to_spec(sym.getAddress()) if sym.getAddress().isMemoryAddress() else None
             s = active.get(a) if a else None
             if s and s.kind != "function" and s.name == str(sym.getName()):
