@@ -215,7 +215,11 @@ class Machine:
         for a in range(0, self.floor, PAGE):
             if now[a : a + PAGE] != original[a : a + PAGE]:
                 mu.mem_write(a, original[a : a + PAGE])
+                # a host write leaves the code translated from the page: a run that loaded code there (CC's
+                # passes) would hand it to the next run
+                mu.ctl_remove_cache(a, a + PAGE)
         mu.mem_write(REAL_LIN, bytes(0x110000))
+        mu.ctl_remove_cache(REAL_LIN, REAL_LIN + 0x110000)
         mu.context_restore(self.start)
 
 
