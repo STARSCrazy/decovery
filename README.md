@@ -139,8 +139,9 @@ decovery setup toolchain aztec-c86-4.2b <dir>      # BIN/CC.EXE and its passes, 
 
 This writes `[toolchains]` into the user config; `[rebuild] tool_dir` in a workspace overrides it. The profiles in
 `profiles/` (`watcom-9.5`, `watcom-10.6`, `turbo-c-2.0`, `aztec-c86-3.4b`, `aztec-c86-4.2b`, `aztec-c86-5.2a`)
-describe how each compiler and linker is called. Aztec C86 has no linker step: its objects are compared against the
-original image with the relocated fields as gaps, and a module of an overlay is compared as a whole (code, data, BSS).
+describe how each compiler and linker is called. Aztec C86 objects are compared against the original image with the
+relocated fields as gaps, and a module of an overlay is compared as a whole (code, data, BSS); with `[link]` a full
+build also links the whole program (see below).
 Assembler sources (`.asm`) of an Aztec C86 4.2b workspace are assembled by its AS (`BIN/AS.EXE` in the same
 directory, called as `AS X.ASM`); a function there runs from a public label to the next one, local labels stay inside
 it (ADR 0015). Without the toolchain, the built-in assembler takes byte-listing sources.
@@ -157,6 +158,25 @@ A full `build` places each member at the knowledge function one of its symbols n
 where its code matches a function no source rebuilds, and compares every knowledge function inside it with link gaps
 (`library: 78 of 78 functions identical`; records name `C.LIB(strcmp)`). `decovery compare --object C.LIB --symbol
 '$csav'` compares one member function by its object symbol.
+
+With `[link]` a full `build` of an Aztec C86 workspace links the root program and its overlays with LN through the
+runners and compares each whole file with the original (ADR 0018):
+
+```toml
+[link]
+output = "GAME.EXE"
+objects = ["data.c", "main.c", "helpers.asm", "OVLD.O"]  # link order: sources and library objects
+flags = "+c 8000 +d 1000 -r"
+overlay_objects = ["OVBGN.O"]          # after each overlay's own objects, before the root's .RSM
+
+[[link.overlay]]
+name = "MAZE"                          # objects default to its [[rebuild.module]] files, else maze.c
+objects = ["mazebss.c", "maze_p1.c"]   # commons-only module first: the order places the commons
+```
+
+The summary says `link: root equal; overlays 2 of 2 equal`; a file that differs gets a hint with the first
+difference (header field, image, code or data, address and knowledge name) and fails the CLI build. A long object
+list goes to LN through a `-f` control file; the linked files are kept in `cache/rebuild/link/`.
 
 ## Overlays
 

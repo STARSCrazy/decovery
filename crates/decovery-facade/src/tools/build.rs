@@ -750,6 +750,33 @@ pub fn build(
         library_report = outcome.report;
     }
 
+    // whole-program link (ADR 0018): in a full build, the root program and its overlays from these objects
+    let link_started = Instant::now();
+    let mut link_report = None;
+    if all && let Some(config) = ws.config.link.as_ref() {
+        let inputs: Vec<(&str, Option<&[u8]>)> = sources
+            .iter()
+            .map(|s| {
+                (
+                    s.name.as_str(),
+                    s.compiled.as_ref().and_then(|c| c.object.as_deref()),
+                )
+            })
+            .collect();
+        let report = super::whole_link::link_whole(
+            &ws,
+            &profile,
+            &rebuild,
+            config,
+            &inputs,
+            control,
+            &mut warnings,
+        )?;
+        hints.extend(report.hints.iter().cloned());
+        link_report = Some(report);
+    }
+    let link_ms = ms(link_started.elapsed());
+
     let fingerprint = fingerprint_of(&ws, &profile);
 
     // record under the lock; from here on a cancel takes effect after recording
@@ -847,6 +874,7 @@ pub fn build(
         "compile_ms": compile_ms,
         "compare_ms": compare_ms,
         "record_ms": record_ms,
+        "link_ms": link_ms,
         "total_ms": ms(ended - started),
         "jobs": jobs,
         "cached": cached,
@@ -898,6 +926,10 @@ pub fn build(
         }
         if let Some(summary) = library_summary {
             response.summary.push_str(&format!("; {summary}"));
+        }
+        if let Some(report) = link_report {
+            response.summary.push_str(&format!("; {}", report.summary));
+            response.data["link"] = report.data;
         }
         response
     })

@@ -1857,7 +1857,9 @@ fn build(
         && counts["identical"] == counts["functions"]
         && counts["leading_differs"].as_u64().unwrap_or(0) == 0
         // a function without counterpart in the original was not compared at all
-        && counts["unmatched"].as_u64().unwrap_or(0) == 0;
+        && counts["unmatched"].as_u64().unwrap_or(0) == 0
+        // a whole-program link that is not equal to the original fails the build (ADR 0018)
+        && d["link"]["equal"].as_bool() != Some(false);
     if json {
         print_json(&response)?;
         return Ok(complete);

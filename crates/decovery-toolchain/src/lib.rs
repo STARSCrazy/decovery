@@ -28,7 +28,7 @@ pub use le_link::{
     LE_STUB_FILE, SegmentPlan, build_insert, le_linker, le_module, link_le, module_name,
     response_file, segment_plan, usable_inserts,
 };
-pub use link::{DEFAULT_STARTUP, Linked, link, startup_object};
+pub use link::{DEFAULT_STARTUP, Linked, link, run_whole_link, startup_object};
 pub use map::{LinkMap, MapPublic, MapSegment, parse_tlink_map};
 pub use runner::{
     JobOutcome, JobStatus, JobTimes, Mount, NativeRunner, PluginRunner, RunJob, RunRequest, Runner,
@@ -46,5 +46,5 @@ pub use staging::{
 pub use error::ToolchainError;
 pub use profile::{
     AssemblerSpec, LinkerSpec, LiteralSpec, MapFormat, MapSpec, ObjectFormat, Profile, SearchSpec,
-    assembler_profile, profile, profiles, rebuild_profile, tool_dir,
+    WholeLinkLine, assembler_profile, profile, profiles, rebuild_profile, tool_dir,
 };

@@ -802,6 +802,7 @@ fn convert_config(table: toml::Table, cx: &mut Ctx) -> Result<WorkspaceConfig, M
         legacy: None,
         plugins: Default::default(),
         overlays,
+        link: None,
     })
 }
 

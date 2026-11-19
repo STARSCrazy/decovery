@@ -70,6 +70,13 @@ fn link_mz(root: &Path, mut ws: Workspace, control: &Control) -> Result<Response
     let progress = control.progress;
     let started = Instant::now();
     let (profile, default_flags) = rebuild_profile(&ws).map_err(toolchain)?;
+    if profile.object_format == ObjectFormat::Aztec {
+        return Err(FacadeError::Invalid(
+            "link does not link Aztec C86 programs: configure [link] in decovery.toml and run a full build \
+             (ADR 0018)"
+                .into(),
+        ));
+    }
     let mut rebuild = ws.config.rebuild.clone().unwrap_or_default();
     let flag_warnings = super::file_flags::apply_source_flags(root, &mut rebuild);
     let link_config = rebuild.link.clone().ok_or_else(|| {

@@ -82,6 +82,27 @@ pub fn link(
     )
 }
 
+/// Runs the whole-program link line `line` of `profile` (ADR 0018) in one runner job in `build_dir` (where the
+/// objects and any control file already lie) and reads the linked `file`; `also` names further files the linker
+/// writes there (a symbol file the next link reads). Returns the result and the runners' warnings; a runner that
+/// cannot run at all is an error.
+#[allow(clippy::too_many_arguments)]
+pub fn run_whole_link(
+    ws: &Workspace,
+    profile: &Profile,
+    line: String,
+    file: String,
+    also: &[String],
+    build_dir: &Path,
+    runners: &[Box<dyn Runner>],
+    cancel: Option<CancelToken>,
+    progress: &dyn Fn(Progress),
+) -> Result<(Linked, Vec<String>), ToolchainError> {
+    run_linker_with(
+        ws, profile, line, file, None, also, build_dir, runners, cancel, progress,
+    )
+}
+
 /// Runs the link command `line` of `profile` in one runner job (build dir `C:`, tool dir `D:`) after the profile's
 /// prelude and reads the linked `file` (and the `map` file, when given and written) from `build_dir`. Returns the result and the runners' warnings; a runner that
 /// cannot run at all is an error.
@@ -92,6 +113,33 @@ pub(crate) fn run_linker(
     line: String,
     file: String,
     map: Option<String>,
+    build_dir: &Path,
+    runners: &[Box<dyn Runner>],
+    cancel: Option<CancelToken>,
+    progress: &dyn Fn(Progress),
+) -> Result<(Linked, Vec<String>), ToolchainError> {
+    run_linker_with(
+        ws,
+        profile,
+        line,
+        file,
+        map,
+        &[],
+        build_dir,
+        runners,
+        cancel,
+        progress,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_linker_with(
+    ws: &Workspace,
+    profile: &Profile,
+    line: String,
+    file: String,
+    map: Option<String>,
+    also: &[String],
     build_dir: &Path,
     runners: &[Box<dyn Runner>],
     cancel: Option<CancelToken>,
@@ -113,7 +161,12 @@ pub(crate) fn run_linker(
             Mount::new('C', absolute(build_dir), true),
             Mount::new('D', absolute(&dir), false),
         ],
-        vec![RunJob::new(commands, vec![file.clone()])],
+        vec![RunJob::new(
+            commands,
+            std::iter::once(file.clone())
+                .chain(also.iter().cloned())
+                .collect(),
+        )],
         timeout,
     );
     let (outcomes, warnings) = run_with_fallback_reporting(runners, &request, cancel, progress)

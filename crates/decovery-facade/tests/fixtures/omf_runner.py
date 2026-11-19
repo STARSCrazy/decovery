@@ -15,6 +15,12 @@ A job whose last command runs WLINK is an LE link job: its command line goes to 
 (`NB.OBJ`, `NB.LNK`, `STUB.EXE`) are copied to `linked/` in FAKE_OMF_DIR, and `REBUILD.EXE` from FAKE_OMF_DIR is
 copied into the C mount as the program `NB.LNK` names (exit 0); without it the job prints an error and exits 1.
 
+A job whose last command runs LN is an Aztec C86 whole-program link (ADR 0018): its command line is appended to
+`link.log` (the objects of a `-f` control file on the next line, after `  -f `); it fails (exit 1) when an input
+of the line is missing (bare names in the C mount, `D:\\...` in the D mount), else copies the file `-o` names from
+FAKE_OMF_DIR into the C mount (exit 0) and, with `-r`, writes `<stem>.RSM` beside it; without that file it prints an
+undefined-symbol error and exits 1.
+
 With FAKE_OBJ_EXT set (`O` for Aztec C86), the served object is written as `X.<ext>` instead of `X.OBJ`.
 
 With FAKE_AS_ERROR=<line>:<text> a job for an `.ASM` source prints `ERROR:<X.ASM>:<line>: <text>` (the Aztec C86
@@ -79,7 +85,53 @@ def wlink_job(job, c_root):
     return {"status": "done", "exit_code": 0, "stdout": "WATCOM Linker Version 9.5\r\n"}
 
 
-def run_job(job, c_root):
+def ln_job(job, mounts):
+    c_root = mounts["C"]
+    line = job["commands"][-1]
+    append("link.log", line)
+    words = line.split()[1:]
+    out, inputs, symbols, i = None, [], False, 0
+    while i < len(words):
+        w = words[i]
+        if w == "-o":
+            out = words[i + 1]
+            i += 2
+            continue
+        if w == "-f":
+            with open(os.path.join(c_root, words[i + 1]), encoding="ascii") as f:
+                listed = [x.strip() for x in f if x.strip()]
+            append("link.log", "  -f " + " ".join(listed))
+            inputs += listed
+            i += 2
+            continue
+        if w.startswith("+"):
+            i += 2
+            continue
+        if w == "-r":
+            symbols = True
+        elif not w.startswith("-"):
+            inputs.append(w)
+        i += 1
+    for name in inputs:
+        if name.upper().startswith("D:\\"):
+            path = os.path.join(mounts["D"], *name[3:].split("\\"))
+        else:
+            path = os.path.join(c_root, name)
+        if not os.path.isfile(path):
+            return {"status": "done", "exit_code": 1, "stdout": f"cannot open {name}\r\n"}
+    served = os.path.join(OBJECTS, out)
+    if not os.path.isfile(served):
+        return {"status": "done", "exit_code": 1, "stdout": "Undefined symbol: main_\r\n"}
+    shutil.copyfile(served, os.path.join(c_root, out))
+    if symbols:
+        with open(os.path.join(c_root, out.rsplit(".", 1)[0] + ".RSM"), "wb") as f:
+            f.write(b"rsm")
+    return {"status": "done", "exit_code": 0, "stdout": "Aztec C86 linker\r\n"}
+
+
+def run_job(job, c_root, mounts):
+    if job["commands"][-1].split()[0].upper() == "LN":
+        return ln_job(job, mounts)
     if "WLINK" in job["commands"][-1].split()[0].upper():
         return wlink_job(job, c_root)
     if "TLINK" in job["commands"][-1].split()[0].upper():
@@ -126,7 +178,8 @@ def run(params, ctx):
         if ctx.wait_cancelled(60):
             append("cancel.log", "cancelled")
             ctx.check_cancelled()
-    c_root = {m["drive"]: m["path"] for m in params["mounts"]}["C"]
+    mounts = {m["drive"]: m["path"] for m in params["mounts"]}
+    c_root = mounts["C"]
     marker = os.path.join(OBJECTS, "not-run.marker")
     cut = os.environ.get("FAKE_NOT_RUN_ONCE") == "1" and len(jobs) > 1 and not os.path.exists(marker)
     results = []
@@ -135,7 +188,7 @@ def run(params, ctx):
             results.append({"status": "failed", "exit_code": None, "stdout": "",
                             "message": "job not run: an earlier job ended the batch"})
         else:
-            results.append(run_job(job, c_root))
+            results.append(run_job(job, c_root, mounts))
             if os.environ.get("FAKE_JOB_TIMES"):
                 start, end, cpu = (int(x) for x in os.environ["FAKE_JOB_TIMES"].split(":"))
                 results[-1].update(started_ms=start, ended_ms=end, cpu_ms=cpu)

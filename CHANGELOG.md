@@ -6,6 +6,13 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Whole-program link of an Aztec C86 workspace (ADR 0018): `[link]` (`output`, `objects`, `flags`, `libraries`,
+  `overlay_objects`, `overlay_flags`) and `[[link.overlay]]` (`name`, `output`, `objects`, `flags`). A full `build`
+  links the root program with LN, then each overlay against the root's `.RSM`, through the runners, and compares
+  each file with the original: header fields named, first difference with region, address and knowledge name.
+  The summary says `link: root equal; overlays N of M equal`, `data.link` has the details, a difference fails the
+  CLI build. The `aztec-c86-4.2b` profile has a `[linker]` (`library_flag`, `control_file`, `line_limit`: a long
+  object list goes through `-f`). `link` refuses Aztec C86 workspaces.
 - `annotate --kind function|global|label` (MCP `annotate` with `kind`): corrects a record's kind without editing
   `symbols.toml`. A claim ranked below the record needs `--force`; the old kind goes to the record's history with
   the evidence (ADR 0017).

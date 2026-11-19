@@ -38,3 +38,14 @@ flag_sets = [["", "+b"], ["+h", "-z"]]
 # -I only finds lmacros.h). Errors read `ERROR:X.ASM:<line>: <text>`, exit code 4 without input.
 [assembler]
 command = "AS {input}"
+
+# LN (Aztec C86 linker 4.10d), used by `build` with `[link]` (ADR 0018): one run for the root program (with `-r` it
+# writes <root>.RSM), then one run per overlay against that symbol file. Libraries go as `-l<name>` (CLIB points
+# to D:\LIB\); a line longer than the DOS command line lists the objects in a control file read with `-f`.
+[linker]
+command = "LN {flags} -o {output} {objects} {libraries}"
+library_dir = 'D:\LIB'
+output = "{name}"
+library_flag = "-l{name}"
+control_file = "-f {file}"
+line_limit = 126
