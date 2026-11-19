@@ -185,7 +185,7 @@ pub fn compare_main_data(
     let Some((base, _)) = start else {
         out.findings.push(if own.is_empty() {
             format!(
-                "data ({bytes} bytes) not compared: none of the object's functions is placed in this build, so                  nothing names its place in DS {ds:04X}; build the files that use it together with it"
+                "data ({bytes} bytes) not compared: none of the object's functions is placed in this build, so nothing names its place in DS {ds:04X}; build the files that use it together with it"
             )
         } else if total == 0 {
             format!(
