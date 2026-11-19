@@ -647,7 +647,8 @@ pub(super) fn build_variants(
     let function = canonical_function(root, &ws, analysis.as_ref(), function)?;
     let function = function.as_str();
     let (profile, default_flags) = rebuild_profile(&ws).map_err(toolchain)?;
-    let rebuild = ws.config.rebuild.clone().unwrap_or_default();
+    let mut rebuild = ws.config.rebuild.clone().unwrap_or_default();
+    let _ = super::file_flags::apply_source_flags(root, &mut rebuild);
     let file = match request.files.first() {
         Some(file) => file.clone(),
         None => file_of_function(root, function)?,

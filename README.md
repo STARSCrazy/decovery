@@ -74,6 +74,24 @@ flags = "-ox -ot -oa -4s"
 profile = "watcom-9.5"             # linker profile; MZ: libraries, flags, startup (e.g. "C0S")
 ```
 
+Flags for single source files replace the `flags` above for that file. Either list them in the config:
+
+```toml
+[rebuild.file_flags]
+"npc.c" = "+b +c"
+```
+
+or put a comment in the first ten lines of the source itself, which survives renames and does not collide in merges
+(ADR 0014):
+
+```c
+/* decovery: flags = +b +c */
+```
+
+When both are present and differ, the build warns and the source comment wins. A `[rebuild.file_flags]` entry that
+names no file in `src/` is warned about. `build` takes a file name in `src/` or a path to it (relative to the
+workspace or to `src/`, or absolute inside `src/`); `find --limit <n|all>` lifts the 100-row default.
+
 ## Building
 
 ```sh

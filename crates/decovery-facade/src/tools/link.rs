@@ -70,7 +70,8 @@ fn link_mz(root: &Path, mut ws: Workspace, control: &Control) -> Result<Response
     let progress = control.progress;
     let started = Instant::now();
     let (profile, default_flags) = rebuild_profile(&ws).map_err(toolchain)?;
-    let rebuild = ws.config.rebuild.clone().unwrap_or_default();
+    let mut rebuild = ws.config.rebuild.clone().unwrap_or_default();
+    let flag_warnings = super::file_flags::apply_source_flags(root, &mut rebuild);
     let link_config = rebuild.link.clone().ok_or_else(|| {
         FacadeError::Invalid(
             "decovery.toml has no [rebuild.link]; for example:\n[rebuild.link]\nstartup = \"C0S\"\n\
@@ -84,7 +85,7 @@ fn link_mz(root: &Path, mut ws: Workspace, control: &Control) -> Result<Response
     })?;
     let analysis = Analysis::load(root)?.filter(|a| a.target_sha256 == ws.config.target.sha256);
     let mut hints: Vec<String> = Vec::new();
-    let mut warnings: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = flag_warnings;
 
     // stage the C sources and the headers
     let set = find_sources(&root.join(super::SOURCE_DIR), &[]).map_err(toolchain)?;
@@ -334,7 +335,8 @@ fn link_le_program(
     let progress = control.progress;
     let started = Instant::now();
     let (compiler, default_flags) = rebuild_profile(&ws).map_err(toolchain)?;
-    let rebuild = ws.config.rebuild.clone().unwrap_or_default();
+    let mut rebuild = ws.config.rebuild.clone().unwrap_or_default();
+    let flag_warnings = super::file_flags::apply_source_flags(root, &mut rebuild);
     let link_config = rebuild.link.clone().unwrap_or_default();
     let profile = match &link_config.profile {
         Some(id) => decovery_toolchain::profile(id).map_err(toolchain)?,
@@ -351,7 +353,7 @@ fn link_le_program(
     })?;
     let analysis = Analysis::load(root)?.filter(|a| a.target_sha256 == ws.config.target.sha256);
     let records = read_rebuild(root)?;
-    let mut warnings: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = flag_warnings;
     let run_dir = new_run_dir(root)?;
 
     // the module

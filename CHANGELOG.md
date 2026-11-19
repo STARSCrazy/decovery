@@ -6,6 +6,14 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Per-file compiler flags in the source: a header comment `/* decovery: flags = +b +c */` (first ten lines) as an
+  alternative to `[rebuild.file_flags]` (ADR 0014). The comment wins over a differing table entry, with a warning;
+  table entries that name no file in `src/` are warned about.
+- `show`, `annotate` and every target argument accept a bare hexadecimal offset (`show 9D6B`) when exactly one
+  function of the main program or the overlays starts there; otherwise the error lists the full addresses.
+- `build` accepts source paths relative to the workspace or to `src/`, and absolute paths inside `src/`; others are
+  rejected with a message.
+- `find --limit <n>|all`; a cut list says how many rows are missing.
 - `[[rebuild.module]]` (ADR 0013): an overlay module built from several source files in link order. Building one of
   the files builds the others and compares the whole module; gaps and overlaps between the files' code are warned.
 - Aztec common symbols (uninitialised globals shared between files) are placed in the overlay module's BSS (order of
@@ -54,6 +62,7 @@ and the project uses [Semantic Versioning](https://semver.org/).
   identical with WLINK 10.6 in DOSBox (`dosbox-lab`).
 
 ### Fixed
+- The `@signature` line of a function's output follows a rename (`annotate --name`) instead of keeping the old name.
 - The header of an archived `comparison.txt` counted other instructions than its listing (2 against 1 for one
   inserted instruction): both now give the listing's counts, changed, inserted and removed instructions separately.
 - `find similar` and `show` named exemplars by the rebuild record's name (`fun_…`) instead of the knowledge's name.

@@ -5,6 +5,7 @@ mod annotate;
 mod build;
 mod detail;
 mod diagnose;
+mod file_flags;
 mod find;
 mod history;
 mod job;
