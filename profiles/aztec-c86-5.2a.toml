@@ -22,6 +22,8 @@ prologue = []
 prologue_pattern = "B8 ?? ?? E8 ?? ??"
 prologue_call = "$csav"
 padding = false
+# identifiers are cut to 31 characters without a warning
+name_length = 31
 fingerprint = ["BIN/CC.EXE"]
 
 [decoration]

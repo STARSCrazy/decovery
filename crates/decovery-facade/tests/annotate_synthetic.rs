@@ -906,3 +906,26 @@ fn refuted_human_record_keeps_precedence() {
     assert_eq!(s.locals[0].name, "n");
     assert_eq!(s.line_comments[0].text, "loop head");
 }
+
+#[test]
+fn a_name_longer_than_the_compiler_keeps_is_warned() {
+    let d = workspace();
+    let root = d.path();
+    let config = std::fs::read_to_string(root.join("decovery.toml")).unwrap();
+    std::fs::write(
+        root.join("decovery.toml"),
+        format!("{config}\n[rebuild]\ncompiler = \"aztec-c86-4.2b\"\n"),
+    )
+    .unwrap();
+    let long = "draw_the_party_status_panel_with_borders";
+    let r = annotate(root, &request("flat:00010100", name(long))).unwrap();
+    assert_eq!(r.data["changed"], true);
+    let warnings = r.data["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    let w = warnings[0].as_str().unwrap();
+    assert!(w.contains("keeps only the first 31"), "{w}");
+    assert!(w.contains(&long[..31]), "{w}");
+    // a name within the limit: no warning
+    let r = annotate(root, &request("flat:00010200", name("short_name"))).unwrap();
+    assert_eq!(r.data["warnings"], serde_json::json!([]));
+}

@@ -1427,6 +1427,13 @@ fn place_name<'a>(
                 .then(|| knowledge.address_of(raw).map(|a| (raw, a)))
                 .flatten()
         })
+        .or_else(|| {
+            // a name the compiler cut to its significant length: the knowledge's longer name
+            let length = profile.name_length?;
+            knowledge
+                .address_of_cut(c_name, length)
+                .map(|(_, a)| (c_name, a))
+        })
 }
 
 /// The overlay that holds an object's functions: the one overlay all its by-name placed functions lie in.
@@ -2283,6 +2290,42 @@ size = 21
             ["ovmain: no counterpart in the original"],
             "no overlay to qualify the name with"
         );
+    }
+
+    #[test]
+    fn a_name_cut_to_31_characters_finds_the_longer_knowledge_name() {
+        let dir = workspace(2);
+        std::fs::create_dir_all(dir.path().join("knowledge")).unwrap();
+        let long = "draw_the_party_status_panel_with_borders";
+        std::fs::write(
+            dir.path().join("knowledge/symbols.toml"),
+            format!(
+                "schema = 1
+
+[[symbol]]
+address = \"ovl:A:0000:5000\"
+kind = \"function\"
+name = \"{long}\"
+                 source = \"human\"
+confidence = \"confirmed\"
+"
+            ),
+        )
+        .unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
+        let knowledge = KnowledgeView::new(&ws, None);
+        let profile = decovery_toolchain::profile("aztec-c86-4.2b").unwrap();
+        // the compiler cut the name before or after appending the underscore
+        for raw in [format!("{}_", &long[..31]), long[..31].to_string()] {
+            let found = place_name(&knowledge, &profile, &raw);
+            assert_eq!(
+                found.map(|(_, a)| a.to_string()).as_deref(),
+                Some("ovl:A:0000:5000"),
+                "{raw}"
+            );
+        }
+        // shorter than the limit: no prefix match
+        assert!(place_name(&knowledge, &profile, "draw_the_party_").is_none());
     }
 
     #[test]

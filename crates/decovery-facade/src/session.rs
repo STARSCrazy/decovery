@@ -122,6 +122,21 @@ pub(crate) fn parse_flat_default_name(name: &str) -> Option<(Address, bool)> {
 }
 
 impl<'a> KnowledgeView<'a> {
+    /// The one name longer than `length` whose first `length` characters are `cut` (a name the compiler cut to
+    /// `length` characters), with its address. `None` when `cut` is not that long or no or several names fit.
+    pub fn address_of_cut(&self, cut: &str, length: usize) -> Option<(&'a str, Address)> {
+        if cut.len() != length {
+            return None;
+        }
+        let mut fits = self
+            .by_name
+            .range::<str, _>((std::ops::Bound::Included(cut), std::ops::Bound::Unbounded))
+            .take_while(|(n, _)| n.starts_with(cut))
+            .filter(|(n, _)| n.len() > length);
+        let (&name, &at) = fits.next()?;
+        fits.next().is_none().then_some((name, at))
+    }
+
     /// Whether the target is flat (LE, flat32): only then do `DAT_` and `FUN_` default names resolve.
     pub fn is_flat(&self) -> bool {
         self.flat
