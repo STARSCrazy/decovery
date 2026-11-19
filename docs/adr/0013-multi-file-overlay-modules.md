@@ -34,7 +34,9 @@ files = ["npc.c", "npc_b.c"]   # link order
   so the module is always compared whole. Their functions are compared and recorded like any built function.
 - The module comparison takes the listed files' objects in link order, followed by objects of other files whose
   functions lie in the same overlay (source order, as before). Code, data and BSS are the concatenation of the
-  objects in that order.
+  objects in that order; every object's data starts on a word (the linker puts one zero byte behind an object
+  with an odd data size: third target, VMAZE, 229 data bytes of the first file, then a pad byte, then the data of
+  the next file). Code is not aligned (odd code sizes are followed directly by the next file's code).
 
 ### Common symbols
 

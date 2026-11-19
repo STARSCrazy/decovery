@@ -89,6 +89,11 @@ fn layout(modules: &[&ObjectModule], corg: i64, dorg: i64, bss_start: i64) -> La
                     Some((Some(Part::Code), at))
                 }
                 SectionKind::Data => {
+                    // the Aztec linker starts every object's data on a word: after an object with an odd data
+                    // size one zero byte follows (third target, VMAZE: 229 data bytes, then a pad byte)
+                    if data.len() % 2 == 1 {
+                        data.push(0);
+                    }
                     let at = dorg + data.len() as i64;
                     data.extend(&s.data);
                     data.resize(

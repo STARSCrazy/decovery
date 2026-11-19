@@ -80,18 +80,19 @@ fn object(spec: &AztecModuleSpec) -> ObjectFile {
     read_aztec(&write_aztec(spec), &format!("{}.O", spec.name)).expect("object")
 }
 
-/// The linked overlay: A code at 1000, B code at 100A, entry ($ovbgn, one `ret`) at 100E; A data at 2000, B data
-/// at 2005, one library data byte; BSS from 2007: A 2007..2008, B 2009..200C. `ext_` lives at DS:0050.
+/// The linked overlay: A code at 1000, B code at 100A, entry ($ovbgn, one `ret`) at 100E; A data at 2000 (5 bytes),
+/// B data at 2006 (the linker starts every object's data on a word), one library data byte; BSS from 2008:
+/// A 2008..2009, B 200A..200D. `ext_` lives at DS:0050.
 fn overlay(bss: u16) -> Vec<u8> {
     let call_g = 0x100Au16.wrapping_sub(0x1003);
     let mut code = vec![0xE8];
     code.extend(call_g.to_le_bytes());
     code.extend([0xA1, 0x50, 0x00, 0xB8, 0x00, 0x20, 0xC3]);
     code.extend([0xA1]);
-    code.extend((0x2007u16 + 2 + 2).to_le_bytes()); // buf_ = B's BSS + 2
+    code.extend((0x2008u16 + 2 + 2).to_le_bytes()); // buf_ = B's BSS + 2
     code.extend([0xC3]);
     code.push(0xC3); // $ovbgn
-    let data = vec![b'h', b'i', 0, 0x50, 0x00, 7, 0xEE];
+    let data = vec![b'h', b'i', 0, 0x50, 0x00, 0, 7, 0xEE];
     let mut file = Vec::new();
     for w in [
         0xF2,
@@ -116,7 +117,7 @@ fn module_of_two_objects_places_in_order() {
     assert!(v.identical, "{v:#?}");
     assert_eq!(v.code.verdict, Verdict::Identical);
     assert_eq!(v.code_size, (14, 14));
-    assert_eq!(v.data_size, (7, 6));
+    assert_eq!(v.data_size, (8, 7));
     assert_eq!(v.bss, (6, 6));
     assert_eq!(v.code.metrics.refs_ok, 5);
     assert_eq!(v.code.metrics.differing, 0);
@@ -298,4 +299,76 @@ fn common_symbols_are_placed_in_bss_in_order_of_first_appearance() {
     let v = compare_overlay_module(&[&object(&c), &object(&d)], &ovl);
     assert!(!v.identical);
     assert_eq!(v.code.metrics.refs_wrong, 1);
+}
+
+/// E reads the extern `tbl_` at a fixed offset on both sides (`tbl_ - 2`, `tbl_ + 2`); F defines nothing of it.
+fn extern_with_addends(defined_common: bool) -> (AztecModuleSpec, AztecModuleSpec) {
+    let e = AztecModuleSpec {
+        name: "E".into(),
+        code: vec![0xA1, 0, 0, 0xA1, 0, 0, 0xC3],
+        named: vec![sym("tbl_", AztecSection::Extern, 0)],
+        refs: vec![
+            AztecRefSpec {
+                addend: -2,
+                ..r(AztecSection::Code, 1, false, AztecTarget::Named(0))
+            },
+            AztecRefSpec {
+                addend: 2,
+                ..r(AztecSection::Code, 4, false, AztecTarget::Named(0))
+            },
+        ],
+        ..AztecModuleSpec::default()
+    };
+    let f = AztecModuleSpec {
+        name: "F".into(),
+        code: vec![0xA1, 0, 0, 0xC3],
+        named: vec![sym(
+            "tbl_",
+            AztecSection::Extern,
+            if defined_common { 4 } else { 0 },
+        )],
+        refs: vec![r(AztecSection::Code, 1, false, AztecTarget::Named(0))],
+        ..AztecModuleSpec::default()
+    };
+    (e, f)
+}
+
+/// Overlay of E and F: `tbl_` at `tbl` (E reads tbl-2 and tbl+2, F reads tbl), BSS `bss`.
+fn addend_overlay(tbl: u16, bss: u16) -> Vec<u8> {
+    let mut code = vec![0xA1];
+    code.extend((tbl - 2).to_le_bytes());
+    code.push(0xA1);
+    code.extend((tbl + 2).to_le_bytes());
+    code.push(0xC3);
+    code.push(0xA1);
+    code.extend(tbl.to_le_bytes());
+    code.extend([0xC3, 0xC3]);
+    let mut file = Vec::new();
+    for w in [0xF2, CORG, code.len() as u16, DORG, 0, bss, CORG + 11] {
+        file.extend(u16::to_le_bytes(w));
+    }
+    file.extend(code);
+    file
+}
+
+#[test]
+fn extern_at_a_fixed_offset_binds_once() {
+    let (e, f) = extern_with_addends(false);
+    let ovl = read_overlay(&addend_overlay(0x84AA, 0), "T").expect("overlay");
+    let v = compare_overlay_module(&[&object(&e), &object(&f)], &ovl);
+    assert!(v.ambiguous.is_empty(), "{v:#?}");
+    assert_eq!(v.code.metrics.refs_wrong, 0, "{v:#?}");
+    assert_eq!(v.externals.get("tbl_"), Some(&0x84AA));
+    assert!(v.identical, "{v:#?}");
+}
+
+#[test]
+fn common_at_a_fixed_offset_uses_the_addend() {
+    // F declares tbl_ as a common of 4 bytes: placed at the BSS start (2000), E's uses at 1FFE and 2002
+    let (e, f) = extern_with_addends(true);
+    let ovl = read_overlay(&addend_overlay(0x2000, 4), "T").expect("overlay");
+    let v = compare_overlay_module(&[&object(&e), &object(&f)], &ovl);
+    assert!(v.ambiguous.is_empty(), "{v:#?}");
+    assert_eq!(v.code.metrics.refs_wrong, 0, "{v:#?}");
+    assert!(v.identical, "{v:#?}");
 }
