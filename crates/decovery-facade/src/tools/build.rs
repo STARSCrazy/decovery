@@ -880,11 +880,27 @@ pub(super) fn overlay_modules(
                 "checked": "size",
             },
             "externals": v.externals.len(),
-            "ambiguous": v.ambiguous,
             "findings": v.findings,
         }));
+        if let Some(Value::Object(m)) = out.last_mut() {
+            m.extend(ambiguous_json(&v.ambiguous, v.code_size.0 != v.code_size.1));
+        }
     }
     out
+}
+
+/// `ambiguous` (the references whose binding disagrees) and `ambiguous_count`. After a size change nearly every
+/// later external reference disagrees: the list would be noise, so only its count is given (`ambiguous_omitted`).
+fn ambiguous_json(ambiguous: &[String], size_changed: bool) -> serde_json::Map<String, Value> {
+    let mut m = serde_json::Map::new();
+    let list: &[String] = if size_changed { &[] } else { ambiguous };
+    m.insert("ambiguous".into(), json!(list));
+    m.insert("ambiguous_count".into(), json!(ambiguous.len()));
+    m.insert(
+        "ambiguous_omitted".into(),
+        json!(size_changed && !ambiguous.is_empty()),
+    );
+    m
 }
 
 /// Reads the source at `path`, stages it as `name` in `dir` and returns its text and blake3 (hex) of the staged
@@ -1811,6 +1827,19 @@ size = 21
             ["ovmain: no counterpart in the original"],
             "no overlay to qualify the name with"
         );
+    }
+
+    #[test]
+    fn ambiguous_references_after_a_size_change_are_only_counted() {
+        let list = vec!["a_: 0010 and 0012 (field at 5003)".to_string(); 3];
+        let kept = ambiguous_json(&list, false);
+        assert_eq!(kept["ambiguous"].as_array().unwrap().len(), 3);
+        assert_eq!(kept["ambiguous_count"], 3);
+        assert_eq!(kept["ambiguous_omitted"], false);
+        let counted = ambiguous_json(&list, true);
+        assert_eq!(counted["ambiguous"], json!([]));
+        assert_eq!(counted["ambiguous_count"], 3);
+        assert_eq!(counted["ambiguous_omitted"], true);
     }
 
     #[test]

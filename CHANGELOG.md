@@ -43,6 +43,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
   identical with WLINK 10.6 in DOSBox (`dosbox-lab`).
 
 ### Fixed
+- Overlay module JSON: after a code size change the `ambiguous` list is left empty (nearly every later external
+  reference disagrees, 1378 entries on a shifted module); `ambiguous_count` gives the number and
+  `ambiguous_omitted` says the list was dropped. Changed meaning: `ambiguous` is no longer complete after a size
+  change.
 - Aztec C86 `build` no longer warns that frame `DATA` or section `DATA` has no anchor: those warnings came from the
   module comparison of linked targets, whose verdicts an Aztec build discards (functions are compared with link
   gaps, overlay data and BSS by the module comparison). The module JSON says what it checked: `data.state`
