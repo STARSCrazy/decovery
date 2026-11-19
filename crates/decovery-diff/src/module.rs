@@ -53,6 +53,8 @@ pub struct ModuleVerdict {
     /// Every external name bound inside the original's BSS when the files give less BSS than the original (name,
     /// address); the BSS finding names only the first of them.
     pub bss_externals: Vec<(String, u16)>,
+    /// The common symbols the layout placed behind the files' own BSS, in order.
+    pub commons: Vec<Common>,
     /// The wrong code references (one per wrong-reference blocker, same order): what the original's field leads
     /// to and what the rebuild's symbol and addend give.
     pub wrong_refs: Vec<WrongRef>,
@@ -163,15 +165,15 @@ fn layout(modules: &[&ObjectModule], corg: i64, dorg: i64, bss_start: i64) -> La
 
 /// Places the common symbols no module defines behind the modules' own BSS (ADR 0013): each name once, in the
 /// order of its first appearance (objects in link order, each in symbol-table order), with the largest size any
-/// object declares, without alignment. Returns the BSS size including them.
+/// object declares, without alignment. Returns the BSS size including them and the placed commons.
 fn place_commons<'a>(
     modules: &[&'a ObjectModule],
     public: &mut BTreeMap<&'a str, i64>,
     bss_start: i64,
     own_bss: u32,
-) -> u32 {
+) -> (u32, Vec<Common>) {
     let mut order: Vec<&str> = Vec::new();
-    let mut sizes: BTreeMap<&str, u32> = BTreeMap::new();
+    let mut sizes: BTreeMap<&str, (u32, Vec<String>)> = BTreeMap::new();
     for m in modules {
         for (name, size) in &m.commons {
             if public.contains_key(name.as_str()) {
@@ -179,17 +181,42 @@ fn place_commons<'a>(
             }
             let entry = sizes.entry(name.as_str()).or_insert_with(|| {
                 order.push(name.as_str());
-                0
+                (0, Vec::new())
             });
-            *entry = (*entry).max(*size);
+            entry.0 = entry.0.max(*size);
+            if !entry.1.contains(&m.name) {
+                entry.1.push(m.name.clone());
+            }
         }
     }
     let mut bss = own_bss;
+    let mut placed = Vec::new();
     for name in order {
-        public.insert(name, bss_start + i64::from(bss));
-        bss = bss.saturating_add(sizes[name]);
+        let address = bss_start + i64::from(bss);
+        public.insert(name, address);
+        let (size, declared_in) = &sizes[name];
+        placed.push(Common {
+            name: name.to_string(),
+            size: *size,
+            address,
+            declared_in: declared_in.clone(),
+        });
+        bss = bss.saturating_add(*size);
     }
-    bss
+    (bss, placed)
+}
+
+/// A common symbol placed in the module's BSS: an uninitialised global or an `extern` declaration with a size
+/// (`extern int x[3];`), which the compiler emits the same way and which counts into the layout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Common {
+    pub name: String,
+    /// The largest size any object declares.
+    pub size: u32,
+    pub address: i64,
+    /// The objects declaring it.
+    pub declared_in: Vec<String>,
 }
 
 /// One use of an external name: the address it binds the name to (the original field less the object's number).
@@ -257,7 +284,7 @@ pub fn compare_overlay_module(objects: &[&ObjectFile], overlay: &Overlay) -> Mod
             }
         }
     }
-    let bss = place_commons(&modules, &mut public, bss_start, own_bss);
+    let (bss, commons) = place_commons(&modules, &mut public, bss_start, own_bss);
 
     let mut metrics = Metrics::default();
     let mut blockers = Vec::new();
@@ -547,6 +574,9 @@ pub fn compare_overlay_module(objects: &[&ObjectFile], overlay: &Overlay) -> Mod
         Vec::new()
     };
     findings.extend(externals.iter().filter_map(|(n, &a)| suffix_mismatch(n, a)));
+    if bss.0 != bss.1 && !commons.is_empty() {
+        findings.push(commons_finding(&commons));
+    }
     ModuleVerdict {
         code: comparison,
         code_size,
@@ -561,6 +591,7 @@ pub fn compare_overlay_module(objects: &[&ObjectFile], overlay: &Overlay) -> Mod
         ambiguous,
         wrong_refs,
         bss_externals,
+        commons,
         identical,
         findings,
         data_gaps: u32::try_from(gaps_data.len()).unwrap_or(u32::MAX),
@@ -602,6 +633,34 @@ fn bss_finding(
         "{head} {n} external name{} bound inside the original BSS ({range}), defined in none of the files: {}{more}",
         if n == 1 { "" } else { "s" },
         inside[..n.min(SHOWN)].join(", ")
+    )
+}
+
+/// Says which declared sizes the BSS layout counts: extern declarations with a size count like definitions.
+fn commons_finding(commons: &[Common]) -> String {
+    let total: u32 = commons.iter().map(|c| c.size).sum();
+    let list: Vec<String> = commons
+        .iter()
+        .take(8)
+        .map(|c| {
+            format!(
+                "{} {} byte{} at {:04X} ({})",
+                c.name,
+                c.size,
+                if c.size == 1 { "" } else { "s" },
+                c.address,
+                c.declared_in.join(", ")
+            )
+        })
+        .collect();
+    let more = if commons.len() > 8 {
+        format!(" and {} more", commons.len() - 8)
+    } else {
+        String::new()
+    };
+    format!(
+        "BSS counts {total} bytes of commons (uninitialised globals and extern declarations with a size, such as          `extern int x[3];`): {}{more}",
+        list.join(", ")
     )
 }
 

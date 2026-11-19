@@ -6,6 +6,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- The module verdict lists the commons its BSS layout places (`commons`: name, size, address, declaring files); when
+  the BSS size differs, a finding says that extern declarations with a size (`extern int x[3];`) count into it.
 - A module verdict whose BSS is smaller than the original's lists every external name bound inside the original BSS
   with its address (`bss_externals`); the finding names the first eight and points there.
 - A module finding when an external name ends in a four-digit address (`word_91b8`, `table_84aa`, `DAT_…_9202`)

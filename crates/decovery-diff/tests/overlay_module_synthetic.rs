@@ -456,3 +456,18 @@ fn bss_externals_lists_every_name_with_its_address() {
     let v = compare_overlay_module(&[&object(&e), &object(&f)], &ovl);
     assert_eq!(v.bss_externals, [("tbl_".to_string(), 0x2002)]);
 }
+
+#[test]
+fn commons_counted_into_a_differing_bss_are_named() {
+    // C and D declare commons (cnt_ 2, tbl_ 4, z_ 2): 8 bytes; the original has 10
+    let (c, d) = commons();
+    let ovl = read_overlay(&commons_overlay(0x2002, 0x2006, 0x2000, 10), "T").expect("overlay");
+    let v = compare_overlay_module(&[&object(&c), &object(&d)], &ovl);
+    assert_eq!(v.commons.len(), 3, "{v:#?}");
+    assert!(
+        v.findings.iter().any(|f| f.starts_with("BSS counts 8 bytes of commons")
+            && f.contains("cnt_ 2 bytes at 2000 (C, D)")),
+        "{:?}",
+        v.findings
+    );
+}

@@ -1264,6 +1264,20 @@ fn overlay_modules_with_fields(
             "externals": v.externals.len(),
             "findings": v.findings,
         });
+        if !v.commons.is_empty() {
+            entry["commons"] = v
+                .commons
+                .iter()
+                .map(|c| {
+                    json!({
+                        "name": c.name,
+                        "size": c.size,
+                        "address": format!("{:04X}", c.address),
+                        "declared_in": c.declared_in,
+                    })
+                })
+                .collect();
+        }
         if !v.bss_externals.is_empty() {
             entry["bss_externals"] = v
                 .bss_externals
