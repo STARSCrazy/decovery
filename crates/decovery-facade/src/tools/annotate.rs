@@ -89,6 +89,128 @@ pub enum AnnotateAction {
     },
     /// Appended to `types.h`.
     AddType(String),
+    /// Correct the record's kind (`function`, `global` or `label`), for example a data address recorded as a
+    /// function.
+    Kind(SymbolKind),
+}
+
+impl AnnotateAction {
+    /// The action's name in responses and messages.
+    fn label(&self) -> &'static str {
+        match self {
+            AnnotateAction::Name(_) => "name",
+            AnnotateAction::Comment(_) => "comment",
+            AnnotateAction::Signature(_) => "signature",
+            AnnotateAction::DataType(_) => "type",
+            AnnotateAction::Local { .. } => "local",
+            AnnotateAction::Refute { .. } => "refute",
+            AnnotateAction::AddType(_) => "add-type",
+            AnnotateAction::Kind(_) => "kind",
+        }
+    }
+
+    /// Where the action runs in a combined call: the name first, so the others find the record by its address.
+    fn order(&self) -> u8 {
+        match self {
+            AnnotateAction::Name(_) => 0,
+            AnnotateAction::Kind(_) => 1,
+            AnnotateAction::Signature(_) => 2,
+            AnnotateAction::DataType(_) => 3,
+            AnnotateAction::Comment(_) => 4,
+            AnnotateAction::Local { .. } => 5,
+            AnnotateAction::Refute { .. } => 6,
+            AnnotateAction::AddType(_) => 7,
+        }
+    }
+}
+
+/// Records several claims on one target in one call, in a fixed order: name, kind, signature, type, comment,
+/// local. Every request names the same target with the same stamp; `refute` and `add_type` stand alone, and an
+/// action may appear once. After the name the others address the target by its address, so a renamed target is
+/// still found. Each step is saved as [`annotate`] saves it; the first error stops the call (earlier steps stay
+/// saved and are named in the error). One request returns exactly what [`annotate`] returns.
+pub fn annotate_many(root: &Path, requests: &[Annotation]) -> Result<Response, FacadeError> {
+    let Some(first) = requests.first() else {
+        return Err(FacadeError::Invalid("no action given".into()));
+    };
+    if requests.len() == 1 {
+        return annotate(root, first);
+    }
+    let labels: Vec<&str> = requests.iter().map(|r| r.action.label()).collect();
+    for alone in ["refute", "add-type"] {
+        if labels.contains(&alone) {
+            return Err(FacadeError::Invalid(format!(
+                "{alone} cannot be combined with other actions (got {}); run it on its own",
+                labels.join(", ")
+            )));
+        }
+    }
+    for (i, label) in labels.iter().enumerate() {
+        if labels[..i].contains(label) {
+            return Err(FacadeError::Invalid(format!(
+                "{label} given twice; one call takes each action once"
+            )));
+        }
+    }
+    let stamp = |r: &Annotation| {
+        (
+            r.target.clone(),
+            r.confidence,
+            r.source,
+            r.evidence.clone(),
+            r.force,
+        )
+    };
+    if requests.iter().any(|r| stamp(r) != stamp(first)) {
+        return Err(FacadeError::Invalid(
+            "combined actions must share target, confidence, source, evidence and force".into(),
+        ));
+    }
+    let mut ordered: Vec<&Annotation> = requests.iter().collect();
+    ordered.sort_by_key(|r| r.action.order());
+    let mut target = first.target.clone();
+    let mut steps: Vec<serde_json::Value> = Vec::new();
+    let mut summaries: Vec<String> = Vec::new();
+    for request in ordered {
+        let step = Annotation {
+            target: target.clone(),
+            ..request.clone()
+        };
+        let response = annotate(root, &step).map_err(|e| {
+            if summaries.is_empty() {
+                e
+            } else {
+                FacadeError::Invalid(format!(
+                    "{} failed: {e} (already saved: {})",
+                    request.action.label(),
+                    summaries.join("; ")
+                ))
+            }
+        })?;
+        if matches!(request.action, AnnotateAction::Name(_))
+            && let Some(at) = response.data["target"].as_str()
+        {
+            target = at.to_string();
+        }
+        summaries.push(response.summary);
+        steps.push(response.data);
+    }
+    let warnings: Vec<serde_json::Value> = steps
+        .iter()
+        .filter_map(|d| d["warnings"].as_array())
+        .flatten()
+        .cloned()
+        .collect();
+    Ok(Response::new(
+        summaries.join("; "),
+        json!({
+            "changed": steps.iter().any(|d| d["changed"] == true),
+            "target": steps[0]["target"],
+            "action": steps.iter().map(|d| d["action"].clone()).collect::<Vec<_>>(),
+            "warnings": warnings,
+            "steps": steps,
+        }),
+    ))
 }
 
 /// Records one claim in the workspace knowledge and regenerates the output it affects.
@@ -228,6 +350,12 @@ fn check_request(request: &Annotation) -> Result<(), FacadeError> {
         }
         AnnotateAction::Refute { reason } => non_empty(reason, "refute reason"),
         AnnotateAction::AddType(text) => check_type_definition(text),
+        AnnotateAction::Kind(kind) => match kind {
+            SymbolKind::Function | SymbolKind::Global | SymbolKind::Label => Ok(()),
+            _ => Err(FacadeError::Invalid(
+                "kind must be function, global or label".into(),
+            )),
+        },
     }
 }
 
@@ -438,6 +566,7 @@ fn target_of(session: &Session, request: &Annotation) -> Result<Target, FacadeEr
     };
     let kind = match function {
         Some(start) if start == at => SymbolKind::Function,
+        _ if is_data_address(session, at, &data_segments(session)) => SymbolKind::Global,
         Some(_) => SymbolKind::Label,
         None if segment_of(session, at).is_some_and(|s| s.permissions.contains('x')) => {
             SymbolKind::Function
@@ -445,6 +574,53 @@ fn target_of(session: &Session, request: &Annotation) -> Result<Target, FacadeEr
         None => SymbolKind::Global,
     };
     Ok(Target { at, function, kind })
+}
+
+/// Paragraphs of the real-mode data segments: the `[rebuild] frames` of data classes (`DATA`, `BSS`, `CONST`,
+/// `STACK`, `DGROUP`) and, on an MZ target without a `DATA` frame, the data segment its Aztec startup code loads.
+pub(crate) fn data_segments(session: &Session) -> Vec<u16> {
+    let frames = session.workspace.config.rebuild.as_ref().map(|r| &r.frames);
+    let mut segs: Vec<u16> = frames
+        .into_iter()
+        .flatten()
+        .filter(|(name, _)| {
+            let name = name.to_ascii_uppercase();
+            ["DATA", "BSS", "CONST", "STACK", "DGROUP"].contains(&name.as_str())
+        })
+        .filter_map(|(_, at)| match at {
+            Address::Seg { seg, off: 0 } => Some(*seg),
+            _ => None,
+        })
+        .collect();
+    let has_data_frame = frames.is_some_and(|f| f.keys().any(|k| k.eq_ignore_ascii_case("DATA")));
+    if !has_data_frame
+        && session.workspace.config.target.format == decovery_core::TargetFormat::Mz
+        && let Ok(program) = crate::program::load(&session.workspace)
+        && let Some(ds) = decovery_diff::aztec_data_segment(&program)
+    {
+        segs.push(ds);
+    }
+    segs
+}
+
+/// Whether `at` is data: no analyzed function starts there, and it lies in a segment of the memory map without
+/// execute permission or (real mode) its segment part is one of `data_segments`.
+pub(crate) fn is_data_address(session: &Session, at: Address, data_segments: &[u16]) -> bool {
+    if session.analysis.functions.iter().any(|f| f.start == at) {
+        return false;
+    }
+    if segment_of(session, at).is_some_and(|s| !s.permissions.contains('x')) {
+        return true;
+    }
+    matches!(at, Address::Seg { seg, .. } if data_segments.contains(&seg))
+}
+
+/// The default name of a data address: `DAT_` and the lower-case address text (`DAT_0ff6_830e`), as `find` shows it.
+pub(crate) fn default_data_name(at: Address) -> String {
+    format!(
+        "DAT_{}",
+        default_name(at).trim_start_matches("fun_").to_lowercase()
+    )
 }
 
 fn apply(session: &mut Session, request: &Annotation) -> Result<Applied, FacadeError> {
@@ -472,6 +648,7 @@ fn apply(session: &mut Session, request: &Annotation) -> Result<Applied, FacadeE
             data_type,
         } => set_local(session, request, &target, place, name, data_type.as_deref()),
         AnnotateAction::Refute { reason } => refute(session, request, &target, reason),
+        AnnotateAction::Kind(kind) => set_kind(session, request, &target, *kind),
         _ => Err(FacadeError::Invalid("unsupported action".into())),
     }
 }
@@ -587,7 +764,10 @@ fn set_name(
         )));
     }
     let mine = rank(request.source, request.confidence);
-    let old_display = session.name_of(at);
+    let mut old_display = session.name_of(at);
+    if old_display.is_default && target.kind == SymbolKind::Global {
+        old_display.name = default_data_name(at);
+    }
     let found = index_of(&session.workspace.symbols, at).filter(|&i| {
         let s = &session.workspace.symbols[i];
         is_active(s) && !s.name.is_empty()
@@ -932,6 +1112,70 @@ fn refute(
             reason.trim()
         ),
         Change::Renamed { at, old: name },
+    ))
+}
+
+/// Changes the kind of the record at the target (the record is created when there is none). A claim ranked below
+/// the record needs `force`. The old kind goes to the record's history with the request's evidence.
+fn set_kind(
+    session: &mut Session,
+    request: &Annotation,
+    target: &Target,
+    kind: SymbolKind,
+) -> Result<Applied, FacadeError> {
+    let at = target.at;
+    let new = kebab(&kind);
+    let existing = index_of(&session.workspace.symbols, at)
+        .filter(|&i| is_active(&session.workspace.symbols[i]));
+    let Some(i) = existing else {
+        let i = claim_slot(session, request, at, kind, false);
+        let s = &mut session.workspace.symbols[i];
+        s.kind = kind;
+        if request.evidence.is_some() {
+            s.evidence = request.evidence.clone();
+        }
+        return Ok(Applied::changed(
+            at,
+            "kind",
+            format!("recorded {at} as {new}"),
+            Change::Symbol { at },
+        ));
+    };
+    let old = &session.workspace.symbols[i];
+    let was = kebab(&old.kind);
+    if old.kind == kind {
+        return Ok(Applied::unchanged(
+            at,
+            "kind",
+            format!("{at} is already a {new}"),
+            false,
+        ));
+    }
+    if let Some(unchanged) = guard(
+        request,
+        at,
+        "kind",
+        "kind",
+        &was,
+        (old.source, old.confidence),
+    ) {
+        return Ok(unchanged);
+    }
+    let mut entry = history_entry(old, request.evidence.clone(), None);
+    entry.note = Some(format!("kind {was} changed to {new}"));
+    let s = &mut session.workspace.symbols[i];
+    s.refuted.push(entry);
+    s.kind = kind;
+    let shown = if s.name.is_empty() {
+        at.to_string()
+    } else {
+        format!("{} ({at})", s.name)
+    };
+    Ok(Applied::changed(
+        at,
+        "kind",
+        format!("{shown} is now a {new} (was {was})"),
+        Change::Symbol { at },
     ))
 }
 

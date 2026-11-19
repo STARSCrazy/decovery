@@ -212,6 +212,15 @@ struct LocalParams {
     data_type: Option<String>,
 }
 
+#[derive(Clone, Copy, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(rename_all = "kebab-case")]
+enum RecordKind {
+    Function,
+    Global,
+    Label,
+}
+
 #[derive(Deserialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 #[serde(deny_unknown_fields)]
@@ -233,6 +242,9 @@ struct AnnotateParams {
     refute: Option<String>,
     /// Action: append a C type definition to `types.h`.
     add_type: Option<String>,
+    /// Action: correct the record's kind (`function`, `global`, `label`), for example a data address recorded as
+    /// a function.
+    kind: Option<RecordKind>,
     /// How sure the claim is (default `assumed`).
     confidence: Option<ClaimConfidence>,
     /// What the claim rests on.
@@ -521,14 +533,14 @@ impl Server {
     }
 
     #[tool(
-        description = "Record one claim (exactly one action field) with source `agent`; affected output files are regenerated. Ranks: human > confirmed > assumed. A claim ranked below the record it changes does not replace an existing name, comment, line comment, signature, type or local (no change, a warning instead) unless `force` is set; filling an empty field is always allowed. A human line comment counts as human. A refute below the record's rank needs `force` too."
+        description = "Record claims with source `agent`: one action field, or several of name, kind, signature, type, comment and local (applied in that order, the name first; refute and add_type stand alone); affected output files are regenerated. Ranks: human > confirmed > assumed. A claim ranked below the record it changes does not replace an existing name, comment, line comment, signature, type or local (no change, a warning instead) unless `force` is set; filling an empty field is always allowed. A human line comment counts as human. A refute below the record's rank needs `force` too."
     )]
     async fn annotate(&self, Parameters(p): Parameters<AnnotateParams>) -> CallToolResult {
-        let request = match annotation(p) {
-            Ok(request) => request,
+        let requests = match annotation(p) {
+            Ok(requests) => requests,
             Err(message) => return refused(message),
         };
-        self.blocking(move |root| decovery_facade::annotate(root, &request))
+        self.blocking(move |root| decovery_facade::annotate_many(root, &requests))
             .await
     }
 
@@ -948,8 +960,8 @@ fn tool_result(
     }
 }
 
-/// The facade request for `p`, or "exactly one action required".
-fn annotation(p: AnnotateParams) -> Result<Annotation, String> {
+/// The facade requests for `p` (one per action), or "at least one action required".
+fn annotation(p: AnnotateParams) -> Result<Vec<Annotation>, String> {
     let mut actions = Vec::new();
     if let Some(v) = p.name {
         actions.push(AnnotateAction::Name(v));
@@ -976,12 +988,19 @@ fn annotation(p: AnnotateParams) -> Result<Annotation, String> {
     if let Some(v) = p.add_type {
         actions.push(AnnotateAction::AddType(v));
     }
-    let Some(action) = actions.pop().filter(|_| actions.is_empty()) else {
-        return Err("exactly one action required".into());
-    };
-    Ok(Annotation {
+    if let Some(k) = p.kind {
+        actions.push(AnnotateAction::Kind(match k {
+            RecordKind::Function => decovery_core::SymbolKind::Function,
+            RecordKind::Global => decovery_core::SymbolKind::Global,
+            RecordKind::Label => decovery_core::SymbolKind::Label,
+        }));
+    }
+    if actions.is_empty() {
+        return Err("at least one action required".into());
+    }
+    let template = Annotation {
         target: p.target.unwrap_or_default(),
-        action,
+        action: AnnotateAction::AddType(String::new()),
         confidence: match p.confidence.unwrap_or_default() {
             ClaimConfidence::Confirmed => Confidence::Confirmed,
             ClaimConfidence::Assumed => Confidence::Assumed,
@@ -989,5 +1008,12 @@ fn annotation(p: AnnotateParams) -> Result<Annotation, String> {
         source: ClaimSource::Agent,
         evidence: p.evidence,
         force: p.force.unwrap_or(false),
-    })
+    };
+    Ok(actions
+        .into_iter()
+        .map(|action| Annotation {
+            action,
+            ..template.clone()
+        })
+        .collect())
 }

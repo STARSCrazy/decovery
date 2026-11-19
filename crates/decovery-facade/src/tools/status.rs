@@ -1,8 +1,9 @@
 //! `status`: how far the naming and rebuilding of the analyzed functions is.
 
-use decovery_core::{Address, JobState, job_list};
+use decovery_core::{Address, Confidence, JobState, SymbolKind, job_list};
 use serde_json::json;
 
+use super::annotate::{data_segments, is_data_address};
 use super::find::distinct_callers;
 use super::job::job_view;
 use crate::output::{STALE_ANALYSIS, analysis_stale, status_counts};
@@ -32,6 +33,20 @@ pub fn status(session: &Session) -> Result<Response, FacadeError> {
     if stale {
         summary.push_str(&format!(" ({STALE_ANALYSIS})"));
     }
+    let in_data = functions_in_data(session);
+    if !in_data.is_empty() {
+        let shown: Vec<&str> = in_data.iter().take(8).map(|(n, _)| n.as_str()).collect();
+        summary.push_str(&format!(
+            "; {} function symbols lie in data ({}{}): decovery annotate --kind global <target>",
+            in_data.len(),
+            shown.join(", "),
+            if in_data.len() > shown.len() {
+                ", ..."
+            } else {
+                ""
+            }
+        ));
+    }
     let analysis = &session.analysis;
     Ok(Response::new(
         summary,
@@ -55,9 +70,39 @@ pub fn status(session: &Session) -> Result<Response, FacadeError> {
                 "not_tried": c.rebuild_not_tried,
             },
             "jobs": jobs,
+            "functions_in_data": in_data
+                .iter()
+                .map(|(name, at)| json!({"name": name, "address": at.to_string()}))
+                .collect::<Vec<_>>(),
             "next_step": next_step,
         }),
     ))
+}
+
+/// Active knowledge records of kind `function` at a data address (see `annotate`): the name (or address) and
+/// address, in address order. Recorded before `annotate` gave data addresses the kind `global`.
+fn functions_in_data(session: &Session) -> Vec<(String, Address)> {
+    let segments = data_segments(session);
+    let mut found: Vec<(String, Address)> = session
+        .workspace
+        .symbols
+        .iter()
+        .filter(|s| {
+            s.kind == SymbolKind::Function
+                && s.confidence != Confidence::Refuted
+                && is_data_address(session, s.address, &segments)
+        })
+        .map(|s| {
+            let name = if s.name.is_empty() {
+                s.address.to_string()
+            } else {
+                s.name.clone()
+            };
+            (name, s.address)
+        })
+        .collect();
+    found.sort_by_key(|(_, at)| *at);
+    found
 }
 
 /// The unnamed function with the most distinct callers (ties: lowest address), else the first function

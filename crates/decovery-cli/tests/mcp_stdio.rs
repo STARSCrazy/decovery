@@ -417,13 +417,18 @@ fn annotate_over_stdio_uses_agent_source() {
     let result = server.call(
         2,
         "annotate",
-        json!({"target": "flat:00010200", "name": "beta", "comment": "two actions"}),
+        json!({"target": "flat:00010200", "name": "beta", "refute": "two actions"}),
     );
     assert_eq!(result["isError"], true, "{result}");
-    assert_eq!(result["content"][0]["text"], "exactly one action required");
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("refute cannot be combined")),
+        "{result}"
+    );
     let result = server.call(3, "annotate", json!({"target": "flat:00010200"}));
     assert_eq!(result["isError"], true, "{result}");
-    assert_eq!(result["content"][0]["text"], "exactly one action required");
+    assert_eq!(result["content"][0]["text"], "at least one action required");
 
     let result = server.call(
         4,

@@ -12,7 +12,7 @@ mod compare;
 mod overlay;
 mod setup;
 
-use decovery_core::{CallRecord, ClaimSource, Confidence, append_call};
+use decovery_core::{CallRecord, ClaimSource, Confidence, SymbolKind, append_call};
 use decovery_facade::{
     AnalyzeOptions, AnnotateAction, Annotation, Budget, BuildRequest, DEFAULT_HISTORY_LIMIT,
     DEFAULT_LIMIT, DEFAULT_SIMILAR_LIMIT, FacadeError, FindQuery, FindWhat, FunctionFilter,
@@ -159,14 +159,17 @@ enum Command {
         #[arg(long, value_parser = parse_limit)]
         limit: Option<usize>,
     },
-    /// Record knowledge: a name, comment, signature, type, local, refutation or type definition.
+    /// Record knowledge: a name, comment, signature, type, local, kind, refutation or type definition.
+    ///
+    /// Several of `--name`, `--kind`, `--signature`, `--type`, `--comment` and `--local` may be combined; they are
+    /// applied in that order (the name first). `--refute` and `--add-type` stand alone.
     ///
     /// Ranks: human > confirmed > assumed. A claim ranked below the record it changes does not replace an
     /// existing name, comment, line comment, signature, type or local (no change, a warning instead) unless
     /// `--force` is given; filling an empty field is always allowed. A human line comment counts as human.
     #[command(group(clap::ArgGroup::new("action").required(true).args([
-        "name", "comment", "signature", "data_type", "local", "refute", "add_type",
-    ])))]
+        "name", "comment", "signature", "data_type", "local", "refute", "add_type", "kind",
+    ]).multiple(true)))]
     Annotate {
         /// Function or symbol name, address or `file:0x…`; not needed for `--add-type`.
         #[arg(required_unless_present = "add_type")]
@@ -192,6 +195,9 @@ enum Command {
         /// Append a definition to `types.h`.
         #[arg(long, value_name = "DEF")]
         add_type: Option<String>,
+        /// Correct the record's kind, for example a data address recorded as a function (`--kind global`).
+        #[arg(long, value_enum)]
+        kind: Option<RecordKind>,
         /// How sure the claim is.
         #[arg(long, value_enum, default_value = "assumed")]
         confidence: ClaimConfidence,
@@ -508,6 +514,13 @@ enum ClaimConfidence {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
+enum RecordKind {
+    Function,
+    Global,
+    Label,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
 enum ClaimOrigin {
     Human,
     Agent,
@@ -544,9 +557,12 @@ enum Sort {
 }
 
 fn main() -> ExitCode {
-    let mut cli = Cli::parse();
+    let mut cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => usage_error(e),
+    };
     if let Err(e) = resolve_deep(&mut cli.command) {
-        e.exit();
+        usage_error(e);
     }
     if let Some(jobs) = cli.jobs {
         decovery_toolchain::set_global_jobs(jobs);
@@ -560,6 +576,56 @@ fn main() -> ExitCode {
         log_call(&workspace, &mut record, started, code);
     }
     code
+}
+
+/// Prints a command-line error so its reason is the last line too (a caller that keeps only the last line of
+/// stderr still sees why), then exits with code 2. Help and version output go through clap unchanged.
+fn usage_error(e: clap::Error) -> ! {
+    use clap::error::ErrorKind;
+    if matches!(
+        e.kind(),
+        ErrorKind::DisplayHelp
+            | ErrorKind::DisplayVersion
+            | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+    ) {
+        e.exit();
+    }
+    eprint!("{}", usage_error_text(&e.render().to_string()));
+    std::process::exit(2);
+}
+
+/// Clap's rendered error with its closing tip replaced by the reason (`error: …; see --help`).
+fn usage_error_text(rendered: &str) -> String {
+    let reason = rendered
+        .lines()
+        .find(|l| l.starts_with("error:"))
+        .unwrap_or("error: invalid command line")
+        .to_string();
+    let mut body: Vec<&str> = rendered
+        .lines()
+        .filter(|l| !l.starts_with("For more information, try"))
+        .collect();
+    while body.last().is_some_and(|l| l.trim().is_empty()) {
+        body.pop();
+    }
+    let mut text = body.join(
+        "
+",
+    );
+    if body.len() > 1 {
+        text.push_str(&format!(
+            "
+
+{reason}; see --help
+"
+        ));
+    } else {
+        text.push_str(
+            "; see --help
+",
+        );
+    }
+    text
 }
 
 /// Settles `diagnose`'s target and `--deep` mode: a `--deep` value that is no mode is the function when no other
@@ -869,39 +935,39 @@ fn run(cli: Cli) -> ExitCode {
             local,
             refute,
             add_type,
+            kind,
             confidence,
             source,
             evidence,
             force,
         } => {
-            let action = if let Some(v) = name {
-                AnnotateAction::Name(v)
-            } else if let Some(v) = comment {
-                AnnotateAction::Comment(v)
-            } else if let Some(v) = signature {
-                AnnotateAction::Signature(v)
-            } else if let Some(v) = data_type {
-                AnnotateAction::DataType(v)
-            } else if let Some(mut v) = local {
+            let mut actions = Vec::new();
+            actions.extend(name.map(AnnotateAction::Name));
+            actions.extend(kind.map(|k| {
+                AnnotateAction::Kind(match k {
+                    RecordKind::Function => SymbolKind::Function,
+                    RecordKind::Global => SymbolKind::Global,
+                    RecordKind::Label => SymbolKind::Label,
+                })
+            }));
+            actions.extend(comment.map(AnnotateAction::Comment));
+            actions.extend(signature.map(AnnotateAction::Signature));
+            actions.extend(data_type.map(AnnotateAction::DataType));
+            if let Some(mut v) = local {
                 let data_type = if v.len() == 3 { v.pop() } else { None };
                 let name = v.pop().unwrap_or_default();
                 let place = v.pop().unwrap_or_default();
-                AnnotateAction::Local {
+                actions.push(AnnotateAction::Local {
                     place,
                     name,
                     data_type,
-                }
-            } else if let Some(reason) = refute {
-                AnnotateAction::Refute { reason }
-            } else if let Some(v) = add_type {
-                AnnotateAction::AddType(v)
-            } else {
-                // clap's required argument group rules this out
-                return ExitCode::from(2);
-            };
-            let request = Annotation {
+                });
+            }
+            actions.extend(refute.map(|reason| AnnotateAction::Refute { reason }));
+            actions.extend(add_type.map(AnnotateAction::AddType));
+            let template = Annotation {
                 target: target.unwrap_or_default(),
-                action,
+                action: AnnotateAction::AddType(String::new()),
                 confidence: match confidence {
                     ClaimConfidence::Confirmed => Confidence::Confirmed,
                     ClaimConfidence::Assumed => Confidence::Assumed,
@@ -913,7 +979,14 @@ fn run(cli: Cli) -> ExitCode {
                 evidence,
                 force,
             };
-            finish(annotate(&cli.workspace, &request, cli.json))
+            let requests: Vec<Annotation> = actions
+                .into_iter()
+                .map(|action| Annotation {
+                    action,
+                    ..template.clone()
+                })
+                .collect();
+            finish(annotate(&cli.workspace, &requests, cli.json))
         }
         Command::Analyze { plugin, function } => {
             let options = AnalyzeOptions {
@@ -1703,8 +1776,8 @@ fn legacy(workspace: &Path, call: &LegacyCall, json: bool) -> Result<(), FacadeE
     Ok(())
 }
 
-fn annotate(workspace: &Path, request: &Annotation, json: bool) -> Result<(), FacadeError> {
-    let response = decovery_facade::annotate(workspace, request)?;
+fn annotate(workspace: &Path, requests: &[Annotation], json: bool) -> Result<(), FacadeError> {
+    let response = decovery_facade::annotate_many(workspace, requests)?;
     print_summary(&response, json)
 }
 

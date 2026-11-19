@@ -7,7 +7,9 @@ use decovery_core::{
     AccessKind, Address, Analysis, AnalyzedFunction, CallEdge, ClaimSource, Confidence, DataAccess,
     Provider, Symbol, SymbolKind, Workspace, knowledge_hash,
 };
-use decovery_facade::{AnnotateAction, Annotation, FacadeError, Session, annotate, write_all};
+use decovery_facade::{
+    AnnotateAction, Annotation, FacadeError, Session, annotate, annotate_many, write_all,
+};
 
 const SHA: &str = "aa";
 
@@ -996,4 +998,206 @@ fn uninitialized_data_behind_an_mz_image_can_be_named() {
     let d = mz_workspace(0);
     let err = annotate(d.path(), &request("seg:0000:0050", name("x"))).unwrap_err();
     assert!(matches!(err, FacadeError::OutsideMap(_)), "{err:?}");
+}
+
+/// `mz_workspace` with `[rebuild] frames`: the image segment is `rwx`, so only the frame tells data from code.
+fn mz_workspace_with_frames(frames: &str) -> tempfile::TempDir {
+    let d = mz_workspace(0x10);
+    let path = d.path().join("decovery.toml");
+    let mut config = std::fs::read_to_string(&path).unwrap();
+    config.push_str(&format!("\n[rebuild]\nframes = {{ {frames} }}\n"));
+    std::fs::write(&path, config).unwrap();
+    d
+}
+
+fn seg_symbol(root: &Path, at: &str) -> Symbol {
+    let at: Address = at.parse().unwrap();
+    symbols(root).into_iter().find(|s| s.address == at).unwrap()
+}
+
+#[test]
+fn a_data_frame_address_is_named_as_a_global() {
+    let d = mz_workspace_with_frames("DATA = \"seg:0002:0000\"");
+    let root = d.path();
+    let r = annotate(root, &request("seg:0002:0010", name("game_state"))).unwrap();
+    assert_eq!(r.data["changed"], true, "{}", r.data);
+    assert_eq!(
+        r.summary, "named seg:0002:0010 game_state (was DAT_0002_0010)",
+        "{}",
+        r.summary
+    );
+    assert_eq!(seg_symbol(root, "seg:0002:0010").kind, SymbolKind::Global);
+    // a code address of the same rwx segment stays a function
+    annotate(root, &request("seg:0000:0004", name("start"))).unwrap();
+    assert_eq!(seg_symbol(root, "seg:0000:0004").kind, SymbolKind::Function);
+}
+
+#[test]
+fn a_code_frame_does_not_make_data() {
+    let d = mz_workspace_with_frames("CODE = \"seg:0002:0000\"");
+    let root = d.path();
+    annotate(root, &request("seg:0002:0010", name("thing"))).unwrap();
+    assert_eq!(seg_symbol(root, "seg:0002:0010").kind, SymbolKind::Function);
+}
+
+const DATA_AS_FUNCTION: &str = r#"schema = 1
+
+[[symbol]]
+address = "seg:0002:0010"
+kind = "function"
+name = "game_state"
+source = "human"
+confidence = "assumed"
+
+[[symbol]]
+address = "seg:0000:0004"
+kind = "function"
+name = "start"
+source = "human"
+confidence = "assumed"
+"#;
+
+#[test]
+fn kind_corrects_a_data_record_and_keeps_history() {
+    let d = mz_workspace_with_frames("DATA = \"seg:0002:0000\"");
+    let root = d.path();
+    std::fs::write(root.join("knowledge/symbols.toml"), DATA_AS_FUNCTION).unwrap();
+    let mut req = request("game_state", AnnotateAction::Kind(SymbolKind::Global));
+    req.evidence = Some("DS frame".into());
+    let r = annotate(root, &req).unwrap();
+    assert_eq!(r.data["changed"], true, "{}", r.data);
+    assert!(
+        r.summary.contains("is now a global (was function)"),
+        "{}",
+        r.summary
+    );
+    let s = seg_symbol(root, "seg:0002:0010");
+    assert_eq!(
+        (s.kind, s.name.as_str()),
+        (SymbolKind::Global, "game_state")
+    );
+    let entry = s.refuted.last().unwrap();
+    assert_eq!(
+        entry.note.as_deref(),
+        Some("kind function changed to global")
+    );
+    assert_eq!(entry.evidence.as_deref(), Some("DS frame"));
+    // again: no change
+    let r = annotate(root, &req).unwrap();
+    assert_eq!(r.data["changed"], false);
+    // an agent cannot change a human record's kind without force
+    let r = annotate(
+        root,
+        &agent("game_state", AnnotateAction::Kind(SymbolKind::Function)),
+    )
+    .unwrap();
+    assert_eq!(r.data["changed"], false);
+    assert!(r.data["warnings"][0].as_str().unwrap().contains("outranks"));
+}
+
+#[test]
+fn status_lists_function_records_in_data() {
+    let d = mz_workspace_with_frames("DATA = \"seg:0002:0000\"");
+    let root = d.path();
+    std::fs::write(root.join("knowledge/symbols.toml"), DATA_AS_FUNCTION).unwrap();
+    {
+        let ws = Workspace::open(root).unwrap();
+        let lock = ws.lock(Duration::ZERO).unwrap();
+        let mut a = Analysis::new(
+            Provider::new("ghidra", "11.3"),
+            SHA,
+            knowledge_hash(root).unwrap(),
+            "2026-11-05",
+        );
+        let start: Address = "seg:0000:0004".parse().unwrap();
+        let end: Address = "seg:0000:0010".parse().unwrap();
+        a.functions = vec![AnalyzedFunction::new(start, end, 12)];
+        a.save(root, &lock).unwrap();
+    }
+    let session = Session::open(root).unwrap();
+    let r = decovery_facade::status(&session).unwrap();
+    assert_eq!(
+        r.data["functions_in_data"],
+        serde_json::json!([{"name": "game_state", "address": "seg:0002:0010"}]),
+        "{}",
+        r.data
+    );
+    assert!(
+        r.summary.contains(
+            "1 function symbols lie in data (game_state): decovery annotate --kind global"
+        ),
+        "{}",
+        r.summary
+    );
+}
+
+#[test]
+fn several_actions_in_one_call_name_first() {
+    let d = workspace();
+    let root = d.path();
+    // comment and signature on the old name; the name is applied first, the rest finds the renamed target
+    let requests = [
+        request("gamma", comment("does things")),
+        request("gamma", AnnotateAction::Signature("int delta(void)".into())),
+        request("gamma", name("delta")),
+    ];
+    let r = annotate_many(root, &requests).unwrap();
+    assert_eq!(r.data["changed"], true, "{}", r.data);
+    assert_eq!(
+        r.data["action"],
+        serde_json::json!(["name", "signature", "comment"])
+    );
+    let s = symbol_at(root, 0x10200);
+    assert_eq!(s.name, "delta");
+    assert_eq!(s.comment.as_deref(), Some("does things"));
+    assert_eq!(s.signature.as_deref(), Some("int delta(void)"));
+    // a global: name and type together
+    let requests = [
+        request("flat:00020100", AnnotateAction::DataType("int".into())),
+        request("flat:00020100", name("flags")),
+    ];
+    annotate_many(root, &requests).unwrap();
+    let s = symbol_at(root, 0x20100);
+    assert_eq!(
+        (s.name.as_str(), s.data_type.as_deref()),
+        ("flags", Some("int"))
+    );
+    // the type of a global addressed by its name
+    annotate_many(
+        root,
+        &[request("flags", AnnotateAction::DataType("long".into()))],
+    )
+    .unwrap();
+    assert_eq!(symbol_at(root, 0x20100).data_type.as_deref(), Some("long"));
+}
+
+#[test]
+fn wrong_combinations_say_why() {
+    let d = workspace();
+    let root = d.path();
+    let before = symbols_bytes(root);
+    let m = invalid(annotate_many(
+        root,
+        &[
+            request("gamma", name("delta")),
+            request(
+                "gamma",
+                AnnotateAction::Refute {
+                    reason: "no".into(),
+                },
+            ),
+        ],
+    ));
+    assert!(m.contains("refute cannot be combined"), "{m}");
+    let m = invalid(annotate_many(
+        root,
+        &[request("gamma", name("a1")), request("gamma", name("a2"))],
+    ));
+    assert!(m.contains("name given twice"), "{m}");
+    let m = invalid(annotate_many(
+        root,
+        &[request("gamma", name("a1")), agent("gamma", comment("x"))],
+    ));
+    assert!(m.contains("must share"), "{m}");
+    assert_eq!(symbols_bytes(root), before, "nothing saved");
 }
