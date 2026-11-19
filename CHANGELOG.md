@@ -43,6 +43,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
   identical with WLINK 10.6 in DOSBox (`dosbox-lab`).
 
 ### Fixed
+- Overlay module findings and the `diagnose --deep` refusal for overlay functions no longer carry a run of spaces
+  in the middle of the text (a continued string literal kept its indentation).
 - `diagnose --deep` works without a mode (`joint`, structure and registers together); `diagnose --deep NAME` takes
   NAME as the function, `--deep registers` etc. still select a mode.
 - Overlay `diagnose` (Aztec C86) agreed with `build` only when no relocated field changed a branch: relocated fields

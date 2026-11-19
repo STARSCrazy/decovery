@@ -225,3 +225,15 @@ fn shifted_code_reports_size_and_first_real_difference() {
         v.findings
     );
 }
+
+#[test]
+fn findings_have_no_indentation_inside() {
+    let ovl = read_overlay(&overlay(6), "T").expect("overlay");
+    let partial = compare_overlay_module(&[&object(&a())], &ovl);
+    let mut spec = a();
+    spec.code.insert(9, 0x90);
+    let shifted = compare_overlay_module(&[&object(&spec), &object(&b())], &ovl);
+    for f in partial.findings.iter().chain(&shifted.findings) {
+        assert!(!f.contains("  "), "{f:?}");
+    }
+}

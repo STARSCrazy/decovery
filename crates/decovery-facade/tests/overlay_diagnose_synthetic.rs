@@ -74,6 +74,7 @@ fn deep_diagnosis_of_an_overlay_function_is_refused_clearly() {
             "{target}: {e}"
         );
         assert!(!e.contains("not a decovery address"), "{e}");
+        assert!(!e.contains("  "), "no indentation inside the message: {e}");
     }
 }
 

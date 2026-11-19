@@ -355,7 +355,8 @@ pub(super) struct Function {
 fn no_overlay(function: &Function, what: &str) -> Result<(), FacadeError> {
     match function.address.overlay() {
         Some(overlay) => Err(FacadeError::Invalid(format!(
-            "{what} is not available for overlay functions: {} ({}) lies in overlay {overlay}, and the              decomp-legacy plugin takes flat: and seg: addresses only; use `decovery diagnose` without --deep",
+            "{what} is not available for overlay functions: {} ({}) lies in overlay {overlay}, and the \
+             decomp-legacy plugin takes flat: and seg: addresses only; use `decovery diagnose` without --deep",
             function.name, function.address
         ))),
         None => Ok(()),

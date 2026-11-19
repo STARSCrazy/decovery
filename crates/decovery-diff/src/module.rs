@@ -380,7 +380,8 @@ fn size_findings((original, rebuilt): (u32, u32), first_difference: Option<u32>)
     let unit = if by == 1 { "byte" } else { "bytes" };
     if rebuilt < original {
         out.push(format!(
-            "module covers only 0x0000..0x{rebuilt:04X} of 0x0000..0x{original:04X}              (code {by} {unit} shorter: rebuilt {rebuilt}, original {original}); a partial module, or code missing"
+            "module covers only 0x0000..0x{rebuilt:04X} of 0x0000..0x{original:04X} \
+             (code {by} {unit} shorter: rebuilt {rebuilt}, original {original}); a partial module, or code missing"
         ));
     } else {
         out.push(format!(
@@ -389,7 +390,8 @@ fn size_findings((original, rebuilt): (u32, u32), first_difference: Option<u32>)
     }
     if let Some(x) = first_difference {
         out.push(format!(
-            "first real difference at offset 0x{x:04X}; differences after offset 0x{x:04X} are likely consequences              of the size change"
+            "first real difference at offset 0x{x:04X}; differences after offset 0x{x:04X} are likely consequences \
+             of the size change"
         ));
     }
     out
