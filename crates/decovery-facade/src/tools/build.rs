@@ -263,7 +263,10 @@ pub(super) fn is_asm(name: &str) -> bool {
 /// A compared function of the build.
 pub(super) struct Built {
     pub(super) source: usize,
+    /// The function's name in the source (what pragmas and variants name it by).
     pub(super) name: String,
+    /// The name the build reports: the knowledge's name at the address, else [`Built::name`].
+    pub(super) label: String,
     pub(super) address: Address,
     code_hash: String,
 }
@@ -963,9 +966,14 @@ pub(super) fn place_objects<'o>(
                 taken.insert(address, source.to_string());
                 let original_len = original_len(index, symbol_sizes, address);
                 let code_hash = blake3::hash(view.code()).to_hex()[..16].to_string();
+                let label = knowledge
+                    .name_at(address)
+                    .filter(|n| !n.is_default)
+                    .map_or_else(|| name.to_string(), |n| n.name);
                 placed.push(Built {
                     source: id,
                     name: name.to_string(),
+                    label,
                     address,
                     code_hash,
                 });
@@ -1258,7 +1266,7 @@ fn record(built: &Built, c: &Comparison, source: &Source, date: &str) -> Rebuild
     } else {
         RebuildResult::Differs
     };
-    let mut r = RebuildRecord::new(built.address, built.name.clone(), result);
+    let mut r = RebuildRecord::new(built.address, built.label.clone(), result);
     r.file = Some(source.name.clone());
     r.compiler = Some(source.compiler.clone());
     r.flags = Some(source.flags.clone());
@@ -1449,7 +1457,12 @@ fn respond(
 ) -> Result<Response, FacadeError> {
     records.sort_by_key(|r| r.address);
     if let Some(function) = &request.function {
-        records.retain(|r| &r.name == function || r.address.to_string() == *function);
+        // the knowledge's name, the address, or the default name a source may still use
+        records.retain(|r| {
+            &r.name == function
+                || r.address.to_string() == *function
+                || crate::session::default_name(r.address) == *function
+        });
     }
     let count = |v: VerdictId| records.iter().filter(|r| r.verdict == Some(v)).count();
     let (identical, differs, unchecked) = (
@@ -1752,6 +1765,42 @@ size = 21
             hints,
             ["ovmain: no counterpart in the original"],
             "no overlay to qualify the name with"
+        );
+    }
+
+    #[test]
+    fn a_function_built_under_its_default_name_is_shown_by_its_knowledge_name() {
+        let dir = workspace(2);
+        std::fs::create_dir_all(dir.path().join("knowledge")).unwrap();
+        std::fs::write(
+            dir.path().join("knowledge/symbols.toml"),
+            "schema = 1\n\n[[symbol]]\naddress = \"ovl:A:0000:5002\"\nkind = \"function\"\n\
+             name = \"draw_stats\"\nsource = \"human\"\nconfidence = \"confirmed\"\n",
+        )
+        .unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
+        let knowledge = KnowledgeView::new(&ws, None);
+        let profile = decovery_toolchain::profile("aztec-c86-4.2b").unwrap();
+        let object = aztec_object(&["fun_A_0000_5000_", "fun_A_0000_5002_"]);
+        let mut hints = Vec::new();
+        let (_, placed) = place_objects(
+            &knowledge,
+            &profile,
+            None,
+            &HashMap::new(),
+            &[(0, "a.c", &object)],
+            &mut hints,
+        );
+        let shown: Vec<_> = placed
+            .iter()
+            .map(|b| (b.name.as_str(), b.label.as_str()))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("fun_A_0000_5000", "fun_A_0000_5000"),
+                ("fun_A_0000_5002", "draw_stats")
+            ]
         );
     }
 }

@@ -43,6 +43,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
   identical with WLINK 10.6 in DOSBox (`dosbox-lab`).
 
 ### Fixed
+- `build` reports a function by its knowledge name: a source that still defines it under its default name
+  (`fun_VPCVW_0000_6096`) no longer hides the name given with `annotate`; the rebuild record takes the knowledge's
+  name, the source's name is the fallback, and `build --function` also accepts the default name.
 - Overlay module findings and the `diagnose --deep` refusal for overlay functions no longer carry a run of spaces
   in the middle of the text (a continued string literal kept its indentation).
 - `diagnose --deep` works without a mode (`joint`, structure and registers together); `diagnose --deep NAME` takes
