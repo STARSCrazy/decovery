@@ -9,7 +9,7 @@ use decovery_core::{Address, AddressRange, Analysis, DecompileInfo, LineRanges};
 
 use serde_json::json;
 
-use crate::exemplars::current_source;
+use crate::exemplars::{EXEMPLARS_DISABLED, current_source, exemplars_enabled};
 use crate::output::{
     STALE_ANALYSIS, analysis_stale, function_path, render_function, write_function,
 };
@@ -77,11 +77,16 @@ fn show_impl(
         .then(|| STALE_ANALYSIS.to_string())
         .into_iter()
         .collect();
-    let exemplars = match exemplar_index(session).and_then(|ix| ix.similar(session, start, 3)) {
-        Ok(found) => found,
-        Err(e) => {
-            warnings.push(format!("no exemplars: {e}"));
-            Vec::new()
+    let exemplars = if !exemplars_enabled(session) {
+        warnings.push(EXEMPLARS_DISABLED.to_string());
+        Vec::new()
+    } else {
+        match exemplar_index(session).and_then(|ix| ix.similar(session, start, 3)) {
+            Ok(found) => found,
+            Err(e) => {
+                warnings.push(format!("no exemplars: {e}"));
+                Vec::new()
+            }
         }
     };
     if !exemplars.is_empty() {

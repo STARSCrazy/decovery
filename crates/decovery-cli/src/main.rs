@@ -369,6 +369,9 @@ enum BenchCommand {
         /// Keep the task copies.
         #[arg(long)]
         keep: bool,
+        /// Hide exemplars from the agent in every task (`[rebuild] exemplars = false` in the copies).
+        #[arg(long)]
+        no_exemplars: bool,
     },
     /// Success rate with a 95 % Wilson interval and cost medians/means of one run record. Exit code 0, 2 on
     /// errors.
@@ -961,6 +964,7 @@ fn run(cli: Cli) -> ExitCode {
                     max_total_cost_usd,
                     resume,
                     keep,
+                    no_exemplars,
                 },
         } => {
             let mut options = match std::env::current_exe() {
@@ -978,6 +982,9 @@ fn run(cli: Cli) -> ExitCode {
             options.max_total_cost_usd = max_total_cost_usd;
             options.resume = resume;
             options.keep = keep;
+            if no_exemplars {
+                options.exemplars = Some(false);
+            }
             bench_run(&suite, &options, cli.json)
         }
         Command::Bench {

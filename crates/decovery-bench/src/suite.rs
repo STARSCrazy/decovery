@@ -39,6 +39,8 @@ pub struct TaskDefaults {
     pub prompt: Option<PathBuf>,
     /// How often the harness starts the driver again when it ends unsolved with budget left (0 disables).
     pub max_continuations: u32,
+    /// `false` hides exemplars from the agent: the copy sets `[rebuild] exemplars = false`.
+    pub exemplars: bool,
     #[serde(flatten)]
     pub extra: BTreeMap<String, toml::Value>,
 }
@@ -55,6 +57,7 @@ impl Default for TaskDefaults {
             max_cost_usd: Some(3.0),
             prompt: None,
             max_continuations: 1,
+            exemplars: true,
             extra: BTreeMap::new(),
         }
     }
@@ -71,6 +74,9 @@ pub struct SuiteTask {
     pub start: Option<StartPoint>,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Overrides `defaults.exemplars` for this task.
+    #[serde(default)]
+    pub exemplars: Option<bool>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, toml::Value>,
 }
@@ -87,6 +93,7 @@ impl SuiteTask {
             function,
             start: None,
             tags: Vec::new(),
+            exemplars: None,
             extra: BTreeMap::new(),
         }
     }
