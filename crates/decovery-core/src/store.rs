@@ -233,6 +233,7 @@ mod tests {
             legacy: None,
             plugins: Default::default(),
             overlays: Vec::new(),
+            link: None,
         };
         std::fs::write(dir.join(CONFIG_FILE), toml::to_string(&config).unwrap()).unwrap();
         Workspace {

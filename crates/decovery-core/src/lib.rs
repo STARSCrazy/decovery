@@ -59,6 +59,7 @@ pub use user_config::{
 };
 pub use workspace::{
     AnalysisConfig, DetectedFact, LegacyConfig, LinkConfig, ModuleConfig, OutputConfig,
-    OverlayConfig, PluginConfig, RebuildConfig, RuntimeBase, RuntimeConfig, SegmentConfig,
-    TargetConfig, TargetFormat, UnpackedConfig, Workspace, WorkspaceConfig, WorkspaceError,
+    OverlayConfig, OverlayLinkConfig, PluginConfig, ProgramLinkConfig, RebuildConfig, RuntimeBase,
+    RuntimeConfig, SegmentConfig, TargetConfig, TargetFormat, UnpackedConfig, Workspace,
+    WorkspaceConfig, WorkspaceError,
 };

@@ -123,6 +123,56 @@ pub struct WorkspaceConfig {
     /// `[[overlay]]`: overlay files the main program loads at run time (ADR 0011).
     #[serde(default, rename = "overlay", skip_serializing_if = "Vec::is_empty")]
     pub overlays: Vec<OverlayConfig>,
+    /// `[link]`: how `build` links the whole program and its overlays (ADR 0018).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<ProgramLinkConfig>,
+}
+
+/// `[link]`: the root program `build` links after compiling and compares with the original as a whole file, and
+/// its overlays (ADR 0018).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct ProgramLinkConfig {
+    /// File name of the linked root program; default the target's file name, upper case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    /// Inputs of the root program in link order: source file names in `src/` (their objects) or names from
+    /// `[rebuild] library_objects`.
+    pub objects: Vec<String>,
+    /// Linker flags of the root program.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flags: Option<String>,
+    /// Libraries searched last; default `[rebuild] libraries`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub libraries: Option<Vec<String>>,
+    /// Inputs appended to every overlay's own objects (before the root's symbol file), e.g. `["OVBGN.O"]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overlay_objects: Vec<String>,
+    /// Linker flags of every overlay without its own `flags`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlay_flags: Option<String>,
+    /// `[[link.overlay]]`: the overlays, linked after the root in this order.
+    #[serde(default, rename = "overlay", skip_serializing_if = "Vec::is_empty")]
+    pub overlays: Vec<OverlayLinkConfig>,
+}
+
+/// `[[link.overlay]]`: one overlay linked against the root program's symbols (ADR 0018).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct OverlayLinkConfig {
+    /// The `[[overlay]]` this link rebuilds.
+    pub name: OverlayName,
+    /// File name of the linked overlay; default `<name>.OVR`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    /// Own inputs in link order; default the files of its `[[rebuild.module]]`, else `<name>.c` in lower case.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub objects: Vec<String>,
+    /// Linker flags; default `[link] overlay_flags`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flags: Option<String>,
 }
 
 impl WorkspaceConfig {

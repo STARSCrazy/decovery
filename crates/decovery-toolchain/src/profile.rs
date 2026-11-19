@@ -73,6 +73,18 @@ pub struct LinkerSpec {
     /// The map file the linker can write; `None` when decovery does not read this linker's map.
     #[serde(default)]
     pub map: Option<MapSpec>,
+    /// Pattern of one library on a whole-program link line (ADR 0018): `-l{name}` with `name` the library's file
+    /// stem in lower case (`C.LIB` → `-lc`); `None`: the library's path in `library_dir`.
+    #[serde(default)]
+    pub library_flag: Option<String>,
+    /// How a control file listing the objects is named on the link line (`-f {file}`); `None`: the linker takes
+    /// no control file.
+    #[serde(default)]
+    pub control_file: Option<String>,
+    /// Longest link line the linker takes (the DOS command line); a longer line lists the objects in the control
+    /// file.
+    #[serde(default)]
+    pub line_limit: Option<usize>,
 }
 
 /// How a linker writes a map file with its public symbols.
@@ -370,6 +382,78 @@ impl Profile {
     }
 }
 
+/// A whole-program link line (ADR 0018) and the control file it reads, if any.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct WholeLinkLine {
+    /// The command line.
+    pub line: String,
+    /// Name and text (CRLF lines) of the control file listing the objects, when the line would be too long.
+    pub control: Option<(String, String)>,
+}
+
+impl Profile {
+    /// The link line of `output` from `objects` (object file names in the build directory, in link order),
+    /// `extra` inputs after them (library objects as paths, a symbol file) and `libraries` (file names such as
+    /// `C.LIB`), with the linker's `command`: `{flags}`, `{output}`, `{objects}` (objects and `extra`),
+    /// `{libraries}`. When the line exceeds the linker's `line_limit` and the linker has a `control_file`, the
+    /// objects go into `<output stem>.LNK` and the line names that file instead.
+    pub fn whole_link_line(
+        &self,
+        flags: &str,
+        objects: &[String],
+        extra: &[String],
+        output: &str,
+        libraries: &[String],
+    ) -> Result<WholeLinkLine, ToolchainError> {
+        let linker = self
+            .linker
+            .as_ref()
+            .ok_or_else(|| ToolchainError::Invalid(format!("profile {} has no linker", self.id)))?;
+        let libraries = libraries
+            .iter()
+            .map(|name| match &linker.library_flag {
+                Some(pattern) => {
+                    let stem = name.rsplit_once('.').map_or(name.as_str(), |(s, _)| s);
+                    pattern.replace("{name}", &stem.to_ascii_lowercase())
+                }
+                None => format!("{}\\{name}", linker.library_dir),
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let render = |inputs: &str| {
+            collapse(
+                &linker
+                    .command
+                    .replace("{flags}", flags)
+                    .replace("{output}", output)
+                    .replace("{objects}", inputs)
+                    .replace("{libraries}", &libraries),
+            )
+        };
+        let all: Vec<String> = objects.iter().chain(extra).cloned().collect();
+        let line = render(&all.join(" "));
+        let too_long = linker.line_limit.is_some_and(|limit| line.len() > limit);
+        match (&linker.control_file, too_long) {
+            (Some(pattern), true) => {
+                let stem = output.rsplit_once('.').map_or(output, |(s, _)| s);
+                let file = format!("{stem}.LNK");
+                let mut inputs = vec![pattern.replace("{file}", &file)];
+                inputs.extend(extra.iter().cloned());
+                let text: String = objects.iter().map(|o| format!("{o}\r\n")).collect();
+                Ok(WholeLinkLine {
+                    line: render(&inputs.join(" ")),
+                    control: Some((file, text)),
+                })
+            }
+            _ => Ok(WholeLinkLine {
+                line,
+                control: None,
+            }),
+        }
+    }
+}
+
 /// The profile that runs the assembler of `profile`: the profile owning the assembler (`profile` itself or the one
 /// its `[assembler] profile` names, followed), with the assembler command as its compile command (`{output}`,
 /// `{input}`; no flags). `None` when the profile has no assembler.
@@ -447,6 +531,48 @@ mod tests {
 
     fn strings(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn aztec_whole_link_line_names_libraries_by_flag() {
+        let p = profile("aztec-c86-4.2b").unwrap();
+        let line = p
+            .whole_link_line(
+                "+c af02 -r",
+                &strings(&["DSMAIN.O", "DSASM.O"]),
+                &strings(&[r"D:\LIB\OVLD.O"]),
+                "DS.EXE",
+                &strings(&["C.LIB"]),
+            )
+            .unwrap();
+        assert_eq!(
+            line.line,
+            r"LN +c af02 -r -o DS.EXE DSMAIN.O DSASM.O D:\LIB\OVLD.O -lc"
+        );
+        assert_eq!(line.control, None);
+    }
+
+    #[test]
+    fn aztec_whole_link_line_lists_long_inputs_in_a_control_file() {
+        let p = profile("aztec-c86-4.2b").unwrap();
+        let objects: Vec<String> = (0..20).map(|i| format!("PART{i:02}.O")).collect();
+        let line = p
+            .whole_link_line(
+                "",
+                &objects,
+                &strings(&[r"D:\LIB\OVBGN.O", "DS.RSM"]),
+                "VMAZE.OVR",
+                &strings(&["C.LIB"]),
+            )
+            .unwrap();
+        assert_eq!(
+            line.line,
+            r"LN -o VMAZE.OVR -f VMAZE.LNK D:\LIB\OVBGN.O DS.RSM -lc"
+        );
+        let (file, text) = line.control.unwrap();
+        assert_eq!(file, "VMAZE.LNK");
+        assert!(text.starts_with("PART00.O\r\nPART01.O\r\n"));
+        assert_eq!(text.lines().count(), 20);
     }
 
     #[test]
