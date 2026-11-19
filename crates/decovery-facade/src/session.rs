@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use decovery_core::{
-    Address, Analysis, Confidence, Provider, RebuildRecord, Symbol, TargetFormat, Workspace,
-    read_rebuild,
+    Address, Analysis, Confidence, Provider, RebuildRecord, SegmentConfig, Symbol, TargetFormat,
+    Workspace, read_rebuild,
 };
 use decovery_diff::{NameAt, SymbolView};
 
@@ -16,6 +16,57 @@ pub struct Session {
     pub workspace: Workspace,
     pub analysis: Analysis,
     pub rebuild: Vec<RebuildRecord>,
+}
+
+/// Name of the memory-map segment that [`add_uninitialized_data`] derives.
+pub const UNINITIALIZED_SEGMENT: &str = "uninitialized";
+
+/// The memory DOS allocates behind an MZ program's load image (`minalloc` paragraphs of the header: the
+/// uninitialised data in DS, BSS, and the stack and heap after it) as a segment of the memory map, so globals there
+/// can be named. It starts at the paragraph-aligned end of the load image (`seg:SSSS:000O` with the image length as
+/// paragraph and offset) and has no file bytes. Nothing is added when the target is not MZ, its header cannot be
+/// read, `minalloc` is 0, or a configured segment already holds the image end. Only the session sees it;
+/// `decovery.toml` is not changed.
+pub fn add_uninitialized_data(ws: &mut Workspace) {
+    if ws.config.target.format != TargetFormat::Mz {
+        return;
+    }
+    let path = crate::program::target_path(ws);
+    let Some((header, file_len)) = read_mz_header(&path) else {
+        return;
+    };
+    if header.min_alloc == 0 {
+        return;
+    }
+    let (_, image_len) = decovery_loaders::mz_image_range(&header, file_len);
+    let (Ok(seg), Ok(off)) = (u16::try_from(image_len >> 4), u16::try_from(image_len & 15)) else {
+        return;
+    };
+    let start = Address::Seg { seg, off };
+    let segments = &mut ws.config.target.segments;
+    if segments
+        .iter()
+        .any(|s| crate::resolve::in_segment(s, start))
+    {
+        return;
+    }
+    segments.push(SegmentConfig::new(
+        UNINITIALIZED_SEGMENT,
+        start,
+        u64::from(header.min_alloc) * 16,
+        None,
+        None,
+        "rw",
+    ));
+}
+
+fn read_mz_header(path: &Path) -> Option<(decovery_loaders::MzHeader, u64)> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let mut head = [0u8; 28];
+    file.read_exact(&mut head).ok()?;
+    Some((decovery_loaders::parse_mz_header(&head).ok()?, len))
 }
 
 /// The name shown for an address.
@@ -30,7 +81,8 @@ pub struct DisplayName {
 impl Session {
     /// Opens the workspace; fails if there is no analysis of this target.
     pub fn open(root: &Path) -> Result<Session, FacadeError> {
-        let workspace = Workspace::open(root)?;
+        let mut workspace = Workspace::open(root)?;
+        add_uninitialized_data(&mut workspace);
         let analysis = Analysis::load(root)?.ok_or(FacadeError::NoAnalysis)?;
         check_target(&workspace, &analysis)?;
         let rebuild = read_rebuild(root)?;
@@ -43,7 +95,8 @@ impl Session {
 
     /// Opens the workspace for `analyze` and `annotate`: without a stored analysis the analysis is empty.
     pub fn open_without_analysis(root: &Path) -> Result<Session, FacadeError> {
-        let workspace = Workspace::open(root)?;
+        let mut workspace = Workspace::open(root)?;
+        add_uninitialized_data(&mut workspace);
         let analysis = match Analysis::load(root)? {
             Some(analysis) => {
                 check_target(&workspace, &analysis)?;

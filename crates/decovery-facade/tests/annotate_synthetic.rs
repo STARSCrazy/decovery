@@ -929,3 +929,71 @@ fn a_name_longer_than_the_compiler_keeps_is_warned() {
     let r = annotate(root, &request("flat:00010200", name("short_name"))).unwrap();
     assert_eq!(r.data["warnings"], serde_json::json!([]));
 }
+
+/// An MZ target: 32-byte header, 0x40-byte image, `minalloc` 0x10 paragraphs; one configured image segment.
+fn mz_workspace(min_alloc: u16) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let mut file = Vec::new();
+    for w in [
+        0x5A4Du16, 96, 1, 0, 2, min_alloc, 0xFFFF, 0, 0x100, 0, 0, 0, 0x1C, 0,
+    ] {
+        file.extend(w.to_le_bytes());
+    }
+    file.resize(32, 0);
+    file.extend([0xC3u8; 0x40]);
+    std::fs::write(root.join("t.exe"), file).unwrap();
+    std::fs::create_dir_all(root.join("knowledge")).unwrap();
+    std::fs::write(
+        root.join("decovery.toml"),
+        format!(
+            r#"schema = 1
+
+[target]
+file = "t.exe"
+sha256 = "{SHA}"
+format = "mz"
+processor = "x86:LE:16:Real Mode"
+
+[[target.segment]]
+name = "image"
+start = "seg:0000:0000"
+length = 64
+file_offset = 32
+permissions = "rwx"
+"#
+        ),
+    )
+    .unwrap();
+    dir
+}
+
+#[test]
+fn uninitialized_data_behind_an_mz_image_can_be_named() {
+    let d = mz_workspace(0x10);
+    let root = d.path();
+    let config = std::fs::read(root.join("decovery.toml")).unwrap();
+    // DS-relative form of an address 0x10 bytes behind the image end (linear 0x50)
+    let r = annotate(root, &request("seg:0001:0040", name("word_0040"))).unwrap();
+    assert_eq!(r.data["changed"], true, "{}", r.data);
+    let s = Workspace::open(root).unwrap().symbols;
+    assert_eq!(s[0].name, "word_0040");
+    assert_eq!(
+        std::fs::read(root.join("decovery.toml")).unwrap(),
+        config,
+        "config unchanged"
+    );
+    // past minalloc (image end 0x40 + 0x100): still outside
+    let err = annotate(root, &request("seg:0000:0140", name("beyond"))).unwrap_err();
+    assert!(matches!(err, FacadeError::OutsideMap(_)), "{err:?}");
+    let s = Session::open_without_analysis(root).unwrap();
+    let seg = s.workspace.config.target.segments.last().unwrap();
+    assert_eq!(
+        (seg.name.as_str(), seg.length, seg.file_offset),
+        ("uninitialized", 0x100, None)
+    );
+    // minalloc 0: nothing is added
+    let d = mz_workspace(0);
+    let err = annotate(d.path(), &request("seg:0000:0050", name("x"))).unwrap_err();
+    assert!(matches!(err, FacadeError::OutsideMap(_)), "{err:?}");
+}
