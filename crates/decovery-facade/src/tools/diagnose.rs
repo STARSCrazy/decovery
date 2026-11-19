@@ -255,18 +255,26 @@ const LISTING_LINES: usize = 60;
 
 /// The instruction pairs side by side as `diagnose` shows them (differing lines marked, long equal runs
 /// collapsed, the counts at the end), cut after [`LISTING_LINES`] lines.
-pub(super) fn listing(pairs: &[Pair]) -> String {
+pub(super) fn listing(pairs: &[Pair]) -> Listing {
+    let counts = decovery_diff::PairCounts::of(pairs);
     let text = pairs_text(pairs);
     let lines: Vec<&str> = text.lines().collect();
     if lines.len() <= LISTING_LINES {
-        return text;
+        return Listing { text, counts };
     }
     let mut out = lines[..LISTING_LINES].join("\n");
     out.push_str(&format!(
         "\n… {} more lines; the whole listing: decovery diagnose\n",
         lines.len() - LISTING_LINES
     ));
-    out
+    Listing { text: out, counts }
+}
+
+/// A differing function side by side for an attempt's `comparison.txt`, with the counts its header gives.
+#[derive(Debug, Clone)]
+pub(crate) struct Listing {
+    pub(crate) text: String,
+    pub(crate) counts: decovery_diff::PairCounts,
 }
 
 /// The whole lines of `text` that fit into `chars`, then the marker.

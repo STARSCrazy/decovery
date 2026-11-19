@@ -519,7 +519,7 @@ pub fn build(
     );
     drop(refs);
     let mut originals: HashMap<Address, String> = HashMap::new();
-    let mut listings: HashMap<Address, String> = HashMap::new();
+    let mut listings: HashMap<Address, super::diagnose::Listing> = HashMap::new();
     let mut relative_targets: HashMap<Address, Vec<Address>> = HashMap::new();
     progress(Progress::new(
         0,
@@ -1733,7 +1733,7 @@ fn attempts_of(
     headers: &BTreeMap<String, String>,
     fingerprint: &str,
     originals: &HashMap<Address, String>,
-    listings: &HashMap<Address, String>,
+    listings: &HashMap<Address, super::diagnose::Listing>,
     record_as: &RecordAs,
 ) -> Vec<Tried> {
     let attempt_sources: Vec<AttemptSource> = sources
@@ -1787,7 +1787,7 @@ fn attempts_of(
             &a,
             object.as_ref().map(|(n, b)| (n.as_str(), *b)),
             message,
-            listings.get(&r.address).map(String::as_str),
+            listings.get(&r.address),
         );
         tried.push(Tried {
             record: a,

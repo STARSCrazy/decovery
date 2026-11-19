@@ -335,9 +335,15 @@ impl ExemplarIndex {
             .into_iter()
             .map(|r| {
                 let e = &self.file.entries[r.candidate];
+                // the knowledge's name first, the rebuild's (source) name when the knowledge has none
+                let known = session.name_of(e.address);
                 Exemplar {
                     address: e.address,
-                    name: e.name.clone(),
+                    name: if known.is_default {
+                        e.name.clone()
+                    } else {
+                        known.name
+                    },
                     file: e.file.clone(),
                     flags: e.flags.clone(),
                     similarity: r.similarity,

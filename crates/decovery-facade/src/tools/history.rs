@@ -211,7 +211,7 @@ impl<'a> AttemptSource<'a> {
         record: &AttemptRecord,
         object: Option<(&str, &[u8])>,
         message: Option<&str>,
-        listing: Option<&str>,
+        listing: Option<&super::diagnose::Listing>,
     ) -> BTreeMap<String, Vec<u8>> {
         let mut files = BTreeMap::new();
         if let Some((start, end)) = self.span(&record.name) {
@@ -248,15 +248,27 @@ impl<'a> AttemptSource<'a> {
 
 /// The comparison of an attempt as text (content only, no time: equal attempts archive once): the counts, then
 /// for a differing function its differing region side by side (`listing`).
-fn comparison_text(r: &AttemptRecord, listing: Option<&str>) -> String {
+fn comparison_text(r: &AttemptRecord, listing: Option<&super::diagnose::Listing>) -> String {
     let id = |v: Option<String>| v.unwrap_or_else(|| "-".into());
+    // with a listing, the instruction counts are the listing's, so header and listing agree
+    let instructions = match listing {
+        Some(l) => match l.counts.parts() {
+            Some(parts) => format!("{} ({parts})", l.counts.differing()),
+            None => "0".to_string(),
+        },
+        None => id(r.instructions_differing.map(|n| n.to_string())),
+    };
     let mut text = format!(
-        "function: {} at {}\nresult: {}\nverdict: {}\ninstructions differing: {}\nbytes differing: {}\n",
+        "function: {} at {}
+result: {}
+verdict: {}
+instructions differing: {instructions}
+bytes differing: {}
+",
         r.name,
         r.address,
         r.result.id(),
         id(r.verdict.map(|v| v.id().to_string())),
-        id(r.instructions_differing.map(|n| n.to_string())),
         id(r.bytes_differing.map(|n| n.to_string())),
     );
     if !r.blockers.is_empty() {
@@ -268,7 +280,7 @@ fn comparison_text(r: &AttemptRecord, listing: Option<&str>) -> String {
     if let Some(message) = r.extra.get("message").and_then(Value::as_str) {
         text.push_str(&format!("message:\n{message}\n"));
     }
-    if let Some(listing) = listing {
+    if let Some(listing) = listing.map(|l| l.text.as_str()) {
         text.push_str("\nrebuild against original (≠ differs, + rebuild only, - original only):\n");
         text.push_str(listing);
         if !listing.ends_with('\n') {
@@ -533,4 +545,40 @@ pub fn history_archive(
     );
     response.handles = handles;
     Ok(response)
+}
+
+#[cfg(test)]
+mod comparison_tests {
+    use decovery_core::{Address, AttemptOrigin, AttemptRecord, RebuildResult};
+    use decovery_diff::{Pair, PairKind};
+
+    use super::comparison_text;
+
+    #[test]
+    fn header_and_listing_count_an_inserted_instruction_alike() {
+        let mut pairs = vec![Pair::new(PairKind::Equal, None, None); 29];
+        pairs.insert(3, Pair::new(PairKind::RebuildOnly, None, None));
+        let listing = super::super::diagnose::listing(&pairs);
+        let mut r = AttemptRecord::new(
+            Address::Seg { seg: 0, off: 0x10 },
+            "f",
+            AttemptOrigin::Build,
+            RebuildResult::Differs,
+        );
+        // the byte comparison of the shifted tail counted two
+        r.instructions_differing = Some(2);
+        r.bytes_differing = Some(2);
+        let text = comparison_text(&r, Some(&listing));
+        assert!(
+            text.contains("instructions differing: 1 (1 inserted (rebuild only))"),
+            "{text}"
+        );
+        assert!(
+            text.contains("29 equal, 1 differing (1 inserted (rebuild only))"),
+            "{text}"
+        );
+        // without a listing the record's count stands
+        let text = comparison_text(&r, None);
+        assert!(text.contains("instructions differing: 2\n"), "{text}");
+    }
 }

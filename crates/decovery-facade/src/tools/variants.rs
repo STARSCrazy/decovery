@@ -96,7 +96,7 @@ struct VariantResult {
     /// A shrunk variant judged identical, judged again on its full file: this is the full file's result.
     confirmed_on_full: bool,
     /// A differing variant: its differing region side by side, for the attempt's `comparison.txt`.
-    listing: Option<String>,
+    listing: Option<super::diagnose::Listing>,
 }
 
 impl VariantResult {
@@ -1097,7 +1097,7 @@ pub(super) fn build_variants(
                 &a,
                 object.as_ref().map(|(n, b)| (n.as_str(), *b)),
                 compiled_file.map(|c| c.message.as_str()),
-                result.listing.as_deref(),
+                result.listing.as_ref(),
             );
             tried.push(Tried {
                 record: a,
