@@ -1657,6 +1657,9 @@ fn annotate(workspace: &Path, request: &Annotation, json: bool) -> Result<(), Fa
 
 fn analyze(workspace: &Path, options: &AnalyzeOptions, json: bool) -> Result<(), FacadeError> {
     let progress = |p: Progress| {
+        if json {
+            return;
+        }
         let message = p
             .message
             .filter(|m| !m.trim().is_empty())
@@ -1683,7 +1686,11 @@ fn build(
     function_sources: &[PathBuf],
     json: bool,
 ) -> Result<bool, FacadeError> {
+    // with --json the output is the JSON alone, also when stdout and stderr are read together
     let progress = |p: Progress| {
+        if json {
+            return;
+        }
         if let Some(message) = p.message.filter(|m| !m.trim().is_empty()) {
             eprintln!("{message}");
         }
@@ -1783,7 +1790,11 @@ fn function_line(f: &serde_json::Value) -> String {
 
 /// Links and prints the result; the exit code follows the result (0 identical, 1 differs, 2 error).
 fn link(workspace: &Path, json: bool) -> Result<ExitCode, FacadeError> {
+    // with --json the output is the JSON alone, also when stdout and stderr are read together
     let progress = |p: Progress| {
+        if json {
+            return;
+        }
         if let Some(message) = p.message.filter(|m| !m.trim().is_empty()) {
             eprintln!("{message}");
         }

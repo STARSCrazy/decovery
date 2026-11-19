@@ -46,6 +46,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
   identical with WLINK 10.6 in DOSBox (`dosbox-lab`).
 
 ### Fixed
+- `--json build` (and `link`, `analyze`) prints no progress lines: the output is the JSON alone, also when stdout
+  and stderr are read together.
 - `build` on Aztec C86 overlays: a function whose relocated field the overlay module comparison finds wrong (a
   struct field at `+0x10` instead of `+0x14`) is no longer `identical` at function level; it differs with a
   `wrong-absolute-ref`/`wrong-relative-ref` blocker at the field and a message pointing to the module verdict (when

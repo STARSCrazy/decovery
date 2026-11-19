@@ -48,7 +48,8 @@ decovery mcp                                       # the same commands as MCP to
 ```
 
 Every command takes `--workspace <dir>` (default: the current directory), `--json` and `--jobs <n>` (most compile
-jobs in flight at once over all runners; default: the number of logical cores).
+jobs in flight at once over all runners; default: the number of logical cores). With `--json`, stdout holds the
+JSON response alone and `build`, `link` and `analyze` print no progress lines.
 
 `build` exits 0 when every built function is identical, 1 when one differs or a file failed, 2 on errors; `link`
 exits 0 when the program is identical, 1 when it differs, 2 when the link failed. Only decovery sets verdicts:
