@@ -43,6 +43,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
   identical with WLINK 10.6 in DOSBox (`dosbox-lab`).
 
 ### Fixed
+- `diagnose` and `compare --function` on overlay functions: the original bytes are read from the overlay, `compare`
+  finds overlay functions by address, knowledge name or default name (Aztec objects compared as `build` does), an
+  exact name wins over overlay-qualified ones and an ambiguous name lists its candidates; `diagnose --deep` refuses
+  overlay functions with a clear message.
 - Assembler sources: jump tables in a segment of their own, label offsets in another code segment and functions
   the analysis split are compared correctly (ADR 0006 item 13); `data_` default names resolve like `DAT_`.
 - Phase-2 parity refresh: 603 of Decomp's 618 identical functions confirmed, 15 listed deviations

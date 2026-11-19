@@ -1,6 +1,8 @@
 //! Turning user input (name, address, file offset) into an analyzed function.
 
-use decovery_core::{Address, AddressInput, Confidence, SegmentConfig};
+use decovery_core::{
+    Address, AddressInput, Analysis, Confidence, RebuildRecord, SegmentConfig, Symbol, Workspace,
+};
 
 use crate::{FacadeError, Session};
 
@@ -105,6 +107,66 @@ fn from_file_offset(session: &Session, off: u64) -> Result<Address, FacadeError>
     Err(FacadeError::Invalid(format!(
         "file offset {off:#x} is not in any segment"
     )))
+}
+
+/// The address a function name stands for, before the analysis is asked: an exact name of the knowledge (active
+/// symbol) or of the analysis wins; else the rebuild records of that name and the overlay-qualified knowledge names
+/// `<OVERLAY>_<name>` of a function in that overlay (how Decomp names each overlay's copy of `ovmain`). Several
+/// such candidates are an error that lists them. `None` when nothing matches.
+pub fn function_by_name(
+    ws: &Workspace,
+    analysis: Option<&Analysis>,
+    rebuild: &[RebuildRecord],
+    name: &str,
+) -> Result<Option<Address>, FacadeError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Ok(None);
+    }
+    let active = |s: &&Symbol| s.confidence != Confidence::Refuted && !s.name.is_empty();
+    if let Some(s) = ws.symbols.iter().filter(active).find(|s| s.name == name) {
+        return Ok(Some(s.address));
+    }
+    if let Some(f) = analysis
+        .into_iter()
+        .flat_map(|a| &a.functions)
+        .find(|f| f.provider_name.as_deref() == Some(name))
+    {
+        return Ok(Some(f.start));
+    }
+    let mut candidates: Vec<Address> = Vec::new();
+    let records = rebuild.iter().filter(|r| r.name == name).map(|r| r.address);
+    let qualified = ws.symbols.iter().filter(active).filter_map(|s| {
+        let overlay = s.address.overlay()?;
+        (s.name.strip_prefix(overlay.as_str())?.strip_prefix('_')? == name).then_some(s.address)
+    });
+    for a in records.chain(qualified) {
+        if !candidates.contains(&a) {
+            candidates.push(a);
+        }
+    }
+    match candidates.as_slice() {
+        [] => Ok(None),
+        [one] => Ok(Some(*one)),
+        many => {
+            let listed: Vec<String> = many
+                .iter()
+                .map(|a| {
+                    let shown = ws
+                        .symbols
+                        .iter()
+                        .filter(active)
+                        .find(|s| s.address == *a)
+                        .map_or_else(|| crate::session::default_name(*a), |s| s.name.clone());
+                    format!("{shown} ({a})")
+                })
+                .collect();
+            Err(FacadeError::Invalid(format!(
+                "{name} is ambiguous: {}; give the full name or the address",
+                listed.join(", ")
+            )))
+        }
+    }
 }
 
 pub(crate) fn in_segment(seg: &SegmentConfig, at: Address) -> bool {

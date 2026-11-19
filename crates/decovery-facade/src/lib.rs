@@ -21,9 +21,9 @@ pub use output::{
     Change, OutputReport, StatusCounts, function_path, render_function, status_counts,
     write_affected, write_all,
 };
-pub use resolve::{Resolved, resolve};
+pub use resolve::{Resolved, function_by_name, resolve};
 pub use response::{Budget, Handle, Response, store_handle};
-pub use session::{DisplayName, KnowledgeView, Session};
+pub use session::{DisplayName, KnowledgeView, Session, parse_default_name};
 pub use tools::{
     ACTOR_ENV, AnalyzeOptions, AnnotateAction, Annotation, BuildRequest, DEFAULT_HISTORY_LIMIT,
     DEFAULT_LIMIT, DEFAULT_SIMILAR_LIMIT, FindQuery, FindWhat, FunctionFilter, FunctionSort,

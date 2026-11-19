@@ -28,11 +28,11 @@ fn signed(bytes: &[u8]) -> i64 {
     }
 }
 
-/// Numeric value of an address inside its space (flat: linear; segmented: offset).
+/// Numeric value of an address inside its space (flat: linear; segmented and overlay: offset).
 fn base_of(at: Address) -> Option<u64> {
     match at {
         Address::Flat(a) => Some(u64::from(a)),
-        Address::Seg { off, .. } => Some(u64::from(off)),
+        Address::Seg { off, .. } | Address::Ovl { off, .. } => Some(u64::from(off)),
         _ => None,
     }
 }
@@ -42,6 +42,11 @@ fn address_in_space(at: Address, value: i64) -> Option<Address> {
     match at {
         Address::Flat(_) => Some(Address::Flat(value as u32)),
         Address::Seg { seg, .. } => Some(Address::Seg {
+            seg,
+            off: value as u16,
+        }),
+        Address::Ovl { overlay, seg, .. } => Some(Address::Ovl {
+            overlay,
             seg,
             off: value as u16,
         }),

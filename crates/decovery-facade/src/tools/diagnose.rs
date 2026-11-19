@@ -1,5 +1,6 @@
 //! `diagnose`: why a rebuilt function differs from the original and what to try.
 
+use decovery_core::Address;
 use decovery_diff::{
     CompareOptions, PairKind, classify_deviation, diagnose, instruction_pairs, pairs_text,
 };
@@ -8,7 +9,10 @@ use decovery_toolchain::rebuild_profile;
 use serde_json::{Value, json};
 
 use super::build::{OBJECTS_DIR, is_public, original_len, symbol_sizes, toolchain};
-use crate::{Budget, FacadeError, KnowledgeView, Response, Session, resolve, store_handle};
+
+use crate::{
+    Budget, FacadeError, KnowledgeView, Response, Session, function_by_name, resolve, store_handle,
+};
 
 fn no_object(name: &str, file: Option<&str>) -> FacadeError {
     FacadeError::Invalid(format!(
@@ -27,18 +31,9 @@ pub fn diagnose_tool(
     target: &str,
     budget: Budget,
 ) -> Result<Response, FacadeError> {
-    // a rebuild record by name or address first, else the analyzed function the target resolves to
-    let trimmed = target.trim();
-    let by_record = session
-        .rebuild
-        .iter()
-        .find(|r| r.name == trimmed || r.address.to_string() == trimmed);
-    let start = match by_record {
-        Some(r) => r.address,
-        None => resolve(session, target)?.function,
-    };
+    let start = function_start(session, target)?;
     let name = session.name_of(start).name;
-    let record = by_record.or_else(|| session.rebuild.iter().find(|r| r.address == start));
+    let record = session.rebuild.iter().find(|r| r.address == start);
     let file = record.and_then(|r| r.file.as_deref());
     let (Some(record), Some(file)) = (record, file) else {
         return Err(no_object(&name, file));
@@ -155,6 +150,34 @@ pub fn diagnose_tool(
     );
     response.handles = handles;
     Ok(response)
+}
+
+/// The function `target` names: a rebuild record's address, else a name by [`function_by_name`] (the analyzed
+/// function containing it when no record is at that address), else what [`resolve`] resolves it to.
+pub(super) fn function_start(session: &Session, target: &str) -> Result<Address, FacadeError> {
+    let trimmed = target.trim();
+    if let Some(r) = session
+        .rebuild
+        .iter()
+        .find(|r| r.address.to_string() == trimmed)
+    {
+        return Ok(r.address);
+    }
+    let by_name = function_by_name(
+        &session.workspace,
+        Some(&session.analysis),
+        &session.rebuild,
+        trimmed,
+    )?;
+    match by_name {
+        Some(a) if session.rebuild.iter().any(|r| r.address == a) => Ok(a),
+        Some(a) => Ok(session
+            .analysis
+            .index()
+            .function_containing(a)
+            .map_or(a, |f| f.start)),
+        None => Ok(resolve(session, target)?.function),
+    }
 }
 
 /// The whole lines of `text` that fit into `chars`, then the marker.

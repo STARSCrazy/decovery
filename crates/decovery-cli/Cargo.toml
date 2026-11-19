@@ -28,6 +28,7 @@ toml.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 decovery-x86.workspace = true
+decovery-objects = { workspace = true, features = ["test-writer"] }
 
 [lints]
 workspace = true

@@ -122,6 +122,10 @@ decovery overlay remove VINIT
 Functions in an overlay have addresses of the form `ovl:NAME:SSSS:OOOO` (ADR 0011). `migrate` takes Decomp's
 overlay list over unchanged.
 
+`diagnose` and `compare --function` take an overlay function by address, by its knowledge name (`VPCVW_ovmain`) or by
+its C name when that is unique; a C name used in several overlays (`ovmain`) is an error that lists the candidates.
+`diagnose --deep` is not available for overlay functions (the `decomp-legacy` plugin takes `flat:` and `seg:` only).
+
 The compilers run in an emulator plugin:
 
 - `decovery setup unicorn-dos` creates a venv with the `unicorn-dos` plugin and the unicorn emulator (installed by pip)

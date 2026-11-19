@@ -2,8 +2,10 @@
 
 use std::path::{Path, PathBuf};
 
-use decovery_core::{Address, Analysis, Confidence, SymbolKind, Workspace};
-use decovery_diff::{Blocker, CompareOptions, Comparison, Decoration, Verdict, compare};
+use decovery_core::{Address, Analysis, Confidence, Workspace, read_rebuild};
+use decovery_diff::{
+    Blocker, CompareOptions, Comparison, Decoration, Verdict, compare, compare_with_gaps,
+};
 use decovery_facade::KnowledgeView;
 use decovery_objects::{ObjectFormat, functions, read_object};
 use serde_json::{Value, json};
@@ -43,16 +45,62 @@ pub fn run(request: &Request) -> Result<Outcome, String> {
     let analysis = Analysis::load(&ws.root)
         .map_err(|e| format!("cannot read the analysis of {}: {e}", ws.root.display()))?;
     let knowledge = KnowledgeView::new(&ws, analysis.as_ref());
+    let rebuild = read_rebuild(&ws.root).map_err(|e| {
+        format!(
+            "cannot read the rebuild records of {}: {e}",
+            ws.root.display()
+        )
+    })?;
+    let target = request.function.trim();
+    // an address (`flat:`, `seg:`, `ovl:`), else a name: exact first, then rebuild records and overlay-qualified
+    // names (`<OVERLAY>_<name>`), else a default name `fun_…`
+    let address = if target.contains(':') {
+        target
+            .parse::<Address>()
+            .map_err(|e| format!("{target}: {e}"))?
+    } else {
+        decovery_facade::function_by_name(&ws, analysis.as_ref(), &rebuild, target)
+            .map_err(|e| e.to_string())?
+            .or_else(|| decovery_facade::parse_default_name(target))
+            .ok_or_else(|| format!("no function named {target} in the knowledge"))?
+    };
     let symbol = ws
         .symbols
         .iter()
-        .filter(|s| s.confidence != Confidence::Refuted)
-        .find(|s| s.name == request.function && s.kind == SymbolKind::Function)
-        .ok_or_else(|| format!("no function named {} in the knowledge", request.function))?;
-    let address = symbol.address;
+        .filter(|s| s.confidence != Confidence::Refuted && !s.name.is_empty())
+        .find(|s| s.address == address);
     let original_len = request
         .length
-        .or_else(|| symbol.size.and_then(|s| u32::try_from(s).ok()));
+        .or_else(|| {
+            symbol
+                .and_then(|s| s.size)
+                .and_then(|s| u32::try_from(s).ok())
+        })
+        .or_else(|| {
+            let index = analysis.as_ref()?.index();
+            let f = index.function_at(address)?;
+            u32::try_from(f.end.bytes_from(f.start)?.checked_add(1)?).ok()
+        });
+    // the names the rebuilt function may carry in the object: as asked, the rebuild record's, the symbol's, and
+    // the symbol's without its overlay prefix
+    let mut names: Vec<String> = vec![target.to_string()];
+    names.extend(
+        rebuild
+            .iter()
+            .filter(|r| r.address == address)
+            .map(|r| r.name.clone()),
+    );
+    if let Some(s) = symbol {
+        names.push(s.name.clone());
+        if let Some(stripped) = address
+            .overlay()
+            .and_then(|o| s.name.strip_prefix(o.as_str()))
+            .and_then(|n| n.strip_prefix('_'))
+        {
+            names.push(stripped.to_string());
+        }
+    }
+    let shown = symbol.map_or_else(|| target.to_string(), |s| s.name.clone());
 
     let object_path = resolve(&request.object, &ws.root);
     let bytes = std::fs::read(&object_path)
@@ -77,18 +125,21 @@ pub fn run(request: &Request) -> Result<Outcome, String> {
         .modules
         .iter()
         .flat_map(functions)
-        .find(|f| decoration.undecorate(f.name) == request.function)
-        .ok_or_else(|| {
-            format!(
-                "function {} is not in {}",
-                request.function,
-                object_path.display()
-            )
-        })?;
+        .find(|f| {
+            let name = decoration.undecorate(f.name);
+            names.iter().any(|n| n == name || n == f.name)
+        })
+        .ok_or_else(|| format!("function {shown} is not in {}", object_path.display()))?;
 
     let program = decovery_facade::program::load(&ws).map_err(|e| e.to_string())?;
     let options = CompareOptions::new(request.padding, original_len);
-    let comparison = compare(&view, address, &program, &knowledge, &decoration, &options);
+    let comparison = if format == ObjectFormat::Aztec {
+        // no linker (phase 4): object against image, relocated fields are link gaps, as `build` compares
+        let image = program.read(address, view.code().len()).unwrap_or(&[]);
+        compare_with_gaps(&view, image, address)
+    } else {
+        compare(&view, address, &program, &knowledge, &decoration, &options)
+    };
     let near = match (&comparison.verdict, comparison.metrics.first_difference) {
         (Verdict::Differs, Some(offset)) => {
             decovery_facade::differs_near(&ws.root, address, offset)
@@ -97,7 +148,7 @@ pub fn run(request: &Request) -> Result<Outcome, String> {
     };
     Ok(Outcome {
         near,
-        function: request.function.clone(),
+        function: shown,
         address,
         original_len,
         comparison,

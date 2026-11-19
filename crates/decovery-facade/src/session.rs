@@ -205,7 +205,7 @@ pub(crate) fn default_name(at: Address) -> String {
 }
 
 /// The address a default name stands for (inverse of [`default_name`]).
-pub(crate) fn parse_default_name(name: &str) -> Option<Address> {
+pub fn parse_default_name(name: &str) -> Option<Address> {
     let rest = name.strip_prefix("fun_")?;
     let hex = |t: &str, n: usize| {
         (t.len() == n && t.bytes().all(|b| b.is_ascii_hexdigit()))
