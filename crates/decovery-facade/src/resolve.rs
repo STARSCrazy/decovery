@@ -1,6 +1,8 @@
 //! Turning user input (name, address, file offset) into an analyzed function.
 
-use decovery_core::{Address, AddressInput, Confidence, SegmentConfig};
+use decovery_core::{
+    Address, AddressInput, Analysis, Confidence, RebuildRecord, SegmentConfig, Symbol, Workspace,
+};
 
 use crate::{FacadeError, Session};
 
@@ -43,7 +45,12 @@ pub(crate) fn locate(session: &Session, input: &str) -> Result<Address, FacadeEr
             AddressInput::FileOffset(off) => from_file_offset(session, off)?,
         }
     } else {
-        address_of_name(session, input)?
+        match address_of_name(session, input) {
+            Err(FacadeError::NotFound(_)) if bare_hex(input).is_some() => {
+                address_of_bare_offset(session, input)?
+            }
+            other => other?,
+        }
     };
     check_overlay(session, requested)?;
     if segment_of(session, requested).is_none() {
@@ -86,6 +93,56 @@ fn address_of_name(session: &Session, name: &str) -> Result<Address, FacadeError
     Err(FacadeError::NotFound(name.to_string()))
 }
 
+/// The value of a bare hexadecimal target (`9D6B`, `0x9D6B`): 1 to 8 hex digits.
+fn bare_hex(input: &str) -> Option<u32> {
+    let digits = input
+        .strip_prefix("0x")
+        .or_else(|| input.strip_prefix("0X"))
+        .unwrap_or(input);
+    (digits.len() <= 8 && !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_hexdigit()))
+        .then(|| u32::from_str_radix(digits, 16).ok())
+        .flatten()
+}
+
+/// The offset part of a function start: a segment offset (also of an overlay) or the flat address itself.
+fn offset_part(a: Address) -> u32 {
+    match a {
+        Address::Flat(v) => v,
+        Address::Seg { off, .. } | Address::Ovl { off, .. } => u32::from(off),
+        Address::Sel { off, .. } => off,
+        _ => 0,
+    }
+}
+
+/// The function whose start has the offset `input` (bare hex) in the main program or any overlay. Several are
+/// an error listing their full addresses with names.
+fn address_of_bare_offset(session: &Session, input: &str) -> Result<Address, FacadeError> {
+    let value = bare_hex(input).ok_or_else(|| FacadeError::NotFound(input.to_string()))?;
+    let mut found: Vec<Address> = session
+        .analysis
+        .functions
+        .iter()
+        .map(|f| f.start)
+        .filter(|a| offset_part(*a) == value)
+        .collect();
+    found.sort();
+    found.dedup();
+    match found.as_slice() {
+        [] => Err(FacadeError::NotFound(input.to_string())),
+        [one] => Ok(*one),
+        many => {
+            let listed: Vec<String> = many
+                .iter()
+                .map(|a| format!("{} ({a})", session.name_of(*a).name))
+                .collect();
+            Err(FacadeError::Invalid(format!(
+                "{input} is ambiguous: {}; give the full address",
+                listed.join(", ")
+            )))
+        }
+    }
+}
+
 fn from_file_offset(session: &Session, off: u64) -> Result<Address, FacadeError> {
     // `file:` offsets are offsets in the main program's file; overlay segments hold offsets in their own files.
     for seg in &session.workspace.config.target.segments {
@@ -105,6 +162,66 @@ fn from_file_offset(session: &Session, off: u64) -> Result<Address, FacadeError>
     Err(FacadeError::Invalid(format!(
         "file offset {off:#x} is not in any segment"
     )))
+}
+
+/// The address a function name stands for, before the analysis is asked: an exact name of the knowledge (active
+/// symbol) or of the analysis wins; else the rebuild records of that name and the overlay-qualified knowledge names
+/// `<OVERLAY>_<name>` of a function in that overlay (how Decomp names each overlay's copy of `ovmain`). Several
+/// such candidates are an error that lists them. `None` when nothing matches.
+pub fn function_by_name(
+    ws: &Workspace,
+    analysis: Option<&Analysis>,
+    rebuild: &[RebuildRecord],
+    name: &str,
+) -> Result<Option<Address>, FacadeError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Ok(None);
+    }
+    let active = |s: &&Symbol| s.confidence != Confidence::Refuted && !s.name.is_empty();
+    if let Some(s) = ws.symbols.iter().filter(active).find(|s| s.name == name) {
+        return Ok(Some(s.address));
+    }
+    if let Some(f) = analysis
+        .into_iter()
+        .flat_map(|a| &a.functions)
+        .find(|f| f.provider_name.as_deref() == Some(name))
+    {
+        return Ok(Some(f.start));
+    }
+    let mut candidates: Vec<Address> = Vec::new();
+    let records = rebuild.iter().filter(|r| r.name == name).map(|r| r.address);
+    let qualified = ws.symbols.iter().filter(active).filter_map(|s| {
+        let overlay = s.address.overlay()?;
+        (s.name.strip_prefix(overlay.as_str())?.strip_prefix('_')? == name).then_some(s.address)
+    });
+    for a in records.chain(qualified) {
+        if !candidates.contains(&a) {
+            candidates.push(a);
+        }
+    }
+    match candidates.as_slice() {
+        [] => Ok(None),
+        [one] => Ok(Some(*one)),
+        many => {
+            let listed: Vec<String> = many
+                .iter()
+                .map(|a| {
+                    let shown = ws
+                        .symbols
+                        .iter()
+                        .filter(active)
+                        .find(|s| s.address == *a)
+                        .map_or_else(|| crate::session::default_name(*a), |s| s.name.clone());
+                    format!("{shown} ({a})")
+                })
+                .collect();
+            Err(FacadeError::Invalid(format!(
+                "{name} is ambiguous: {}; give the full name or the address",
+                listed.join(", ")
+            )))
+        }
+    }
 }
 
 pub(crate) fn in_segment(seg: &SegmentConfig, at: Address) -> bool {

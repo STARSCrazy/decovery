@@ -168,7 +168,7 @@ pub fn exemplar_index(session: &Session) -> Result<ExemplarIndex, FacadeError> {
             else {
                 continue;
             };
-            let base = record.address.linear().unwrap_or(0);
+            let base = code_base(record.address);
             let forms = intern(
                 &instruction_forms(code, bits, base),
                 &mut ids,
@@ -325,7 +325,7 @@ impl ExemplarIndex {
             ))
         })?;
         let bits = bits(&session.workspace);
-        let base = target.linear().unwrap_or(0);
+        let base = code_base(target);
         let mut local = HashMap::new();
         let forms = self.lookup(&instruction_forms(code, bits, base), &mut local);
         let coarse = self.lookup(&coarse_forms(code, bits, base), &mut local);
@@ -335,9 +335,15 @@ impl ExemplarIndex {
             .into_iter()
             .map(|r| {
                 let e = &self.file.entries[r.candidate];
+                // the knowledge's name first, the rebuild's (source) name when the knowledge has none
+                let known = session.name_of(e.address);
                 Exemplar {
                     address: e.address,
-                    name: e.name.clone(),
+                    name: if known.is_default {
+                        e.name.clone()
+                    } else {
+                        known.name
+                    },
                     file: e.file.clone(),
                     flags: e.flags.clone(),
                     similarity: r.similarity,
@@ -395,6 +401,20 @@ fn intern(strings: &[String], ids: &mut HashMap<String, u32>, table: &mut Vec<St
         .collect()
 }
 
+/// The hint of `show` and `find similar` when `[rebuild] exemplars = false`.
+pub(crate) const EXEMPLARS_DISABLED: &str = "exemplars are disabled in this workspace";
+
+/// Whether the workspace offers exemplars (`[rebuild] exemplars`, default true).
+pub(crate) fn exemplars_enabled(session: &Session) -> bool {
+    session
+        .workspace
+        .config
+        .rebuild
+        .as_ref()
+        .and_then(|r| r.exemplars)
+        .unwrap_or(true)
+}
+
 /// The identical functions from C sources that are not library-classified and have an analysed range.
 fn members(session: &Session) -> BTreeMap<Address, &RebuildRecord> {
     let index = session.analysis.index();
@@ -435,8 +455,17 @@ fn bits(ws: &Workspace) -> u32 {
 
 /// The original bytes from `start` through `end` (inclusive).
 fn original_code(program: &decovery_core::Program, start: Address, end: Address) -> Option<&[u8]> {
-    let len = end.linear()?.checked_sub(start.linear()?)?.checked_add(1)?;
+    // `bytes_from` covers overlay addresses, which have no linear address
+    let len = end.bytes_from(start)?.checked_add(1)?;
     program.read(start, usize::try_from(len).ok()?)
+}
+
+/// The address instructions at `at` are decoded at: the linear address, for an overlay address its offset.
+fn code_base(at: Address) -> u64 {
+    match at {
+        Address::Ovl { off, .. } => u64::from(off),
+        _ => at.linear().unwrap_or(0),
+    }
 }
 
 /// The definition of `name` in the source `file` of `src/` (searched like `build` finds sources).

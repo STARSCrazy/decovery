@@ -84,6 +84,66 @@ pub fn instruction_pairs(
     crate::compare::instruction_pairs(f, at, program, symbols, decoration, options)
 }
 
+/// How many pairs of each kind a comparison has: what the side-by-side listing shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct PairCounts {
+    pub equal: u32,
+    /// Same instruction, other encoding (not differing).
+    pub form: u32,
+    /// An instruction of the rebuild against another one of the original.
+    pub changed: u32,
+    /// Instructions only the rebuild has (inserted).
+    pub inserted: u32,
+    /// Instructions only the original has (removed).
+    pub removed: u32,
+}
+
+impl PairCounts {
+    pub fn of(pairs: &[Pair]) -> Self {
+        let mut c = PairCounts::default();
+        for p in pairs {
+            let n = match p.kind {
+                PairKind::Equal => &mut c.equal,
+                PairKind::Form => &mut c.form,
+                PairKind::Different => &mut c.changed,
+                PairKind::RebuildOnly => &mut c.inserted,
+                PairKind::OriginalOnly => &mut c.removed,
+            };
+            *n += 1;
+        }
+        c
+    }
+
+    /// Differing instructions: changed, inserted and removed.
+    pub fn differing(&self) -> u32 {
+        self.changed + self.inserted + self.removed
+    }
+
+    /// `C changed, I inserted (rebuild only), R removed (original only)`, the parts that are 0 left out; `None`
+    /// when nothing differs.
+    pub fn parts(&self) -> Option<String> {
+        let parts: Vec<String> = [
+            (self.changed, "changed"),
+            (self.inserted, "inserted (rebuild only)"),
+            (self.removed, "removed (original only)"),
+        ]
+        .iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, what)| format!("{n} {what}"))
+        .collect();
+        (!parts.is_empty()).then(|| parts.join(", "))
+    }
+
+    /// `N differing (parts)`, see [`PairCounts::parts`].
+    pub fn differing_text(&self) -> String {
+        match self.parts() {
+            Some(parts) => format!("{} differing ({parts})", self.differing()),
+            None => "0 differing".to_string(),
+        }
+    }
+}
+
 /// Equal pairs farther than this from a non-equal pair are collapsed in [`pairs_text`].
 const CONTEXT: usize = 3;
 /// Width of the rebuild column in [`pairs_text`].
@@ -131,20 +191,19 @@ pub fn pairs_text(pairs: &[Pair]) -> String {
         lines.push(line.trim_end().to_string());
     }
     flush(&mut hidden, &mut lines);
-    let count = |k: PairKind| pairs.iter().filter(|p| p.kind == k).count();
+    let counts = PairCounts::of(pairs);
     let rebuild = pairs.iter().filter(|p| p.rebuild.is_some()).count();
     let original = pairs.iter().filter(|p| p.original.is_some()).count();
-    let differing = pairs.iter().filter(|p| p.kind.differs()).count();
-    let form = count(PairKind::Form);
     lines.push(String::new());
     lines.push(format!(
-        "instructions: rebuild {rebuild}, original {original}; {} equal{}, {differing} differing",
-        count(PairKind::Equal),
-        if form > 0 {
-            format!(", {form} only in the encoding")
+        "instructions: rebuild {rebuild}, original {original}; {} equal{}, {}",
+        counts.equal,
+        if counts.form > 0 {
+            format!(", {} only in the encoding", counts.form)
         } else {
             String::new()
-        }
+        },
+        counts.differing_text()
     ));
     let mut text = lines.join("\n");
     text.push('\n');

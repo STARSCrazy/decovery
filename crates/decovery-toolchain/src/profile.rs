@@ -203,6 +203,9 @@ pub struct Profile {
     pub literals: Option<LiteralSpec>,
     /// Flag sets the option search combines; `None` when the profile has none.
     pub search: Option<SearchSpec>,
+    /// Significant characters of an identifier: the compiler cuts longer names silently (Aztec C86: 31), so a
+    /// rebuilt name is matched with the original on that many characters. `None`: no limit.
+    pub name_length: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -248,6 +251,8 @@ struct RawProfile {
     literals: Option<LiteralSpec>,
     #[serde(default)]
     search: Option<SearchSpec>,
+    #[serde(default)]
+    name_length: Option<usize>,
 }
 
 fn parse(text: &str) -> Result<Profile, ToolchainError> {
@@ -292,6 +297,7 @@ fn parse(text: &str) -> Result<Profile, ToolchainError> {
         assembler: raw.assembler,
         literals: raw.literals,
         search: raw.search,
+        name_length: raw.name_length,
     })
 }
 
@@ -459,6 +465,10 @@ mod tests {
     fn embedded_profiles_parse() {
         assert_eq!(profiles().len(), EMBEDDED.len());
         assert!(profiles().iter().all(|p| !p.padding));
+        for p in profiles() {
+            let expected = (p.family == "aztec-c86").then_some(31);
+            assert_eq!(p.name_length, expected, "{}", p.id);
+        }
         for (id, text) in EMBEDDED {
             assert!(text.contains("schema = 1"), "{id}");
             assert_eq!(profile(id).unwrap().id, id);

@@ -19,7 +19,7 @@ use decovery_core::{
     read_rebuild, write_atomic,
 };
 use decovery_diff::{Blocker, ModuleOptions, SharedFunctions, SymbolView, same_code};
-use decovery_objects::{FunctionView, ObjectFile, functions, read_object};
+use decovery_objects::{FunctionView, ObjectFile, ObjectFormat, functions, read_object};
 use decovery_plugin::Progress;
 use decovery_toolchain::{
     CheatFinding, CompiledFile, Profile, SourceJob, SourceSet, definitions, find_cheats,
@@ -95,6 +95,8 @@ struct VariantResult {
     shrunk: Option<(bool, String)>,
     /// A shrunk variant judged identical, judged again on its full file: this is the full file's result.
     confirmed_on_full: bool,
+    /// A differing variant: its differing region side by side, for the attempt's `comparison.txt`.
+    listing: Option<super::diagnose::Listing>,
 }
 
 impl VariantResult {
@@ -112,6 +114,7 @@ impl VariantResult {
             message: Some(message),
             shrunk: None,
             confirmed_on_full: false,
+            listing: None,
         }
     }
 
@@ -273,28 +276,48 @@ impl Compare<'_> {
                 Vec::new(),
             );
         };
-        let module = decovery_diff::compare_module_with(
-            &placements,
-            &self.shared,
-            self.program,
-            self.knowledge,
-            &self.profile.decoration,
-            self.options,
-        );
-        let warnings = module.warnings;
-        let Some(comparison) = module.functions.get(at) else {
+        // an Aztec object has no linker step: judged against the image with link gaps, as `build` does
+        let (functions, warnings) = if self.profile.object_format == ObjectFormat::Aztec {
+            let compared = placements
+                .iter()
+                .map(|p| super::build::compare_aztec(p, self.program))
+                .collect();
+            (compared, Vec::new())
+        } else {
+            let module = decovery_diff::compare_module_with(
+                &placements,
+                &self.shared,
+                self.program,
+                self.knowledge,
+                &self.profile.decoration,
+                self.options,
+            );
+            (module.functions, module.warnings)
+        };
+        let Some(comparison) = functions.get(at) else {
             return (
                 VariantResult::unchecked("unchecked", format!("{function} was not compared")),
                 warnings,
             );
         };
         let m = &comparison.metrics;
+        let listing = (comparison.verdict == decovery_diff::Verdict::Differs).then(|| {
+            let p = &placements[at];
+            let pairs = super::diagnose::function_pairs(
+                &p.function,
+                p.at,
+                self.program,
+                self.knowledge,
+                self.profile,
+                p.original_len,
+            );
+            super::diagnose::listing(&pairs)
+        });
         let mut verdict = verdict_id(&comparison.verdict);
         let checked = verdict != VerdictId::Unchecked;
         let mut blockers: Vec<BlockerRecord> =
             comparison.blockers.iter().map(blocker_record).collect();
-        let mut message = (!checked)
-            .then(|| "the original bytes of the function are not in the program".to_string());
+        let mut message = (!checked).then(|| unchecked_message(&comparison.blockers));
         // inline assembly is never identical; a code pragma or a finding outside any function blocks every
         // function of the file
         let name = placed[at].name.as_str();
@@ -332,6 +355,7 @@ impl Compare<'_> {
                 message,
                 shrunk: None,
                 confirmed_on_full: false,
+                listing,
             },
             warnings,
         )
@@ -363,6 +387,37 @@ impl Texts {
             groups.len() - 1
         }))
     }
+}
+
+/// Why a comparison is unchecked: the original's bytes are missing, else the code is not 16- or 32-bit.
+fn unchecked_message(blockers: &[Blocker]) -> String {
+    if blockers.contains(&Blocker::OriginalUnavailable) {
+        "the original bytes of the function are not in the program".to_string()
+    } else {
+        "the function was not compared (its code is not 16- or 32-bit)".to_string()
+    }
+}
+
+/// `function` as the variants name it: a rebuild record's name or address stays; a knowledge name whose address
+/// has a rebuild record (an overlay function the knowledge names `<OVERLAY>_<name>`, recorded by its C name)
+/// becomes that address.
+fn canonical_function(
+    root: &Path,
+    ws: &Workspace,
+    analysis: Option<&Analysis>,
+    function: &str,
+) -> Result<String, FacadeError> {
+    let records = read_rebuild(root)?;
+    if records
+        .iter()
+        .any(|r| r.name == function || r.address.to_string() == function)
+    {
+        return Ok(function.to_string());
+    }
+    Ok(KnowledgeView::new(ws, analysis)
+        .address_of(function)
+        .filter(|a| records.iter().any(|r| r.address == *a))
+        .map_or_else(|| function.to_string(), |a| a.to_string()))
 }
 
 /// The C name of `function` (a name or an address): an address is named by its rebuild record.
@@ -589,8 +644,11 @@ pub(super) fn build_variants(
     }
     let ws = Workspace::open(root)?;
     let analysis = Analysis::load(root)?.filter(|a| a.target_sha256 == ws.config.target.sha256);
+    let function = canonical_function(root, &ws, analysis.as_ref(), function)?;
+    let function = function.as_str();
     let (profile, default_flags) = rebuild_profile(&ws).map_err(toolchain)?;
-    let rebuild = ws.config.rebuild.clone().unwrap_or_default();
+    let mut rebuild = ws.config.rebuild.clone().unwrap_or_default();
+    let _ = super::file_flags::apply_source_flags(root, &mut rebuild);
     let file = match request.files.first() {
         Some(file) => file.clone(),
         None => file_of_function(root, function)?,
@@ -662,7 +720,7 @@ pub(super) fn build_variants(
                             }
                         }
                     })
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| format!("{file}: {e}"))
             }
             (None, None) => Err("no source".to_string()),
         };
@@ -1040,6 +1098,7 @@ pub(super) fn build_variants(
                 &a,
                 object.as_ref().map(|(n, b)| (n.as_str(), *b)),
                 compiled_file.map(|c| c.message.as_str()),
+                result.listing.as_ref(),
             );
             tried.push(Tried {
                 record: a,

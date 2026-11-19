@@ -62,6 +62,7 @@ mod compare;
 mod diagnose;
 mod gaps;
 mod instructions;
+mod main_data;
 mod module;
 mod pairs;
 mod program_le;
@@ -77,13 +78,14 @@ use decovery_objects::FunctionView;
 pub use anchors::{StartupFrames, startup_frames};
 pub use classify::{DeviationKind, Stage, classify_code, classify_deviation};
 pub use compare::{
-    InsertCode, SharedFunctions, compare, compare_module, compare_module_with, insert_code,
-    same_code,
+    InsertCode, SharedFunctions, compare, compare_module, compare_module_with, disassembly,
+    insert_code, same_code,
 };
 pub use diagnose::{Finding, diagnose};
 pub use gaps::compare_with_gaps;
-pub use module::{ModuleVerdict, compare_overlay_module};
-pub use pairs::{Pair, PairKind, instruction_pairs, pairs_text};
+pub use main_data::{DataState, MainData, aztec_data_segment, compare_main_data};
+pub use module::{Common, ModuleVerdict, WrongRef, compare_overlay_module};
+pub use pairs::{Pair, PairCounts, PairKind, instruction_pairs, pairs_text};
 pub use program_le::compare_le;
 pub use program_mz::{Place, PlaceKind, diagnose_mz_link, load_image};
 pub use similar::{

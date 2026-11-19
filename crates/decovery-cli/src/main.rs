@@ -30,7 +30,7 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
     /// Most compile jobs in flight at once over all runners; default: the number of logical cores.
-    #[arg(long, global = true, value_parser = clap::value_parser!(u32).range(1..))]
+    #[arg(short = 'j', long, global = true, value_parser = clap::value_parser!(u32).range(1..))]
     jobs: Option<u32>,
     #[command(subcommand)]
     command: Command,
@@ -75,6 +75,9 @@ enum Command {
         /// Print the instruction address ranges each pseudo-C line came from in front of it.
         #[arg(long)]
         lines: bool,
+        /// Print the original's disassembly of the function after the pseudo-C.
+        #[arg(long)]
+        asm: bool,
     },
     /// Why a rebuilt function differs from the original and what to try: findings of the diagnosis rules, the
     /// kind of deviation and the instructions side by side. Reads the object of the last `build`.
@@ -82,11 +85,12 @@ enum Command {
     /// its report is German). Progress goes to stderr.
     Diagnose {
         /// Function name or address.
-        target: String,
+        target: Option<String>,
         /// Decomp's deeper analysis: context package, structure comparison, Watcom register allocation, stack
-        /// slots, or both together.
-        #[arg(long, value_enum)]
-        deep: Option<Deep>,
+        /// slots, or structure and registers together (`joint`, the default when `--deep` has no mode). A value
+        /// that is no mode is the function: `diagnose --deep NAME` is `diagnose NAME --deep joint`.
+        #[arg(long, value_name = "MODE", num_args = 0..=1, default_missing_value = "joint")]
+        deep: Option<String>,
         /// A candidate source of the function to analyze instead of the current one (`structure`, `registers`,
         /// `slots`, `joint`).
         #[arg(long, value_name = "FILE", requires = "deep")]
@@ -150,8 +154,8 @@ enum Command {
         /// Order of the function list.
         #[arg(long, value_enum, default_value = "address")]
         sort: Sort,
-        /// Maximum number of rows (default 100; `similar`: 3); the rest is stored as a handle.
-        #[arg(long)]
+        /// Maximum number of rows (default 100; `similar`: 3), or `all`; the rest is stored as a handle.
+        #[arg(long, value_parser = parse_limit)]
         limit: Option<usize>,
     },
     /// Record knowledge: a name, comment, signature, type, local, refutation or type definition.
@@ -368,6 +372,9 @@ enum BenchCommand {
         /// Keep the task copies.
         #[arg(long)]
         keep: bool,
+        /// Hide exemplars from the agent in every task (`[rebuild] exemplars = false` in the copies).
+        #[arg(long)]
+        no_exemplars: bool,
     },
     /// Success rate with a 95 % Wilson interval and cost medians/means of one run record. Exit code 0, 2 on
     /// errors.
@@ -409,6 +416,13 @@ enum SetupCommand {
         /// Pre-downloaded JDK archive (offline); its sha256 must match the pinned one.
         #[arg(long)]
         jdk_zip: Option<PathBuf>,
+        /// An existing Ghidra install to register instead of downloading one (the directory holding
+        /// `support/` and `ghidraRun`).
+        #[arg(long, value_name = "DIR", conflicts_with = "ghidra_zip")]
+        ghidra_dir: Option<PathBuf>,
+        /// An existing JDK (21 or newer) to register instead of downloading one (the directory holding `bin/`).
+        #[arg(long, value_name = "DIR", conflicts_with = "jdk_zip")]
+        jdk_dir: Option<PathBuf>,
         /// Directory with `decovery-plugin-sdk` and `ghidra`; default: `plugins/` of the repository.
         #[arg(long, value_name = "DIR")]
         plugins_dir: Option<PathBuf>,
@@ -528,7 +542,10 @@ enum Sort {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    if let Err(e) = resolve_deep(&mut cli.command) {
+        e.exit();
+    }
     if let Some(jobs) = cli.jobs {
         decovery_toolchain::set_global_jobs(jobs);
     }
@@ -541,6 +558,50 @@ fn main() -> ExitCode {
         log_call(&workspace, &mut record, started, code);
     }
     code
+}
+
+/// Settles `diagnose`'s target and `--deep` mode: a `--deep` value that is no mode is the function when no other
+/// target is given (`diagnose --deep NAME` runs `joint`); afterwards the target is set and the mode is valid.
+fn resolve_deep(command: &mut Command) -> Result<(), clap::Error> {
+    use clap::CommandFactory;
+    let Command::Diagnose { target, deep, .. } = command else {
+        return Ok(());
+    };
+    let modes = || {
+        Deep::value_variants()
+            .iter()
+            .filter_map(|d| d.to_possible_value())
+            .map(|v| v.get_name().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    if let Some(value) = deep.clone()
+        && Deep::from_str(&value, true).is_err()
+    {
+        if target.is_some() {
+            return Err(Cli::command().error(
+                clap::error::ErrorKind::InvalidValue,
+                format!(
+                    "invalid value '{value}' for '--deep [<MODE>]' (possible values: {})",
+                    modes()
+                ),
+            ));
+        }
+        *target = Some(value);
+        *deep = Some("joint".into());
+    }
+    if target.is_none() {
+        return Err(Cli::command().error(
+            clap::error::ErrorKind::MissingRequiredArgument,
+            "diagnose needs a function name or address",
+        ));
+    }
+    Ok(())
+}
+
+/// The mode of a `--deep` value checked by [`resolve_deep`].
+fn deep_mode(value: &str) -> Deep {
+    Deep::from_str(value, true).unwrap_or(Deep::Joint)
 }
 
 /// The call-log record of a workspace command (`None` for `migrate`, `mcp` and `setup`, which log nothing or
@@ -556,8 +617,8 @@ fn call_record(command: &Command) -> Option<CallRecord> {
         Command::Show { target, .. } => ("show", Some(target), None),
         Command::Diagnose { target, deep, .. } => (
             "diagnose",
-            Some(target),
-            deep.map(|d| match d {
+            target.as_deref(),
+            deep.as_deref().map(|d| match deep_mode(d) {
                 Deep::Context => "context",
                 Deep::Structure => "structure",
                 Deep::Registers => "registers",
@@ -686,10 +747,16 @@ fn run(cli: Cli) -> ExitCode {
                 }
             }
         }
-        Command::Show { target, lines } => finish(show(&cli.workspace, &target, lines, cli.json)),
+        Command::Show { target, lines, asm } => {
+            finish(show(&cli.workspace, &target, lines, asm, cli.json))
+        }
         Command::Diagnose {
             target, deep: None, ..
-        } => finish(diagnose(&cli.workspace, &target, cli.json)),
+        } => finish(diagnose(
+            &cli.workspace,
+            &target.unwrap_or_default(),
+            cli.json,
+        )),
         Command::Diagnose {
             target,
             deep: Some(deep),
@@ -697,14 +764,14 @@ fn run(cli: Cli) -> ExitCode {
             all,
             minutes,
         } => {
-            let operation = match deep {
+            let operation = match deep_mode(&deep) {
                 Deep::Context => LegacyOperation::Context,
                 Deep::Structure => LegacyOperation::Structure,
                 Deep::Registers => LegacyOperation::Registers,
                 Deep::Slots => LegacyOperation::Slots,
                 Deep::Joint => LegacyOperation::Joint,
             };
-            let mut call = LegacyCall::new(target, operation);
+            let mut call = LegacyCall::new(target.unwrap_or_default(), operation);
             call.options.source = source;
             call.options.all = all;
             call.options.minutes = minutes;
@@ -909,6 +976,7 @@ fn run(cli: Cli) -> ExitCode {
                     max_total_cost_usd,
                     resume,
                     keep,
+                    no_exemplars,
                 },
         } => {
             let mut options = match std::env::current_exe() {
@@ -926,6 +994,9 @@ fn run(cli: Cli) -> ExitCode {
             options.max_total_cost_usd = max_total_cost_usd;
             options.resume = resume;
             options.keep = keep;
+            if no_exemplars {
+                options.exemplars = Some(false);
+            }
             bench_run(&suite, &options, cli.json)
         }
         Command::Bench {
@@ -976,12 +1047,14 @@ fn run(cli: Cli) -> ExitCode {
                     extern_dir,
                     ghidra_zip,
                     jdk_zip,
+                    ghidra_dir,
+                    jdk_dir,
                     plugins_dir,
                 },
         } => finish(setup_ghidra(
             extern_dir,
-            ghidra_zip,
-            jdk_zip,
+            (ghidra_zip, jdk_zip),
+            (ghidra_dir, jdk_dir),
             plugins_dir,
             cli.json,
         )),
@@ -1132,6 +1205,15 @@ fn parse_hex_u16(text: &str) -> Result<u16, String> {
     u16::from_str_radix(digits, 16).map_err(|e| format!("{text:?}: {e}"))
 }
 
+/// `--limit` of `find`: a row count or `all`.
+fn parse_limit(text: &str) -> Result<usize, String> {
+    if text.eq_ignore_ascii_case("all") {
+        return Ok(usize::MAX);
+    }
+    text.parse::<usize>()
+        .map_err(|_| format!("`{text}` is not a number or `all`"))
+}
+
 fn finish(result: Result<(), FacadeError>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -1246,8 +1328,8 @@ fn migrate_attempts(root: &Path, from: Option<&Path>, json: bool) -> Result<(), 
 
 fn setup_ghidra(
     extern_dir: Option<PathBuf>,
-    ghidra_zip: Option<PathBuf>,
-    jdk_zip: Option<PathBuf>,
+    (ghidra_zip, jdk_zip): (Option<PathBuf>, Option<PathBuf>),
+    (ghidra_dir, jdk_dir): (Option<PathBuf>, Option<PathBuf>),
     plugins_dir: Option<PathBuf>,
     json: bool,
 ) -> Result<(), FacadeError> {
@@ -1267,6 +1349,8 @@ fn setup_ghidra(
         extern_dir: absolute(extern_dir),
         ghidra_archive: ghidra_zip.map(absolute),
         jdk_archive: jdk_zip.map(absolute),
+        ghidra_dir: ghidra_dir.map(absolute),
+        jdk_dir: jdk_dir.map(absolute),
         plugins_dir: absolute(plugins_dir),
         python: std::env::var("DECOVERY_PYTHON")
             .ok()
@@ -1469,10 +1553,18 @@ fn print_json(response: &Response) -> Result<(), FacadeError> {
     Ok(())
 }
 
-fn show(workspace: &Path, target: &str, lines: bool, json: bool) -> Result<(), FacadeError> {
+fn show(
+    workspace: &Path,
+    target: &str,
+    lines: bool,
+    asm: bool,
+    json: bool,
+) -> Result<(), FacadeError> {
     let session = Session::open(workspace)?;
     let run = |budget| {
-        if lines {
+        if asm {
+            decovery_facade::show_with_asm(&session, target, budget, lines)
+        } else if lines {
             decovery_facade::show_with_lines(&session, target, budget)
         } else {
             decovery_facade::show(&session, target, budget)
@@ -1488,8 +1580,14 @@ fn show(workspace: &Path, target: &str, lines: bool, json: bool) -> Result<(), F
     if let Some(text) = response.data["text"].as_str() {
         print!("{text}");
     }
-    if response.data["analysis_stale"] == true {
-        eprintln!("note: {}", decovery_facade::output::STALE_ANALYSIS);
+    if let Some(asm) = response.data["asm"].as_str().filter(|a| !a.is_empty()) {
+        println!("\n/* original disassembly */");
+        print!("{asm}");
+    }
+    for warning in response.data["warnings"].as_array().into_iter().flatten() {
+        if let Some(text) = warning.as_str() {
+            eprintln!("note: {text}");
+        }
     }
     Ok(())
 }
@@ -1506,6 +1604,11 @@ fn diagnose(workspace: &Path, target: &str, json: bool) -> Result<(), FacadeErro
     let response = decovery_facade::diagnose(&session, target, Budget { chars: usize::MAX })?;
     let d = &response.data;
     println!("{}", response.summary);
+    for warning in d["warnings"].as_array().into_iter().flatten() {
+        if let Some(text) = warning.as_str() {
+            eprintln!("note: {text}");
+        }
+    }
     for f in d["findings"].as_array().into_iter().flatten() {
         println!(
             "  [{}] {} → {}",
@@ -1605,6 +1708,9 @@ fn annotate(workspace: &Path, request: &Annotation, json: bool) -> Result<(), Fa
 
 fn analyze(workspace: &Path, options: &AnalyzeOptions, json: bool) -> Result<(), FacadeError> {
     let progress = |p: Progress| {
+        if json {
+            return;
+        }
         let message = p
             .message
             .filter(|m| !m.trim().is_empty())
@@ -1631,7 +1737,11 @@ fn build(
     function_sources: &[PathBuf],
     json: bool,
 ) -> Result<bool, FacadeError> {
+    // with --json the output is the JSON alone, also when stdout and stderr are read together
     let progress = |p: Progress| {
+        if json {
+            return;
+        }
         if let Some(message) = p.message.filter(|m| !m.trim().is_empty()) {
             eprintln!("{message}");
         }
@@ -1684,19 +1794,7 @@ fn build(
     }
     for f in d["functions"].as_array().into_iter().flatten() {
         if f["verdict"] != "identical" {
-            let blockers: Vec<&str> = f["blockers"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|b| b["kind"].as_str())
-                .collect();
-            println!(
-                "{}\t{}\t{}\t{}",
-                f["address"].as_str().unwrap_or(""),
-                f["name"].as_str().unwrap_or(""),
-                f["verdict"].as_str().unwrap_or(""),
-                blockers.join(" ")
-            );
+            println!("{}", function_line(f));
             if let Some(near) = f["near"].as_str() {
                 println!("  {near}");
             }
@@ -1710,9 +1808,47 @@ fn build(
     Ok(complete)
 }
 
+/// One differing function of a build: address, name, verdict, its blockers counted per kind (`kind ×n`), and
+/// `(follow-on)` for a function behind the first real difference of a shifted overlay module.
+fn function_line(f: &serde_json::Value) -> String {
+    let blockers: Vec<String> = match f["blocker_counts"].as_object() {
+        Some(counts) => counts
+            .iter()
+            .map(|(kind, n)| match n.as_u64() {
+                Some(n) if n > 1 => format!("{kind} ×{n}"),
+                _ => kind.clone(),
+            })
+            .collect(),
+        None => f["blockers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|b| b["kind"].as_str().map(str::to_string))
+            .collect(),
+    };
+    let mut line = format!(
+        "{}\t{}\t{}\t{}",
+        f["address"].as_str().unwrap_or(""),
+        f["name"].as_str().unwrap_or(""),
+        f["verdict"].as_str().unwrap_or(""),
+        blockers.join(", ")
+    );
+    if f["cause"] == true {
+        line.push_str("\t(cause)");
+    }
+    if f["consequence"] == true {
+        line.push_str("\t(follow-on)");
+    }
+    line
+}
+
 /// Links and prints the result; the exit code follows the result (0 identical, 1 differs, 2 error).
 fn link(workspace: &Path, json: bool) -> Result<ExitCode, FacadeError> {
+    // with --json the output is the JSON alone, also when stdout and stderr are read together
     let progress = |p: Progress| {
+        if json {
+            return;
+        }
         if let Some(message) = p.message.filter(|m| !m.trim().is_empty()) {
             eprintln!("{message}");
         }
@@ -1991,4 +2127,23 @@ fn find(workspace: &Path, query: &FindQuery, json: bool) -> Result<(), FacadeErr
         println!("{}", cells(item, keys));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::function_line;
+    use serde_json::json;
+
+    #[test]
+    fn a_function_line_counts_blockers_and_marks_consequences() {
+        let f = json!({
+            "address": "ovl:A:0000:5400", "name": "later", "verdict": "differs",
+            "blocker_counts": {"bytes-differ": 3, "data-layout": 1, "wrong-relative-ref": 20},
+            "consequence": true,
+        });
+        assert_eq!(
+            function_line(&f),
+            "ovl:A:0000:5400\tlater\tdiffers\tbytes-differ ×3, data-layout, wrong-relative-ref ×20\t(follow-on)"
+        );
+    }
 }

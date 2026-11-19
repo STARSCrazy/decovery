@@ -249,6 +249,10 @@ A remote mode lets the CLI talk to a running MCP server so the warm backends are
 <workspace>/
   decovery.toml            target file + hash, format, segments, detected facts, profile, runners, plugins,
                            [[overlay]] files (ADR 0011; their segments have ovl: starts)
+                           [[rebuild.module]] multi-file overlay modules (ADR 0013)
+                           (an MZ target's memory map also holds the derived segment `uninitialized`: the
+                           minalloc paragraphs behind the load image, i.e. BSS and stack; taken from the header
+                           because every MZ file has one, unlike the startup's BSS bounds, which need its symbols)
   knowledge/
     symbols.toml           functions, globals, labels with claims
     types.h                C types (parsed by the C frontend)

@@ -8,6 +8,7 @@ Ghidra only by `tests/test_local_ghidra.py` (skipped unless `GHIDRA_INSTALL_DIR`
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from abc import ABC, abstractmethod
@@ -15,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from . import aztec
 from .mapping import GhidraAddress, MemoryBlockSpec, overlay_address
 
 EXPECTED_GHIDRA_VERSION = "12.1.4"
@@ -106,6 +108,42 @@ WATCALL_XML = """<prototype name="__watcall" extrapop="unknown" stackshift="4">
 """
 
 
+# Aztec C86 helpers as call fixups (aztec.py). `$csav` leaves BP pointing at the pushed BP, 2 below the caller's
+# SP before the call, and SP below the frame (AX = -frame size) and the saved SI, DI; the rest of the function then
+# reads parameters at BP+4. The decompiler already counts the call's return address (SP is 2 lower in the fixup),
+# so BP is SP here. The switch helper jumps to a case target; the decompiler gets the targets as a jump-table
+# override at the call.
+CSAV_FIXUP = "decovery_aztec_csav"
+CSAV_FIXUP_XML = f"""<callfixup name="{CSAV_FIXUP}">
+  <pcode>
+    <body><![CDATA[
+      local slot:4 = segment(SS, SP);
+      *[ram]:2 slot = BP;
+      BP = SP;
+      SP = SP - 4 + AX;
+    ]]></body>
+  </pcode>
+</callfixup>
+"""
+SWITCH_FIXUP = "decovery_aztec_switch"
+SWITCH_FIXUP_XML = f"""<callfixup name="{SWITCH_FIXUP}">
+  <pcode>
+    <body><![CDATA[
+      SP = SP + 2;
+      goto [AX];
+    ]]></body>
+  </pcode>
+</callfixup>
+"""
+
+
+# Per switch call: {"cases": [...], "targets": [address offsets, default last]}; read back when decompiling.
+SWITCH_PROPERTY = "decovery.aztec.switch"
+# Per run-time helper entry: its role; such functions decompile to a stub (aztec.stub) and carry LIBRARY_TAG.
+HELPER_PROPERTY = "decovery.aztec.helper"
+LIBRARY_TAG = "LIBRARY"
+
+
 class Backend(ABC):
     """What the plugin needs from Ghidra. Addresses are `GhidraAddress` values; the plugin maps them."""
 
@@ -127,7 +165,7 @@ class Backend(ABC):
         """Open the Ghidra project in `location`. With `reuse` and a saved program there, open that without
         analysis; otherwise build the program from the blocks, analyze and save it. `options`:
         `calling_convention` (str or None), `aggressive_instruction_finder` (bool, the plugin sets it for
-        x86-flat-32 only)."""
+        x86-flat-32 only), `decompiler_parameter_id` (bool, for x86-real-16 only)."""
 
     @abstractmethod
     def functions(self) -> list[GhidraFunction]: ...
@@ -164,6 +202,18 @@ def check_ghidra_version(install_dir: Path, warn: Callable[[str], None]) -> None
 
 def _warn_stderr(message: str) -> None:
     print(f"decovery-ghidra: warning: {message}", file=sys.stderr, flush=True)
+
+
+def _pre_comment(program, address, text: str) -> None:
+    listing = program.getListing()
+    try:
+        from ghidra.program.model.listing import CommentType  # type: ignore[import-not-found]
+
+        listing.setComment(address, CommentType.PRE, text)
+    except ImportError:
+        from ghidra.program.model.listing import CodeUnit  # type: ignore[import-not-found]
+
+        listing.setComment(address, CodeUnit.PRE_COMMENT, text)
 
 
 def _is_locked(exc: Exception) -> bool:
@@ -316,6 +366,7 @@ class GhidraBackend(Backend):
                 block.setExecute(spec.execute)
             for entry in entry_points:
                 program.getSymbolTable().addExternalEntryPoint(self._to_g(entry, program))
+            self._set_data_segment(program, blocks)
         finally:
             program.endTransaction(tx, True)
         self._project.getProjectData().getRootFolder().createFile("target", program, monitor)
@@ -328,13 +379,215 @@ class GhidraBackend(Backend):
             if options.get("aggressive_instruction_finder"):
                 with pyghidra.transaction(program, "analysis options"):
                     program.getOptions("Analyzers").setBoolean("Aggressive Instruction Finder", True)
+            with pyghidra.transaction(program, "Aztec helpers"):
+                sites = self._prepare_aztec(program, blocks)
+                if options.get("decompiler_parameter_id"):
+                    program.getOptions("Analyzers").setBoolean("Decompiler Parameter ID", True)
             progress(2, total, "analyzing")
             pyghidra.analyze(program, pyghidra.task_monitor())  # cancels its monitor at the end
+            with pyghidra.transaction(program, "Aztec switch tables and data labels"):
+                self._finish_aztec(program, blocks, sites, bool(options.get("decompiler_parameter_id")))
             progress(3, total, "saving")
             program.save("import and analysis", pyghidra.task_monitor())
         finally:
             program.release(consumer)
         progress(4, total, "ready")
+
+    # -- Aztec C86 run-time helpers (see aztec.py) ----------------------------------------------------------
+
+    def _set_data_segment(self, program, blocks) -> None:
+        """DS of all code is the data segment of the overlay data blocks, when they name one. The part of that
+        segment no block covers (the main program's uninitialized data) becomes an uninitialized block."""
+        from java.math import BigInteger  # type: ignore[import-not-found]
+
+        segment = aztec.data_segment(blocks)
+        register = program.getLanguage().getRegister("DS")
+        if segment is None or register is None:
+            return
+        context = program.getProgramContext()
+        for spec in blocks:
+            if spec.execute:
+                start = self._to_g(spec.start, program)
+                context.setValue(register, start, start.add(spec.size - 1), BigInteger.valueOf(segment))
+        for offset, size in aztec.uncovered(blocks, segment):
+            block = program.getMemory().createUninitializedBlock(
+                f"DS.bss.{offset:04X}", self._to_g(GhidraAddress(segment, offset), program), size, False)
+            block.setRead(True)
+            block.setWrite(True)
+            block.setExecute(False)
+
+    def _prepare_aztec(self, program, blocks) -> list:
+        """Before analysis: give `$csav` and the switch helper call fixups (the switch helper never returns), mark
+        the inline switch tables as data and disassemble their targets. Returns the switch sites as
+        (call address, [target addresses])."""
+        from ghidra.app.cmd.disassemble import DisassembleCommand  # type: ignore[import-not-found]
+        from ghidra.app.cmd.function import CreateFunctionCmd  # type: ignore[import-not-found]
+        from ghidra.program.model.address import AddressSet  # type: ignore[import-not-found]
+        from ghidra.program.model.data import WordDataType  # type: ignore[import-not-found]
+        from ghidra.program.model.symbol import RefType, SourceType  # type: ignore[import-not-found]
+
+        def at(spec, offset):
+            return self._to_g(GhidraAddress(spec.start.segment, offset, spec.start.space), program)
+
+        code = [spec for spec in blocks if spec.execute and spec.start.segment is not None]
+        helpers, switch = [], {}
+        for spec in code:
+            for found in aztec.find_helpers(spec.data, spec.start.offset):
+                helpers.append((at(spec, found.offset), found))
+                if found.kind == "switch":
+                    switch.setdefault((spec.start.space, spec.start.segment), []).append(found.offset)
+        dense = {id(spec): aztec.dense_switch_sites(spec.data, spec.start.offset) for spec in code}
+        if not helpers and not any(dense.values()):
+            return []
+        self._install_fixups(program)
+        functions = program.getFunctionManager()
+        roles = program.getUsrPropertyManager().createStringPropertyMap(HELPER_PROPERTY)
+        for address, found in helpers:
+            DisassembleCommand(address, None, True).applyTo(program)
+            CreateFunctionCmd(address).applyTo(program)
+            function = functions.getFunctionAt(address)
+            if function is None:
+                continue
+            function.addTag(LIBRARY_TAG)
+            if found.kind == "library":  # knowledge applied later may rename it
+                try:
+                    function.setName(found.role, SourceType.ANALYSIS)
+                except Exception:  # noqa: BLE001 - a name already taken keeps Ghidra's
+                    pass
+                continue
+            roles.add(address, found.role)
+            if found.kind == "long":
+                self._long_signature(program, function)
+            else:
+                function.setCallFixup(CSAV_FIXUP if found.kind == "csav" else SWITCH_FIXUP)
+                function.setNoReturn(found.kind == "switch")
+        sites = []
+        listing, references = program.getListing(), program.getReferenceManager()
+        for spec in code:
+            own = switch.get((spec.start.space, spec.start.segment), [])
+            shared = switch.get((None, spec.start.segment), []) if spec.start.space else []
+            for site in aztec.switch_sites(spec.data, spec.start.offset, own + shared) + dense[id(spec)]:
+                call = at(spec, site.call)
+                for word in range(0, site.size, 2):
+                    listing.createData(at(spec, site.table + word), WordDataType.dataType, 2)
+                targets = [at(spec, target) for target in site.targets]
+                for target in targets:
+                    references.addMemoryReference(call, target, RefType.COMPUTED_JUMP, SourceType.ANALYSIS, 0)
+                found = AddressSet()
+                for target in targets:
+                    found.add(target)
+                DisassembleCommand(found, None, True).applyTo(program)
+                sites.append((call, targets, site))
+        return sites
+
+    @staticmethod
+    def _long_signature(program, function) -> None:
+        """`long f(long a, long b)` with a in DX:AX, b in BX:CX and the result in DX:AX (aztec.py)."""
+        from ghidra.program.model.data import LongDataType  # type: ignore[import-not-found]
+        from ghidra.program.model.listing import (  # type: ignore[import-not-found]
+            Function, ParameterImpl, ReturnParameterImpl, VariableStorage)
+        from ghidra.program.model.symbol import SourceType  # type: ignore[import-not-found]
+        from java.util import ArrayList  # type: ignore[import-not-found]
+
+        def pair(high, low):
+            return VariableStorage(program, program.getRegister(high), program.getRegister(low))
+
+        long_type = LongDataType.dataType
+        result = ReturnParameterImpl(long_type, pair("DX", "AX"), program)
+        parameters = ArrayList()
+        parameters.add(ParameterImpl("a", long_type, pair("DX", "AX"), program))
+        parameters.add(ParameterImpl("b", long_type, pair("BX", "CX"), program))
+        function.updateFunction(None, result, parameters, Function.FunctionUpdateType.CUSTOM_STORAGE, True,
+                                SourceType.IMPORTED)
+
+    def _finish_aztec(self, program, blocks, sites, parameter_id: bool) -> None:
+        """After analysis: switch tables as decompiler jump-table overrides (with the case values as a comment), the
+        case targets in the function body, and DS-relative labels for unnamed data in the data segment. With
+        `parameter_id`, the prototypes of the functions with a switch are derived again: during analysis the
+        decompiler took the switch value for an unrecovered jump target."""
+        import java.util  # type: ignore[import-not-found]
+        from ghidra.app.cmd.function import CreateFunctionCmd, DecompilerParameterIdCmd  # type: ignore
+        from ghidra.program.model.address import AddressSet  # type: ignore[import-not-found]
+        from ghidra.program.model.pcode import JumpTable  # type: ignore[import-not-found]
+        from ghidra.program.model.symbol import SourceType  # type: ignore[import-not-found]
+
+        functions = program.getFunctionManager()
+        monitor = self._pyghidra.task_monitor()
+        entries = AddressSet()
+        cases = program.getUsrPropertyManager().createStringPropertyMap(SWITCH_PROPERTY)
+        for call, targets, site in sites:
+            function = functions.getFunctionContaining(call)
+            if function is None:
+                continue
+            CreateFunctionCmd.fixupFunctionBody(program, function, monitor)
+            JumpTable(call, java.util.ArrayList(targets), True, 0).writeOverride(function)
+            _pre_comment(program, call, site.comment())
+            cases.add(call, json.dumps({"cases": site.cases, "targets": [int(t.getOffset()) for t in targets]}))
+            entries.add(function.getEntryPoint())
+        if parameter_id and not entries.isEmpty():
+            DecompilerParameterIdCmd("switch tables", entries, SourceType.ANALYSIS, False, False,
+                                     DECOMPILE_TIMEOUT_SECONDS).applyTo(program, monitor)
+        if program.getUsrPropertyManager().getStringPropertyMap(HELPER_PROPERTY) is not None:
+            self._take_dead_returns(program)
+        segment = aztec.data_segment(blocks)
+        if segment is not None:
+            self._label_data_segment(program, blocks, segment)
+
+    def _take_dead_returns(self, program) -> None:
+        """Aztec C86 ends a function whose last statement is an endless loop with an unreachable `ret`; Ghidra
+        leaves the byte undefined and the function ends one byte early. A lone `ret` right behind a body that ends
+        in an unconditional jump joins that body."""
+        from ghidra.app.cmd.disassemble import DisassembleCommand  # type: ignore[import-not-found]
+
+        listing, memory, functions = program.getListing(), program.getMemory(), program.getFunctionManager()
+        for function in list(functions.getFunctions(True)):
+            if function.isExternal() or function.isThunk():
+                continue
+            body = function.getBody()
+            last = listing.getInstructionContaining(body.getMaxAddress())
+            flow = None if last is None else last.getFlowType()
+            if flow is None or not flow.isJump() or flow.isConditional() or flow.hasFallthrough():
+                continue
+            try:
+                after = last.getMaxAddress().add(1)
+            except Exception:
+                continue
+            if (not memory.contains(after) or memory.getByte(after) & 0xFF != 0xC3
+                    or not listing.isUndefined(after, after) or functions.getFunctionContaining(after) is not None
+                    or program.getReferenceManager().hasReferencesTo(after)):
+                continue
+            DisassembleCommand(after, None, False).applyTo(program)
+            if listing.getInstructionAt(after) is not None:
+                function.setBody(body.union(program.getAddressFactory().getAddressSet(after, after)))
+
+    def _label_data_segment(self, program, blocks, segment: int) -> None:
+        """Ghidra names data by linear (overlay) or normalized (`1000:8262` for DS:8302) addresses; name unnamed
+        data in DS by its DS offset instead."""
+        from ghidra.program.model.address import AddressSet  # type: ignore[import-not-found]
+        from ghidra.program.model.symbol import SourceType  # type: ignore[import-not-found]
+
+        symbols, listing, references = program.getSymbolTable(), program.getListing(), program.getReferenceManager()
+        base = segment * 16
+        for space in [None, *dict.fromkeys(b.overlay for b in blocks if b.overlay)]:
+            low = self._to_g(GhidraAddress(segment, 0, space), program)
+            window = AddressSet(low, low.add(0xFFFF))
+            for address in references.getReferenceDestinationIterator(window, True):
+                symbol = symbols.getPrimarySymbol(address)
+                if symbol is not None and not symbol.isDynamic():
+                    continue
+                if listing.getInstructionAt(address) is not None:
+                    continue
+                if not any(ref.getReferenceType().isData() for ref in references.getReferencesTo(address)):
+                    continue
+                name = aztec.data_label(GhidraAddress(segment, int(address.getOffset()) - base, space))
+                symbols.createLabel(address, name, SourceType.ANALYSIS)
+
+    def _install_fixups(self, program) -> None:
+        from ghidra.program.database import SpecExtension  # type: ignore[import-not-found]
+
+        extension = SpecExtension(program)
+        for xml in (CSAV_FIXUP_XML, SWITCH_FIXUP_XML):
+            extension.addReplaceCompilerSpecExtension(xml, self._pyghidra.task_monitor())
 
     def _install_calling_convention(self, program, name: str) -> None:
         from ghidra.program.database import SpecExtension  # type: ignore[import-not-found]
@@ -387,11 +640,13 @@ class GhidraBackend(Backend):
         function = program.getFunctionManager().getFunctionAt(self._to_g(address))
         if function is None:
             return DecompileResult(None, f"no function at {address.text()}")
+        roles = program.getUsrPropertyManager().getStringPropertyMap(HELPER_PROPERTY)
+        if roles is not None and (role := roles.getString(function.getEntryPoint())) is not None:
+            return DecompileResult(aztec.stub(str(role), str(function.getPrototypeString(False, False))), None)
         outcome = self._decompiler.decompileFunction(function, DECOMPILE_TIMEOUT_SECONDS, self._pyghidra.task_monitor())
         decompiled = outcome.getDecompiledFunction() if outcome.decompileCompleted() else None
         if decompiled is not None:
-            code = str(decompiled.getC())
-            lines = self._decompile_lines(function, outcome.getCCodeMarkup())
+            code, lines = self._printed(function, outcome.getCCodeMarkup(), str(decompiled.getC()))
             signature, variables = self._high_metadata(outcome.getHighFunction())
             return DecompileResult(code, None, lines=lines, signature=signature, variables=variables)
         error = str(outcome.getErrorMessage() or "").strip() or "decompilation did not complete"
@@ -401,15 +656,64 @@ class GhidraBackend(Backend):
                 disassembly.append((at, str(ins)))
         return DecompileResult(None, error, disassembly)
 
-    def _decompile_lines(self, function, markup) -> list[DecompileLine] | None:
+    def _label_switch_cases(self, function, markup) -> bool:
+        """Aztec switch tables (aztec.py): the decompiler labels the cases of an overridden jump table by target
+        address; relabel them with the table's values. Its override carries no label values, so the case tokens
+        are rewritten (line structure unchanged). True when a token changed."""
+        import java.util  # type: ignore[import-not-found]
+        from ghidra.app.decompiler import ClangCaseToken, ClangToken  # type: ignore[import-not-found]
+
+        sites = self._switch_calls(function)
+        text = ClangToken.class_.getDeclaredField("text")
+        text.setAccessible(True)
+        nodes = java.util.ArrayList()
+        markup.flatten(nodes)
+        tokens = list(nodes)
+        changed = False
+        for index, token in enumerate(tokens):
+            if not isinstance(token, ClangCaseToken) or (switch := token.getSwitchOp()) is None:
+                continue
+            site = sites.get(int(switch.getSeqnum().getTarget().getOffset()))
+            if site is None:
+                continue
+            labels = aztec.case_labels(site["cases"], site["targets"])
+            try:  # getValue() is the magnitude of a negative label; the text carries the sign
+                value = int(str(token.getText()), 0)
+            except ValueError:
+                value = int(token.getValue())
+            at = token.getMinAddress()
+            label = aztec.case_label(labels, value, None if at is None else int(at.getOffset()))
+            if label is None:
+                continue
+            text.set(token, label)
+            if label.startswith("default"):  # drop the `case ` before it
+                back = index - 1
+                while back >= 0 and str(tokens[back].getText()).strip() in ("", "case"):
+                    keyword = str(tokens[back].getText()).strip() == "case"
+                    text.set(tokens[back], "")
+                    back -= 1
+                    if keyword:
+                        break
+            changed = True
+        return changed
+
+    def _printed(self, function, markup, code: str) -> tuple[str, list[DecompileLine] | None]:
+        """C text and line records from the markup, with Aztec switch cases relabelled and expected warnings left
+        out. Without markup, the decompiler's own text."""
         if markup is None:
-            return None
+            return code, None
         from ghidra.app.decompiler import PrettyPrinter  # type: ignore[import-not-found]
 
-        # getDecompiledFunction().getC() uses this same printer. Enumerating its lines preserves blank lines
+        calls = self._switch_calls(function)
+        relabelled = bool(calls) and self._label_switch_cases(function, markup)
+        # getDecompiledFunction().getC() is this printer's text. Enumerating its lines preserves blank lines
         # and avoids matching text (identical C statements may have different instruction origins).
+        printed = list(PrettyPrinter(function, markup, None).getLines())
+        texts = [str(PrettyPrinter.getText(line)) for line in printed]
+        drop = aztec.expected_warnings(texts, set(calls))
+        kept = [(line, text) for index, (line, text) in enumerate(zip(printed, texts)) if index not in drop]
         result = []
-        for number, line in enumerate(PrettyPrinter(function, markup, None).getLines(), 1):
+        for number, (line, _) in enumerate(kept, 1):
             ranges = []
             for token in line.getAllTokens():
                 start = self._to_spec(token.getMinAddress())
@@ -417,7 +721,21 @@ class GhidraBackend(Backend):
                 if start is not None and end is not None:
                     ranges.append((start, end))
             result.append(DecompileLine(number, ranges))
-        return result
+        if relabelled or drop:
+            from ghidra.util import StringUtilities  # type: ignore[import-not-found]
+
+            code = "".join(text + str(StringUtilities.LINE_SEPARATOR) for _, text in kept)
+        return code, result
+
+    def _switch_calls(self, function) -> dict:
+        """Aztec switch calls in `function`: {address offset: {"cases", "targets"}} (see SWITCH_PROPERTY)."""
+        cases = self._require_program().getUsrPropertyManager().getStringPropertyMap(SWITCH_PROPERTY)
+        if cases is None:
+            return {}
+        found = {}
+        for address in cases.getPropertyIterator(function.getBody()):
+            found[int(address.getOffset())] = json.loads(str(cases.getString(address)))
+        return found
 
     @staticmethod
     def _storage(storage) -> str | None:

@@ -218,3 +218,28 @@ fn run_comparison_round_trips_as_json() {
     serde_json::to_string(&report(&a, GroupBy::None)).unwrap();
     let _ = bootstrap_paired_difference(&[1.0], &[2.0], 10, 1);
 }
+
+#[test]
+fn run_record_carries_exemplar_setting() {
+    // an old record without the field loads with exemplars on
+    let old = sample("core", [true, false, true, false]);
+    assert!(old.exemplars);
+    let mut value = serde_json::to_value(&old).unwrap();
+    assert_eq!(value["exemplars"], true);
+    value["exemplars"] = json!(false);
+    value["id"] = json!("hidden");
+    let hidden: RunRecord = serde_json::from_value(value).unwrap();
+    assert!(!hidden.exemplars);
+    assert!(!hidden.extra.contains_key("exemplars"));
+    let comparison = compare(&old, &hidden);
+    assert!(
+        comparison
+            .warnings
+            .iter()
+            .any(|w| w == "exemplars differ: on vs off"),
+        "{:?}",
+        comparison.warnings
+    );
+    let text = comparison.to_text();
+    assert!(text.contains("exemplars: A on, B off"), "{text}");
+}

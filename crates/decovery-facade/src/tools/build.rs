@@ -6,9 +6,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use decovery_core::{
-    Address, Analysis, BlockerRecord, OverlayName, Program, RebuildRecord, RebuildResult,
-    TargetFormat, VerdictId, Workspace, merge_rebuild, read_rebuild, read_user_config,
-    save_rebuild, today, write_atomic,
+    Address, Analysis, BlockerRecord, ModuleConfig, OverlayName, Program, RebuildRecord,
+    RebuildResult, TargetFormat, VerdictId, Workspace, merge_rebuild, read_rebuild,
+    read_user_config, save_rebuild, today, write_atomic,
 };
 use decovery_diff::{Blocker, Comparison, ModuleOptions, Placement, SymbolView, Verdict};
 use decovery_objects::{FunctionView, ObjectFile, ObjectFormat, functions, read_object};
@@ -263,7 +263,10 @@ pub(super) fn is_asm(name: &str) -> bool {
 /// A compared function of the build.
 pub(super) struct Built {
     pub(super) source: usize,
+    /// The function's name in the source (what pragmas and variants name it by).
     pub(super) name: String,
+    /// The name the build reports: the knowledge's name at the address, else [`Built::name`].
+    pub(super) label: String,
     pub(super) address: Address,
     code_hash: String,
 }
@@ -332,6 +335,11 @@ pub fn build(
 ) -> Result<Response, FacadeError> {
     let started = Instant::now();
     control.check()?;
+    let mut named = request.clone();
+    for file in &mut named.files {
+        *file = super::source_path::source_file_name(root, file)?;
+    }
+    let request = &named;
     if !request.variants.is_empty() {
         return build_variants(root, request, control, started);
     }
@@ -340,12 +348,14 @@ pub fn build(
     let ws = Workspace::open(root)?;
     let analysis = Analysis::load(root)?.filter(|a| a.target_sha256 == ws.config.target.sha256);
     let (profile, default_flags) = rebuild_profile(&ws).map_err(toolchain)?;
-    let rebuild = ws.config.rebuild.clone().unwrap_or_default();
+    let mut rebuild = ws.config.rebuild.clone().unwrap_or_default();
+    let flag_warnings = super::file_flags::apply_source_flags(root, &mut rebuild);
     let all = request.files.is_empty() && request.function.is_none();
     let files = match (&request.function, request.files.is_empty()) {
         (Some(function), true) => vec![file_of_function(root, function)?],
         _ => request.files.clone(),
     };
+    let files = with_module_files(&rebuild.modules, files);
     let set = find_sources(&root.join(SOURCE_DIR), &files).map_err(toolchain)?;
     let existing_files: Vec<String> = set.sources.iter().map(|p| file_name(p)).collect();
 
@@ -444,6 +454,7 @@ pub fn build(
         mut warnings,
         closing,
     } = compile_jobs(&ws, &profile, &jobs_input, &run_dir.0, control, opening)?;
+    warnings.splice(0..0, flag_warnings);
     if let Some(Some((asm_ws, asm_profile))) =
         assembler.as_ref().filter(|_| !assembler_jobs.is_empty())
     {
@@ -515,15 +526,49 @@ pub fn build(
     );
     drop(refs);
     let mut originals: HashMap<Address, String> = HashMap::new();
+    let mut listings: HashMap<Address, super::diagnose::Listing> = HashMap::new();
+    let mut relative_targets: HashMap<Address, Vec<Address>> = HashMap::new();
     progress(Progress::new(
         0,
         Some(placements.len() as u64),
         Some(format!("comparing {} functions", placements.len())),
     ));
+    let mut main_data: Option<MainDataReport> = None;
+    let data_modules: Vec<&decovery_objects::ObjectModule> = objects
+        .iter()
+        .flat_map(|(_, o)| o.modules.iter())
+        .filter(|m| {
+            m.sections
+                .iter()
+                .any(|s| s.kind == decovery_objects::SectionKind::Data && !s.data.is_empty())
+        })
+        .collect();
     let comparisons: Vec<Comparison> = if placements.is_empty() {
+        // no function to compare, but a data-only object is still reported
+        if !data_modules.is_empty() {
+            let program = crate::program::load(&ws)?;
+            main_data = main_program_data(
+                &ws,
+                &profile,
+                &rebuild.frames,
+                &program,
+                &placements,
+                &data_modules,
+                &mut warnings,
+            );
+        }
         Vec::new()
     } else {
         let program = crate::program::load(&ws)?;
+        main_data = main_program_data(
+            &ws,
+            &profile,
+            &rebuild.frames,
+            &program,
+            &placements,
+            &data_modules,
+            &mut warnings,
+        );
         for p in &placements {
             if let Some(bytes) = p
                 .original_len
@@ -532,58 +577,59 @@ pub fn build(
                 originals.insert(p.at, super::history::hex(bytes));
             }
         }
-        // the diagnosis reads the instruction pairs of the comparison: no second decode
         let compiled: Vec<&ObjectFile> = objects
             .iter()
             .filter(|(i, _)| sources[*i].compiler == profile.id && is_c(&sources[*i].name))
             .map(|(_, object)| object)
             .collect();
-        let mut options = ModuleOptions::new(profile.padding, rebuild.frames.clone())
-            .with_startup_frames(startup_frames(&ws, &profile, &program, &mut warnings))
-            .with_diagnosis(profile.family.clone());
-        if let Some(literals) = literal_sections(&profile, &compiled) {
-            options = options.with_literals(literals);
-        }
-        let module = decovery_diff::compare_module(
-            &placements,
-            &program,
+        let compared = compare_placed(
+            &ws,
+            &profile,
+            &rebuild.frames,
             &knowledge,
-            &profile.decoration,
-            &options,
+            &program,
+            &placements,
+            &compiled,
+            &mut warnings,
         );
-        warnings.extend(module.warnings);
-        if profile.object_format == ObjectFormat::Aztec {
-            // no linker (phase 4): object against image, relocated fields are link gaps
-            placements
-                .iter()
-                .map(|p| {
-                    let len = p.function.code().len();
-                    let image = program.read(p.at, len).unwrap_or(&[]);
-                    decovery_diff::compare_with_gaps(&p.function, image, p.at)
-                })
-                .collect()
-        } else {
-            module.functions
+        // the differing region of every differing function, side by side, for its attempt's comparison.txt
+        for (p, c) in placements.iter().zip(&compared) {
+            let targets = wrong_relative_targets(p, c);
+            if !targets.is_empty() {
+                relative_targets.insert(p.at, targets);
+            }
+            if c.verdict == decovery_diff::Verdict::Differs {
+                let pairs = super::diagnose::function_pairs(
+                    &p.function,
+                    p.at,
+                    &program,
+                    &knowledge,
+                    &profile,
+                    p.original_len,
+                );
+                listings.insert(p.at, super::diagnose::listing(&pairs));
+            }
         }
+        compared
     };
     drop(placements);
 
     // whole overlay modules (Aztec C86): the objects whose functions lie in one overlay, in source order
-    let modules = if profile.object_format == ObjectFormat::Aztec {
-        let mut of_source: BTreeMap<usize, OverlayName> = BTreeMap::new();
-        for b in &placed {
-            if let Some(name) = b.address.overlay() {
-                of_source.entry(b.source).or_insert(name);
-            }
-        }
-        let assigned: Vec<(OverlayName, &ObjectFile)> = objects
+    let (modules, wrong_fields) = if profile.object_format == ObjectFormat::Aztec {
+        let starts: Vec<(usize, Address)> = placed.iter().map(|b| (b.source, b.address)).collect();
+        let named: Vec<(usize, &str, &ObjectFile)> = objects
             .iter()
-            .filter_map(|(i, object)| of_source.get(i).map(|&name| (name, object)))
+            .map(|(i, object)| (*i, sources[*i].name.as_str(), object))
             .collect();
-        overlay_modules(&ws, &assigned, &mut warnings)
+        let assigned = assign_overlay_objects(&rebuild.modules, &named, &starts, &mut warnings);
+        overlay_modules_with_fields(&ws, &assigned, &mut warnings)
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
+    let functions: Vec<(Address, String)> = placed
+        .iter()
+        .map(|b| (b.address, b.label.clone()))
+        .collect();
 
     // inline assembly
     let mut cheats: Vec<Vec<CheatFinding>> = Vec::new();
@@ -615,6 +661,9 @@ pub fn build(
     for (built, comparison) in placed.iter().zip(&comparisons) {
         let source = &sources[built.source];
         let mut r = record(built, comparison, source, &date);
+        if profile.object_format == ObjectFormat::Aztec {
+            judge_fields(&mut r, built.address, comparison, &wrong_fields);
+        }
         // a code pragma or a finding outside any function blocks every function of the file
         let findings: Vec<&CheatFinding> = cheats[built.source]
             .iter()
@@ -727,6 +776,7 @@ pub fn build(
         &headers,
         &fingerprint,
         &originals,
+        &listings,
         &request.record,
     );
     warnings.extend(record_attempts(root, tried));
@@ -761,15 +811,302 @@ pub fn build(
         timing,
     )
     .map(|mut response| {
-        add_modules(&mut response, modules);
+        add_modules(&mut response, modules, &functions, &relative_targets);
+        add_main_data(&mut response, main_data);
         response
     })
 }
 
-/// Adds the overlay module verdicts to a build response (data `modules`, a note in the summary).
-fn add_modules(response: &mut Response, modules: Vec<Value>) {
+/// The data segment a main-program data comparison used and where it came from.
+struct DataSegment {
+    ds: u16,
+    /// `frame DATA` (configured) or `startup` (the startup code's first instruction).
+    source: &'static str,
+}
+
+/// What [`main_program_data`] found: the data segment and one verdict per object with data.
+struct MainDataReport {
+    segment: DataSegment,
+    entries: Vec<Value>,
+}
+
+/// The data of the main-program objects of an Aztec build (MZ target) against the original: each object's
+/// data start is anchored by its placed functions' code fields, DS is the configured frame `DATA` or the startup
+/// code's data segment. Objects of overlays are judged by [`overlay_modules`]. An object with data but no placed
+/// function (a data-only file, or one whose functions have no counterpart) is listed as unchecked: nothing in a
+/// build of that file alone names where its data lies.
+fn main_program_data(
+    ws: &Workspace,
+    profile: &Profile,
+    frames: &BTreeMap<String, Address>,
+    program: &Program,
+    placements: &[Placement<'_>],
+    data_modules: &[&decovery_objects::ObjectModule],
+    warnings: &mut Vec<String>,
+) -> Option<MainDataReport> {
+    if profile.object_format != ObjectFormat::Aztec || ws.config.target.format != TargetFormat::Mz {
+        return None;
+    }
+    let main: Vec<Placement<'_>> = placements
+        .iter()
+        .filter(|p| matches!(p.at, Address::Seg { .. }))
+        .cloned()
+        .collect();
+    let overlay_placed = |m: &decovery_objects::ObjectModule| {
+        placements
+            .iter()
+            .any(|p| std::ptr::eq(p.function.module, m) && !matches!(p.at, Address::Seg { .. }))
+    };
+    let mut modules: Vec<&decovery_objects::ObjectModule> = Vec::new();
+    for m in main
+        .iter()
+        .map(|p| p.function.module)
+        .chain(data_modules.iter().copied())
+    {
+        if !overlay_placed(m) && !modules.iter().any(|x| std::ptr::eq(*x, m)) {
+            modules.push(m);
+        }
+    }
+    if modules.is_empty() {
+        return None;
+    }
+    let configured = match frames.get("DATA") {
+        Some(Address::Seg { seg, off: 0 }) => Some(*seg),
+        Some(other) => {
+            warnings.push(format!(
+                "frame DATA: configured address {other} is no real-mode paragraph (seg:XXXX:0000); ignored"
+            ));
+            None
+        }
+        None => None,
+    };
+    let startup = decovery_diff::aztec_data_segment(program);
+    if let (Some(c), Some(s)) = (configured, startup)
+        && c != s
+    {
+        warnings.push(format!(
+            "frame DATA: configured segment {c:04X} differs from the startup code's data segment {s:04X}"
+        ));
+    }
+    let segment = match (configured, startup) {
+        (Some(ds), _) => DataSegment {
+            ds,
+            source: "frame DATA",
+        },
+        (None, Some(ds)) => DataSegment {
+            ds,
+            source: "startup",
+        },
+        (None, None) => {
+            warnings.push(
+                "main program data not compared: the startup code does not load DS with its first instruction and                  [rebuild] frames has no DATA"
+                    .to_string(),
+            );
+            return None;
+        }
+    };
+    let ds = segment.ds;
+    let entries = modules
+        .iter()
+        .filter_map(|m| decovery_diff::compare_main_data(m, &main, program, ds))
+        .map(|d| {
+            json!({
+                "module": d.module,
+                "state": d.state.id(),
+                "equal": d.state == decovery_diff::DataState::Equal,
+                "ds": format!("{:04X}", d.ds),
+                "ds_source": segment.source,
+                "start": d.start.map(|s| format!("{s:04X}")),
+                "votes": d.votes,
+                "dissent": d.dissent,
+                "bytes": d.bytes,
+                "gaps": d.gaps,
+                "refs_ok": d.refs_ok,
+                "refs_wrong": d.refs_wrong,
+                "differing": d.diffs.len(),
+                "first_differences": d.diffs.iter().take(16).collect::<Vec<_>>(),
+                "findings": d.findings,
+            })
+        })
+        .collect();
+    Some(MainDataReport { segment, entries })
+}
+
+/// Adds the main-program data verdicts to a build response: `main_data` (the list) and `main_data_ds` (the data
+/// segment and its source) in the data, a note in the summary. With no object holding data the list is empty and
+/// says why.
+fn add_main_data(response: &mut Response, report: Option<MainDataReport>) {
+    let Some(MainDataReport { segment, entries }) = report else {
+        return;
+    };
+    let ds = format!("{:04X}", segment.ds);
+    response.data["main_data_ds"] = json!({"value": ds, "source": segment.source});
+    response.data["main_data"] = json!(entries);
+    if entries.is_empty() {
+        return;
+    }
+    let count = |state: &str| entries.iter().filter(|e| e["state"] == state).count();
+    response.summary.push_str(&format!(
+        "; main program data: {} of {} equal",
+        count("equal"),
+        entries.len()
+    ));
+    let unchecked = count("unchecked");
+    if unchecked > 0 {
+        response
+            .summary
+            .push_str(&format!(", {unchecked} unchecked"));
+    }
+    response
+        .summary
+        .push_str(&format!(" (DS {ds} from {})", segment.source));
+    for e in entries.iter().filter(|e| e["state"] != "equal") {
+        if let (Some(m), Some(f)) = (e["module"].as_str(), e["findings"][0].as_str()) {
+            response.summary.push_str(&format!(" ({m}: {f})"));
+        }
+    }
+}
+
+/// Compares one placed function of an Aztec object with the image, its relocated fields as link gaps (no linker
+/// step): what `build`, its variants and `diagnose` judge an Aztec function by.
+pub(super) fn compare_aztec(p: &Placement<'_>, program: &Program) -> Comparison {
+    let len = p.function.code().len();
+    let image = program.read(p.at, len).unwrap_or(&[]);
+    decovery_diff::compare_with_gaps(&p.function, image, p.at)
+}
+
+/// Compares the placed functions with the original. An Aztec object has no linker (phase 4): each function is
+/// compared against the image with its relocated fields as link gaps, and the module comparison's data anchors
+/// are not computed (their warnings would describe a comparison the verdicts do not come from; an overlay's data
+/// and BSS are judged by [`overlay_modules`]).
+#[allow(clippy::too_many_arguments)]
+fn compare_placed(
+    ws: &Workspace,
+    profile: &Profile,
+    frames: &BTreeMap<String, Address>,
+    knowledge: &KnowledgeView<'_>,
+    program: &Program,
+    placements: &[Placement<'_>],
+    compiled: &[&ObjectFile],
+    warnings: &mut Vec<String>,
+) -> Vec<Comparison> {
+    if profile.object_format == ObjectFormat::Aztec {
+        return placements
+            .iter()
+            .map(|p| compare_aztec(p, program))
+            .collect();
+    }
+    // the diagnosis reads the instruction pairs of the comparison: no second decode
+    let mut options = ModuleOptions::new(profile.padding, frames.clone())
+        .with_startup_frames(startup_frames(ws, profile, program, warnings))
+        .with_diagnosis(profile.family.clone());
+    if let Some(literals) = literal_sections(profile, compiled) {
+        options = options.with_literals(literals);
+    }
+    let module = decovery_diff::compare_module(
+        placements,
+        program,
+        knowledge,
+        &profile.decoration,
+        &options,
+    );
+    warnings.extend(module.warnings);
+    module.functions
+}
+
+/// Adds the overlay module verdicts to a build response (data `modules`, a note in the summary). `functions` are
+/// the built functions (address, reported name): they name the function holding a module's first real difference.
+///
+/// After a code size change, the differing functions behind the first real difference are its likely consequences
+/// (`consequence: true`), and so is a function before it whose only blockers are wrong self-relative references
+/// that lead behind it (`relative_targets`: the targets of each function's wrong self-relative fields). The function
+/// holding the first real difference is `cause: true`.
+fn add_modules(
+    response: &mut Response,
+    mut modules: Vec<Value>,
+    functions: &[(Address, String)],
+    relative_targets: &HashMap<Address, Vec<Address>>,
+) {
     if modules.is_empty() {
         return;
+    }
+    for m in &mut modules {
+        let Some(at) = m["code"]["first_difference_address"]
+            .as_str()
+            .and_then(|a| a.parse::<Address>().ok())
+        else {
+            continue;
+        };
+        // the last function starting at or before the difference, in the same overlay
+        let holder = functions
+            .iter()
+            .filter(|(a, _)| a.overlay() == at.overlay() && *a <= at)
+            .max_by_key(|(a, _)| *a);
+        if let Some((start, name)) = holder
+            && let Some(offset) = at.bytes_from(*start)
+        {
+            m["code"]["first_difference_function"] = json!(name);
+            m["code"]["first_difference_function_offset"] = json!(offset);
+            m["code"]["first_difference_function_address"] = json!(start.to_string());
+        }
+        // the finding names the difference as the text does: address, function and offset
+        let located = located_difference(m, at);
+        if let Some(list) = m["findings"].as_array_mut() {
+            for f in list {
+                if f.as_str()
+                    .is_some_and(|t| t.starts_with("first real difference at offset "))
+                {
+                    *f = json!(format!(
+                        "{located}; the differences after it are likely consequences of the size change"
+                    ));
+                }
+            }
+        }
+    }
+    // the function holding the first real difference
+    for m in &modules {
+        if let Some(start) = m["code"]["first_difference_function_address"].as_str()
+            && let Some(list) = response.data["functions"].as_array_mut()
+        {
+            for f in list.iter_mut().filter(|f| f["address"] == start) {
+                f["cause"] = json!(true);
+            }
+        }
+    }
+    // after a size change, the differing functions behind the first real difference are its likely consequences
+    for m in &modules {
+        let shifted = m["code"]["bytes"] != m["code"]["original_bytes"];
+        let Some(at) = m["code"]["first_difference_address"]
+            .as_str()
+            .and_then(|a| a.parse::<Address>().ok())
+            .filter(|_| shifted)
+        else {
+            continue;
+        };
+        let behind = |a: &Address| a.overlay() == at.overlay() && *a > at;
+        if let Some(list) = response.data["functions"].as_array_mut() {
+            for f in list {
+                if f["verdict"] == "identical" || f["cause"] == true {
+                    continue;
+                }
+                let Some(start) = f["address"]
+                    .as_str()
+                    .and_then(|a| a.parse::<Address>().ok())
+                else {
+                    continue;
+                };
+                // before the difference: only wrong calls and jumps, each into the shifted part
+                let only_relative = f["blockers"].as_array().is_some_and(|b| {
+                    !b.is_empty() && b.iter().all(|b| b["kind"] == "wrong-relative-ref")
+                });
+                let into_shift = relative_targets
+                    .get(&start)
+                    .is_some_and(|targets| !targets.is_empty() && targets.iter().all(behind));
+                if behind(&start) || (only_relative && into_shift) {
+                    f["consequence"] = json!(true);
+                }
+            }
+        }
     }
     let same = modules
         .iter()
@@ -779,15 +1116,254 @@ fn add_modules(response: &mut Response, modules: Vec<Value>) {
         "; overlay modules: {same} of {} identical",
         modules.len()
     ));
+    for m in &modules {
+        let Some(overlay) = m["overlay"].as_str() else {
+            continue;
+        };
+        let mut notes: Vec<String> = m["findings"][0]
+            .as_str()
+            .map(str::to_string)
+            .into_iter()
+            .collect();
+        if let Some(at) = m["code"]["first_difference_address"]
+            .as_str()
+            .and_then(|a| a.parse::<Address>().ok())
+        {
+            notes.push(located_difference(m, at));
+        }
+        if !notes.is_empty() {
+            response
+                .summary
+                .push_str(&format!(" ({overlay}: {})", notes.join("; ")));
+        }
+    }
     response.data["modules"] = json!(modules);
 }
 
+/// `first real difference at <address>`, with ` in <function> +0x<offset>` when a built function holds it.
+fn located_difference(m: &Value, at: Address) -> String {
+    let mut located = format!("first real difference at {at}");
+    if let (Some(f), Some(off)) = (
+        m["code"]["first_difference_function"].as_str(),
+        m["code"]["first_difference_function_offset"].as_u64(),
+    ) {
+        located.push_str(&format!(" in {f} +0x{off:X}"));
+    }
+    located
+}
+
+/// Where the wrong self-relative fields of a placed function lead: the object's target placed relative to the
+/// function's original address (the fields `compare_with_gaps` checks, targets in the function's own section).
+fn wrong_relative_targets(p: &Placement<'_>, c: &Comparison) -> Vec<Address> {
+    let f = &p.function;
+    c.blockers
+        .iter()
+        .filter_map(|b| match *b {
+            Blocker::WrongRelativeRef { at } => Some(at),
+            _ => None,
+        })
+        .filter_map(|at| {
+            let r = f
+                .relocs()
+                .find(|r| r.offset.checked_sub(f.start) == Some(at))?;
+            let target = match &r.target {
+                decovery_objects::RefTarget::Section { index, offset } if *index == f.section => {
+                    *offset
+                }
+                decovery_objects::RefTarget::Symbol(name) => {
+                    f.module
+                        .symbols
+                        .iter()
+                        .find(|s| s.section == f.section && s.name == *name)?
+                        .offset
+                }
+                _ => return None,
+            };
+            p.at.offset_by(i64::from(target) - i64::from(f.start)).ok()
+        })
+        .collect()
+}
+
+/// A relocated code field the overlay module comparison found wrong: its address, whether it is self-relative and
+/// what the field leads to against what the rebuild gives (`symbol: original A, rebuilt B`).
+type WrongField = (Address, bool, Option<String>);
+
+/// The function-level verdict of an Aztec function (link gaps) leaves its relocated fields unchecked: a field the
+/// module comparison found wrong makes an identical function differ (blocker, message), and an identical function
+/// whose fields no module comparison checked (outside an overlay) says so in its message.
+fn judge_fields(r: &mut RebuildRecord, start: Address, c: &Comparison, wrong: &[WrongField]) {
+    if r.result != RebuildResult::Identical {
+        return;
+    }
+    let inside: Vec<(u32, bool, Option<String>)> = wrong
+        .iter()
+        .filter_map(|(at, relative, detail)| {
+            let offset = u32::try_from(at.bytes_from(start)?).ok()?;
+            (offset < c.metrics.bytes).then(|| (offset, *relative, detail.clone()))
+        })
+        .collect();
+    if !inside.is_empty() {
+        for (at, relative, detail) in &inside {
+            let at = *at;
+            let mut b = blocker_record(&if *relative {
+                Blocker::WrongRelativeRef { at }
+            } else {
+                Blocker::WrongAbsoluteRef { at }
+            });
+            b.detail = detail.clone();
+            r.blockers.push(b);
+        }
+        r.refs_wrong += inside.len() as u32;
+        r.result = RebuildResult::Differs;
+        r.verdict = Some(VerdictId::Differs);
+        let n = inside.len();
+        r.message = Some(format!(
+            "{n} relocated field{} wrong in the overlay module comparison (first at +0x{:X}); see the module verdict",
+            if n == 1 { "" } else { "s" },
+            inside[0].0
+        ));
+    } else if start.overlay().is_none() && c.metrics.gaps > 0 {
+        let n = c.metrics.gaps;
+        r.message = Some(format!(
+            "{n} byte{} of relocated fields not checked at function level (no module comparison)",
+            if n == 1 { "" } else { "s" }
+        ));
+    }
+}
+
+/// `files` plus the other files of every `[[rebuild.module]]` one of them belongs to: a module is compared whole
+/// (ADR 0013), so building one of its files builds the others too (their objects usually come from the cache).
+fn with_module_files(modules: &[ModuleConfig], mut files: Vec<String>) -> Vec<String> {
+    let mut k = 0;
+    while k < files.len() {
+        let name = file_name(Path::new(&files[k]));
+        for m in modules
+            .iter()
+            .filter(|m| m.files.iter().any(|f| f.eq_ignore_ascii_case(&name)))
+        {
+            for f in &m.files {
+                if !files
+                    .iter()
+                    .any(|x| file_name(Path::new(x)).eq_ignore_ascii_case(f))
+                {
+                    files.push(f.clone());
+                }
+            }
+        }
+        k += 1;
+    }
+    files
+}
+
+/// The objects of each overlay module in link order (ADR 0013): the files of a `[[rebuild.module]]` in its order,
+/// then the other objects whose functions lie in an overlay, in source order. `objects` are (source index, file
+/// name, object); `starts` the placed functions (source index, address). Warns when a configured file has no
+/// object, or when the code of one file does not end where the functions of the next begin (gap or overlap).
+fn assign_overlay_objects<'a>(
+    modules: &[ModuleConfig],
+    objects: &[(usize, &str, &'a ObjectFile)],
+    starts: &[(usize, Address)],
+    warnings: &mut Vec<String>,
+) -> Vec<(OverlayName, &'a ObjectFile)> {
+    let mut out = Vec::new();
+    let mut taken = BTreeSet::new();
+    for m in modules {
+        // a module none of whose files takes part in this build is not compared: no warnings about it
+        if !m.files.iter().any(|file| {
+            objects
+                .iter()
+                .any(|(_, name, _)| name.eq_ignore_ascii_case(file))
+        }) {
+            continue;
+        }
+        // (file, first function address, code size) of the files present, in link order
+        let mut ranges: Vec<(&str, Option<u16>, u32)> = Vec::new();
+        for file in &m.files {
+            let Some(&(i, name, object)) = objects
+                .iter()
+                .find(|(_, name, _)| name.eq_ignore_ascii_case(file))
+            else {
+                warnings.push(format!(
+                    "module {}: {file} has no object in this build; the module is compared without it",
+                    m.overlay.as_str()
+                ));
+                continue;
+            };
+            taken.insert(i);
+            out.push((m.overlay, object));
+            let first = starts
+                .iter()
+                .filter(|(s, a)| *s == i && a.overlay() == Some(m.overlay))
+                .filter_map(|(_, a)| match a {
+                    Address::Ovl { off, .. } => Some(*off),
+                    _ => None,
+                })
+                .min();
+            let size: u32 = object
+                .modules
+                .iter()
+                .flat_map(|o| &o.sections)
+                .filter(|s| s.kind == decovery_objects::SectionKind::Code)
+                .map(|s| s.size)
+                .sum();
+            ranges.push((name, first, size));
+        }
+        for pair in ranges.windows(2) {
+            let ((a, Some(start), size), (b, Some(next), _)) = (pair[0], pair[1]) else {
+                continue;
+            };
+            let end = u32::from(start) + size;
+            let next = u32::from(next);
+            if end < next {
+                warnings.push(format!(
+                    "module {}: gap of {} bytes between {a} (ends at {end:04X}) and {b} (starts at {next:04X})",
+                    m.overlay.as_str(),
+                    next - end
+                ));
+            } else if end > next {
+                warnings.push(format!(
+                    "module {}: {a} (ends at {end:04X}) overlaps {b} (starts at {next:04X}) by {} bytes",
+                    m.overlay.as_str(),
+                    end - next
+                ));
+            }
+        }
+    }
+    let mut of_source: BTreeMap<usize, OverlayName> = BTreeMap::new();
+    for &(i, address) in starts {
+        if let Some(name) = address.overlay() {
+            of_source.entry(i).or_insert(name);
+        }
+    }
+    for &(i, _, object) in objects {
+        if taken.contains(&i) {
+            continue;
+        }
+        if let Some(&name) = of_source.get(&i) {
+            out.push((name, object));
+        }
+    }
+    out
+}
+
 /// Module verdicts of the overlays that `assigned` objects (in source order) belong to.
-pub(super) fn overlay_modules(
+#[cfg(test)]
+fn overlay_modules(
     ws: &Workspace,
     assigned: &[(OverlayName, &ObjectFile)],
     warnings: &mut Vec<String>,
 ) -> Vec<Value> {
+    overlay_modules_with_fields(ws, assigned, warnings).0
+}
+
+/// [`overlay_modules`] and the relocated code fields the module comparisons found wrong, of the modules whose
+/// code size equals the original's (after a size change the later fields are consequences of the shift).
+fn overlay_modules_with_fields(
+    ws: &Workspace,
+    assigned: &[(OverlayName, &ObjectFile)],
+    warnings: &mut Vec<String>,
+) -> (Vec<Value>, Vec<WrongField>) {
+    let mut wrong = Vec::new();
     let mut groups: BTreeMap<OverlayName, Vec<&ObjectFile>> = BTreeMap::new();
     for &(name, object) in assigned {
         groups.entry(name).or_default().push(object);
@@ -806,35 +1382,124 @@ pub(super) fn overlay_modules(
         };
         let v = decovery_diff::compare_overlay_module(&objects, &overlay);
         let m = &v.code.metrics;
-        out.push(json!({
+        if v.code_size.0 == v.code_size.1 {
+            for b in &v.code.blockers {
+                let (at, relative) = match *b {
+                    Blocker::WrongRelativeRef { at } => (at, true),
+                    Blocker::WrongAbsoluteRef { at } => (at, false),
+                    _ => continue,
+                };
+                if let Ok(off) = u16::try_from(u32::from(overlay.header.corg) + at) {
+                    let address = Address::Ovl {
+                        overlay: name,
+                        seg: 0,
+                        off,
+                    };
+                    let detail = v.wrong_refs.iter().find(|w| w.at == at).map(|w| w.text());
+                    wrong.push((address, relative, detail));
+                }
+            }
+        }
+        // data whose every byte is a link gap was not compared: it is unchecked, not equal
+        let data_state = if v.data_size.1 > 0 && v.data_gaps >= v.data_size.1 {
+            "unchecked"
+        } else if v.data_equal {
+            "equal"
+        } else {
+            "differs"
+        };
+        let mut entry = json!({
             "overlay": name.as_str(),
             "identical": v.identical,
             "code": {
                 "bytes": v.code_size.1,
                 "original_bytes": v.code_size.0,
                 "differing": m.differing,
+                "instructions_differing": m.instructions_differing,
                 "first_difference": m.first_difference,
                 "refs_ok": m.refs_ok,
                 "refs_wrong": m.refs_wrong,
                 "refs_unchecked": m.refs_unchecked,
                 "gaps": m.gaps,
                 "blockers": v.code.blockers.iter().take(16).map(|b| {
-                    json!({"kind": b.kind(), "at": b.at(), "count": b.count()})
+                    let detail = b.at().and_then(|at| v.wrong_refs.iter().find(|w| w.at == at));
+                    match detail {
+                        Some(w) => json!({"kind": b.kind(), "at": b.at(), "count": b.count(), "detail": w.text()}),
+                        None => json!({"kind": b.kind(), "at": b.at(), "count": b.count()}),
+                    }
                 }).collect::<Vec<_>>(),
             },
             "data": {
-                "equal": v.data_equal,
+                "state": data_state,
+                "equal": data_state == "equal",
                 "bytes": v.data_size.1,
+                "gaps": v.data_gaps,
                 "overlay_bytes": v.data_size.0,
                 "differing": v.data_diffs.len(),
                 "first_differences": v.data_diffs.iter().take(16).collect::<Vec<_>>(),
             },
-            "bss": { "original": v.bss.0, "rebuilt": v.bss.1 },
+            "bss": {
+                "original": v.bss.0,
+                "rebuilt": v.bss.1,
+                "state": if v.bss.0 == v.bss.1 { "equal" } else { "differs" },
+                "checked": "size",
+            },
             "externals": v.externals.len(),
-            "ambiguous": v.ambiguous,
-        }));
+            "findings": v.findings,
+        });
+        if !v.commons.is_empty() {
+            entry["commons"] = v
+                .commons
+                .iter()
+                .map(|c| {
+                    json!({
+                        "name": c.name,
+                        "size": c.size,
+                        "address": format!("{:04X}", c.address),
+                        "declared_in": c.declared_in,
+                    })
+                })
+                .collect();
+        }
+        if !v.bss_externals.is_empty() {
+            entry["bss_externals"] = v
+                .bss_externals
+                .iter()
+                .map(|(n, a)| json!({"name": n, "address": format!("{a:04X}")}))
+                .collect();
+        }
+        if let Value::Object(e) = &mut entry {
+            e.extend(ambiguous_json(&v.ambiguous, v.code_size.0 != v.code_size.1));
+        }
+        // the first real difference as an address of the overlay (the module starts at corg)
+        if let Some(off) = m
+            .first_difference
+            .and_then(|x| u16::try_from(u32::from(overlay.header.corg) + x).ok())
+        {
+            let at = Address::Ovl {
+                overlay: name,
+                seg: 0,
+                off,
+            };
+            entry["code"]["first_difference_address"] = json!(at.to_string());
+        }
+        out.push(entry);
     }
-    out
+    (out, wrong)
+}
+
+/// `ambiguous` (the references whose binding disagrees) and `ambiguous_count`. After a size change nearly every
+/// later external reference disagrees: the list would be noise, so only its count is given (`ambiguous_omitted`).
+fn ambiguous_json(ambiguous: &[String], size_changed: bool) -> serde_json::Map<String, Value> {
+    let mut m = serde_json::Map::new();
+    let list: &[String] = if size_changed { &[] } else { ambiguous };
+    m.insert("ambiguous".into(), json!(list));
+    m.insert("ambiguous_count".into(), json!(ambiguous.len()));
+    m.insert(
+        "ambiguous_omitted".into(),
+        json!(size_changed && !ambiguous.is_empty()),
+    );
+    m
 }
 
 /// Reads the source at `path`, stages it as `name` in `dir` and returns its text and blake3 (hex) of the staged
@@ -934,6 +1599,7 @@ pub(super) fn place_objects<'o>(
     let mut taken: HashMap<Address, String> = HashMap::new();
     for &(id, source, object) in objects {
         let overlay = object_overlay(knowledge, profile, object);
+        let first = placed.len();
         for module in &object.modules {
             for view in functions(module).into_iter().filter(|f| is_public(f)) {
                 let raw = view.name;
@@ -956,22 +1622,63 @@ pub(super) fn place_objects<'o>(
                 taken.insert(address, source.to_string());
                 let original_len = original_len(index, symbol_sizes, address);
                 let code_hash = blake3::hash(view.code()).to_hex()[..16].to_string();
+                let label = knowledge
+                    .name_at(address)
+                    .filter(|n| !n.is_default)
+                    .map_or_else(|| name.to_string(), |n| n.name);
                 placed.push(Built {
                     source: id,
                     name: name.to_string(),
+                    label,
                     address,
                     code_hash,
                 });
                 placements.push(Placement::new(view, address, original_len));
             }
         }
+        let order: Vec<(&str, Address)> = placed[first..]
+            .iter()
+            .map(|b| (b.label.as_str(), b.address))
+            .collect();
+        hints.extend(order_hint(source, &order));
     }
     (placements, placed)
 }
 
+/// The functions of `source` (in object order, with their original addresses) that come after a function the
+/// original places behind them: the file defines them in another order than the original, so every function
+/// after the first misplaced one is shifted (wrong relative references, no known cause).
+pub(super) fn order_hint(source: &str, functions: &[(&str, Address)]) -> Option<String> {
+    let mut misplaced = Vec::new();
+    for (k, &(name, at)) in functions.iter().enumerate() {
+        // the function the original places last among those the file defines before this one
+        let before = functions[..k]
+            .iter()
+            .filter(|(_, b)| b.bytes_from(at).is_some_and(|d| d > 0))
+            .max_by_key(|(_, b)| *b);
+        if let Some(&(other, b)) = before {
+            misplaced.push(format!("{name} ({at}) comes after {other} ({b})"));
+        }
+    }
+    if misplaced.is_empty() {
+        return None;
+    }
+    let n = misplaced.len();
+    let shown: Vec<&str> = misplaced.iter().take(4).map(String::as_str).collect();
+    Some(format!(
+        "{source}: the functions are not in the original's address order: {}{}; define them in address order",
+        shown.join(", "),
+        if n > 4 {
+            format!(" and {} more", n - 4)
+        } else {
+            String::new()
+        }
+    ))
+}
+
 /// The C name and original address of a function of an object, as the build places it: by the undecorated name,
 /// else by the raw one.
-fn place_name<'a>(
+pub(super) fn place_name<'a>(
     knowledge: &KnowledgeView<'_>,
     profile: &Profile,
     raw: &'a str,
@@ -984,6 +1691,13 @@ fn place_name<'a>(
             (c_name != raw)
                 .then(|| knowledge.address_of(raw).map(|a| (raw, a)))
                 .flatten()
+        })
+        .or_else(|| {
+            // a name the compiler cut to its significant length: the knowledge's longer name
+            let length = profile.name_length?;
+            knowledge
+                .address_of_cut(c_name, length)
+                .map(|(_, a)| (c_name, a))
         })
 }
 
@@ -1195,6 +1909,9 @@ pub(super) fn blocker_json(b: &BlockerRecord) -> Value {
     if let Some(count) = b.count {
         v["count"] = json!(count);
     }
+    if let Some(detail) = &b.detail {
+        v["detail"] = json!(detail);
+    }
     v
 }
 
@@ -1251,7 +1968,7 @@ fn record(built: &Built, c: &Comparison, source: &Source, date: &str) -> Rebuild
     } else {
         RebuildResult::Differs
     };
-    let mut r = RebuildRecord::new(built.address, built.name.clone(), result);
+    let mut r = RebuildRecord::new(built.address, built.label.clone(), result);
     r.file = Some(source.name.clone());
     r.compiler = Some(source.compiler.clone());
     r.flags = Some(source.flags.clone());
@@ -1284,6 +2001,7 @@ fn attempts_of(
     headers: &BTreeMap<String, String>,
     fingerprint: &str,
     originals: &HashMap<Address, String>,
+    listings: &HashMap<Address, super::diagnose::Listing>,
     record_as: &RecordAs,
 ) -> Vec<Tried> {
     let attempt_sources: Vec<AttemptSource> = sources
@@ -1333,8 +2051,12 @@ fn attempts_of(
             .filter(|_| source.error.is_none())
             .map(|bytes| (object_name(&source.dos_name), bytes));
         let message = compiled.map(|c| c.message.as_str());
-        let files =
-            attempt_source.files(&a, object.as_ref().map(|(n, b)| (n.as_str(), *b)), message);
+        let files = attempt_source.files(
+            &a,
+            object.as_ref().map(|(n, b)| (n.as_str(), *b)),
+            message,
+            listings.get(&r.address),
+        );
         tried.push(Tried {
             record: a,
             files,
@@ -1418,6 +2140,14 @@ fn function_json(root: &Path, r: &RebuildRecord) -> Value {
         "differing": r.differing,
         "instructions_differing": r.instructions_differing,
     });
+    if !r.blockers.is_empty() {
+        // a shifted function lists one blocker per wrong field: the counts per kind read better
+        let mut counts: BTreeMap<&str, u64> = BTreeMap::new();
+        for b in &r.blockers {
+            *counts.entry(b.kind.as_str()).or_default() += b.count.map_or(1, u64::from);
+        }
+        v["blocker_counts"] = json!(counts);
+    }
     if !r.diagnoses.is_empty() {
         v["diagnoses"] = json!(r.diagnoses);
     }
@@ -1442,7 +2172,12 @@ fn respond(
 ) -> Result<Response, FacadeError> {
     records.sort_by_key(|r| r.address);
     if let Some(function) = &request.function {
-        records.retain(|r| &r.name == function || r.address.to_string() == *function);
+        // the knowledge's name, the address, or the default name a source may still use
+        records.retain(|r| {
+            &r.name == function
+                || r.address.to_string() == *function
+                || crate::session::default_name(r.address) == *function
+        });
     }
     let count = |v: VerdictId| records.iter().filter(|r| r.verdict == Some(v)).count();
     let (identical, differs, unchecked) = (
@@ -1561,6 +2296,21 @@ fn respond(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn functions_out_of_address_order_are_named() {
+        let at = |off: u32| Address::Flat(0x1000 + off);
+        assert_eq!(
+            order_hint("a.c", &[("f", at(0)), ("g", at(0x10)), ("h", at(0x20))]),
+            None
+        );
+        assert_eq!(
+            order_hint("a.c", &[("g", at(0x10)), ("f", at(0)), ("h", at(0x20))]).as_deref(),
+            Some(
+                "a.c: the functions are not in the original's address order: f (flat:00001000) comes after g (flat:00001010); define them in address order"
+            )
+        );
+    }
     use decovery_objects::{
         AztecModuleSpec, AztecSection, AztecSymbolSpec, read_aztec, write_aztec,
     };
@@ -1616,6 +2366,100 @@ size = 21
     }
 
     #[test]
+    fn module_files_are_added_to_the_requested_files() {
+        let m = ModuleConfig::new(
+            OverlayName::new("V").unwrap(),
+            vec!["v.c".into(), "v_b.c".into()],
+        );
+        assert_eq!(
+            with_module_files(std::slice::from_ref(&m), vec!["V_B.C".into()]),
+            ["V_B.C", "v.c"]
+        );
+        assert_eq!(with_module_files(&[m], vec!["x.c".into()]), ["x.c"]);
+    }
+
+    fn code_object(name: &str, code: Vec<u8>) -> ObjectFile {
+        let spec = AztecModuleSpec {
+            name: name.into(),
+            code,
+            named: vec![AztecSymbolSpec {
+                name: format!("{name}_"),
+                section: AztecSection::Code,
+                value: 0,
+                public: true,
+            }],
+            ..AztecModuleSpec::default()
+        };
+        read_aztec(&write_aztec(&spec), name).unwrap()
+    }
+
+    #[test]
+    fn module_files_are_assigned_in_link_order_and_gaps_are_warned() {
+        let v = OverlayName::new("V").unwrap();
+        let at = |off| Address::Ovl {
+            overlay: v,
+            seg: 0,
+            off,
+        };
+        let (a, b) = (
+            code_object("a", vec![0xC3; 4]),
+            code_object("b", vec![0xC3; 2]),
+        );
+        let m = ModuleConfig::new(v, vec!["a.c".into(), "b.c".into()]);
+        // sources in another order than the module's: b first
+        let objects = [(0, "b.c", &b), (1, "a.c", &a)];
+        let mut warnings = Vec::new();
+        let out = assign_overlay_objects(
+            std::slice::from_ref(&m),
+            &objects,
+            &[(1, at(0x5000)), (0, at(0x5004))],
+            &mut warnings,
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(out.len(), 2);
+        assert!(std::ptr::eq(out[0].1, &a) && std::ptr::eq(out[1].1, &b));
+        // b's functions start two bytes late: a gap
+        assign_overlay_objects(
+            std::slice::from_ref(&m),
+            &objects,
+            &[(1, at(0x5000)), (0, at(0x5006))],
+            &mut warnings,
+        );
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("gap of 2 bytes"), "{warnings:?}");
+        warnings.clear();
+        assign_overlay_objects(
+            &[m],
+            &objects,
+            &[(1, at(0x5000)), (0, at(0x5003))],
+            &mut warnings,
+        );
+        assert!(warnings[0].contains("overlaps"), "{warnings:?}");
+    }
+
+    #[test]
+    fn modules_outside_the_build_are_not_warned_about() {
+        let (v, w) = (
+            OverlayName::new("V").unwrap(),
+            OverlayName::new("W").unwrap(),
+        );
+        let a = code_object("a", vec![0xC3; 4]);
+        let modules = [
+            ModuleConfig::new(v, vec!["a.c".into()]),
+            ModuleConfig::new(w, vec!["w1.c".into(), "w2.c".into()]),
+        ];
+        let at = Address::Ovl {
+            overlay: v,
+            seg: 0,
+            off: 0x5000,
+        };
+        let mut warnings = Vec::new();
+        let out = assign_overlay_objects(&modules, &[(0, "a.c", &a)], &[(0, at)], &mut warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
     fn overlay_module_verdict_is_reported() {
         let object = object();
         let name = OverlayName::new("A").unwrap();
@@ -1631,7 +2475,43 @@ size = 21
             assert_eq!(modules[0]["code"]["bytes"], 4);
             assert_eq!(modules[0]["bss"]["original"], bss);
             assert_eq!(modules[0]["data"]["equal"], true);
+            assert_eq!(modules[0]["data"]["state"], "equal");
+            assert_eq!(modules[0]["data"]["gaps"], 0);
+            assert_eq!(modules[0]["bss"]["checked"], "size");
+            let bss_state = if identical { "equal" } else { "differs" };
+            assert_eq!(modules[0]["bss"]["state"], bss_state);
         }
+    }
+
+    #[test]
+    fn partial_overlay_module_names_the_covered_range() {
+        // the rebuilt object covers 4 of the overlay's code bytes: the original is extended by two bytes
+        let dir = workspace(2);
+        let path = dir.path().join("A.OVR");
+        let mut file = std::fs::read(&path).unwrap();
+        // header words: magic, corg, csize, dorg, dsize, bss, entry; code follows the 14-byte header
+        let csize = u16::from_le_bytes([file[4], file[5]]);
+        let entry = u16::from_le_bytes([file[12], file[13]]);
+        file[4..6].copy_from_slice(&(csize + 2).to_le_bytes());
+        file[12..14].copy_from_slice(&(entry + 2).to_le_bytes());
+        file.splice(14 + 4..14 + 4, [0x90, 0x90]);
+        std::fs::write(&path, file).unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
+        let object = object();
+        let mut warnings = Vec::new();
+        let modules = overlay_modules(
+            &ws,
+            &[(OverlayName::new("A").unwrap(), &object)],
+            &mut warnings,
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let first = modules[0]["findings"][0].as_str().unwrap_or_default();
+        assert!(
+            first.contains("covers only 0x0000..0x0004 of 0x0000..0x0006"),
+            "{}",
+            modules[0]
+        );
+        assert_eq!(modules[0]["code"]["instructions_differing"], 0);
     }
 
     #[test]
@@ -1714,6 +2594,322 @@ size = 21
             hints,
             ["ovmain: no counterpart in the original"],
             "no overlay to qualify the name with"
+        );
+    }
+
+    #[test]
+    fn a_name_cut_to_31_characters_finds_the_longer_knowledge_name() {
+        let dir = workspace(2);
+        std::fs::create_dir_all(dir.path().join("knowledge")).unwrap();
+        let long = "draw_the_party_status_panel_with_borders";
+        std::fs::write(
+            dir.path().join("knowledge/symbols.toml"),
+            format!(
+                "schema = 1
+
+[[symbol]]
+address = \"ovl:A:0000:5000\"
+kind = \"function\"
+name = \"{long}\"
+                 source = \"human\"
+confidence = \"confirmed\"
+"
+            ),
+        )
+        .unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
+        let knowledge = KnowledgeView::new(&ws, None);
+        let profile = decovery_toolchain::profile("aztec-c86-4.2b").unwrap();
+        // the compiler cut the name before or after appending the underscore
+        for raw in [format!("{}_", &long[..31]), long[..31].to_string()] {
+            let found = place_name(&knowledge, &profile, &raw);
+            assert_eq!(
+                found.map(|(_, a)| a.to_string()).as_deref(),
+                Some("ovl:A:0000:5000"),
+                "{raw}"
+            );
+        }
+        // shorter than the limit: no prefix match
+        assert!(place_name(&knowledge, &profile, "draw_the_party_").is_none());
+    }
+
+    #[test]
+    fn first_real_difference_is_an_overlay_address() {
+        let dir = workspace(2);
+        let ws = Workspace::open(dir.path()).unwrap();
+        let spec = AztecModuleSpec {
+            name: "A".into(),
+            code: vec![0xB8, 2, 0, 0xC3],
+            data: vec![b'x'],
+            bss: 2,
+            ..AztecModuleSpec::default()
+        };
+        let object = read_aztec(&write_aztec(&spec), "A.O").unwrap();
+        let mut warnings = Vec::new();
+        let modules = overlay_modules(
+            &ws,
+            &[(OverlayName::new("A").unwrap(), &object)],
+            &mut warnings,
+        );
+        assert_eq!(modules[0]["code"]["first_difference"], 1);
+        assert_eq!(
+            modules[0]["code"]["first_difference_address"],
+            "ovl:A:0000:5001"
+        );
+    }
+
+    #[test]
+    fn summary_locates_the_first_real_difference_in_its_function() {
+        let mut response = Response::new("a.c: 2 functions", json!({}));
+        let module = json!({
+            "overlay": "A",
+            "identical": false,
+            "code": {"first_difference": 0x2E6, "first_difference_address": "ovl:A:0000:5344"},
+            "findings": ["module code is 1085 bytes longer than the original (rebuilt 39965, original 38880)"],
+        });
+        let at = |s: &str| s.parse::<Address>().unwrap();
+        let functions = [
+            (at("ovl:A:0000:5317"), "show_message".to_string()),
+            (at("ovl:A:0000:5000"), "first".to_string()),
+            (at("ovl:B:0000:5340"), "elsewhere".to_string()),
+            (at("ovl:A:0000:5400"), "later".to_string()),
+        ];
+        add_modules(&mut response, vec![module], &functions, &HashMap::new());
+        assert!(
+            response.summary.contains(
+                "(A: module code is 1085 bytes longer than the original (rebuilt 39965, original 38880); \
+                 first real difference at ovl:A:0000:5344 in show_message +0x2D)"
+            ),
+            "{}",
+            response.summary
+        );
+        let code = &response.data["modules"][0]["code"];
+        assert_eq!(code["first_difference"], 0x2E6, "the offset stays");
+        assert_eq!(code["first_difference_function"], "show_message");
+        assert_eq!(code["first_difference_function_offset"], 0x2D);
+    }
+
+    #[test]
+    fn functions_behind_the_first_difference_of_a_shift_are_consequences() {
+        let functions = json!([
+            {"address": "ovl:A:0000:5317", "verdict": "differs"},
+            {"address": "ovl:A:0000:5400", "verdict": "differs"},
+            {"address": "ovl:A:0000:5500", "verdict": "identical"},
+            {"address": "ovl:B:0000:5400", "verdict": "differs"},
+        ]);
+        let module = |bytes: u32| {
+            json!({
+                "overlay": "A",
+                "identical": false,
+                "code": {"bytes": bytes, "original_bytes": 100,
+                         "first_difference": 0x2E6, "first_difference_address": "ovl:A:0000:5344"},
+                "findings": [],
+            })
+        };
+        let mut shifted = Response::new("", json!({ "functions": functions }));
+        add_modules(&mut shifted, vec![module(101)], &[], &HashMap::new());
+        let marked: Vec<bool> = shifted.data["functions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["consequence"] == true)
+            .collect();
+        assert_eq!(marked, [false, true, false, false]);
+        let mut same_size = Response::new("", json!({ "functions": functions }));
+        add_modules(&mut same_size, vec![module(100)], &[], &HashMap::new());
+        assert!(
+            same_size.data["functions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|f| f.get("consequence").is_none())
+        );
+    }
+
+    #[test]
+    fn blockers_are_counted_per_kind() {
+        let mut r = RebuildRecord::new(
+            "ovl:A:0000:5000".parse().unwrap(),
+            "f",
+            RebuildResult::Differs,
+        );
+        for at in 0..20 {
+            r.blockers
+                .push(blocker_record(&Blocker::WrongRelativeRef { at }));
+        }
+        r.blockers
+            .push(blocker_record(&Blocker::BytesDiffer { count: 3 }));
+        let dir = tempfile::tempdir().unwrap();
+        let v = function_json(dir.path(), &r);
+        assert_eq!(
+            v["blocker_counts"],
+            json!({"wrong-relative-ref": 20, "bytes-differ": 3})
+        );
+    }
+
+    #[test]
+    fn ambiguous_references_after_a_size_change_are_only_counted() {
+        let list = vec!["a_: 0010 and 0012 (field at 5003)".to_string(); 3];
+        let kept = ambiguous_json(&list, false);
+        assert_eq!(kept["ambiguous"].as_array().unwrap().len(), 3);
+        assert_eq!(kept["ambiguous_count"], 3);
+        assert_eq!(kept["ambiguous_omitted"], false);
+        let counted = ambiguous_json(&list, true);
+        assert_eq!(counted["ambiguous"], json!([]));
+        assert_eq!(counted["ambiguous_count"], 3);
+        assert_eq!(counted["ambiguous_omitted"], true);
+    }
+
+    #[test]
+    fn data_of_link_gaps_only_is_unchecked_not_equal() {
+        use decovery_objects::{AztecRefSpec, AztecTarget};
+        // the module's two data bytes are a segment paragraph: a link gap, nothing is compared
+        let spec = AztecModuleSpec {
+            name: "A".into(),
+            code: vec![0xB8, 1, 0, 0xC3],
+            data: vec![0, 0],
+            bss: 2,
+            named: vec![AztecSymbolSpec {
+                name: "f_".into(),
+                section: AztecSection::Code,
+                value: 0,
+                public: true,
+            }],
+            refs: vec![AztecRefSpec {
+                section: AztecSection::Data,
+                offset: 0,
+                width: 2,
+                relative: false,
+                target: AztecTarget::Paragraph(AztecSection::Data),
+                addend: 0,
+            }],
+            ..AztecModuleSpec::default()
+        };
+        let object = read_aztec(&write_aztec(&spec), "A.O").unwrap();
+        let dir = workspace(2);
+        let ws = Workspace::open(dir.path()).unwrap();
+        let mut warnings = Vec::new();
+        let modules = overlay_modules(
+            &ws,
+            &[(OverlayName::new("A").unwrap(), &object)],
+            &mut warnings,
+        );
+        let data = &modules[0]["data"];
+        assert_eq!(data["state"], "unchecked", "{}", modules[0]);
+        assert_eq!(data["equal"], false);
+        assert_eq!(data["gaps"], 2);
+    }
+
+    #[test]
+    fn aztec_functions_carry_no_data_anchor_warnings() {
+        use decovery_objects::{AztecRefSpec, AztecTarget};
+        // `mov ax, [x]; ret` with its data field relocated: the data lies in the overlay, not in a frame
+        let spec = AztecModuleSpec {
+            name: "A".into(),
+            code: vec![0xA1, 0, 0, 0xA1, 0, 0, 0xC3],
+            data: vec![b'x'],
+            named: vec![AztecSymbolSpec {
+                name: "f_".into(),
+                section: AztecSection::Code,
+                value: 0,
+                public: true,
+            }],
+            refs: [1u16, 4]
+                .map(|offset| AztecRefSpec {
+                    section: AztecSection::Code,
+                    offset,
+                    width: 2,
+                    relative: false,
+                    target: AztecTarget::Section(AztecSection::Data, 0),
+                    addend: 0,
+                })
+                .to_vec(),
+            ..AztecModuleSpec::default()
+        };
+        let object = read_aztec(&write_aztec(&spec), "A.O").unwrap();
+        let dir = workspace(2);
+        // the original's two fields name different positions of the same item: no anchor for its frame
+        let mut ovr = Vec::new();
+        for w in [0xF2u16, 0x5000, 8, 0x9000, 2, 2, 0x5007] {
+            ovr.extend(w.to_le_bytes());
+        }
+        ovr.extend([0xA1, 0x00, 0x90, 0xA1, 0x01, 0x90, 0xC3, 0xC3, b'x', 0xEE]);
+        std::fs::write(dir.path().join("A.OVR"), &ovr).unwrap();
+        let toml = dir.path().join("decovery.toml");
+        let config = std::fs::read_to_string(&toml).unwrap().replace(
+            "[[overlay]]",
+            "[[target.segment]]\nname = \"A.code\"\nstart = \"ovl:A:0000:5000\"\nlength = 8\n\
+             file_offset = 14\npermissions = \"rx\"\n\n[[overlay]]",
+        );
+        std::fs::write(&toml, config).unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
+        let knowledge = KnowledgeView::new(&ws, None);
+        let program = crate::program::load(&ws).unwrap();
+        let profile = decovery_toolchain::profile("aztec-c86-4.2b").unwrap();
+        let at: Address = "ovl:A:0000:5000".parse().unwrap();
+        let view = functions(&object.modules[0]).remove(0);
+        let placements = [Placement::new(view, at, Some(7))];
+        // the module comparison would anchor the data in a frame and warn about it
+        let module = decovery_diff::compare_module(
+            &placements,
+            &program,
+            &knowledge,
+            &profile.decoration,
+            &ModuleOptions::new(profile.padding, BTreeMap::new()),
+        );
+        assert!(
+            !module.warnings.is_empty(),
+            "the case must provoke a warning: {:?}",
+            module.functions
+        );
+        let mut warnings = Vec::new();
+        let compared = compare_placed(
+            &ws,
+            &profile,
+            &BTreeMap::new(),
+            &knowledge,
+            &program,
+            &placements,
+            &[&object],
+            &mut warnings,
+        );
+        assert_eq!(compared.len(), 1);
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_function_built_under_its_default_name_is_shown_by_its_knowledge_name() {
+        let dir = workspace(2);
+        std::fs::create_dir_all(dir.path().join("knowledge")).unwrap();
+        std::fs::write(
+            dir.path().join("knowledge/symbols.toml"),
+            "schema = 1\n\n[[symbol]]\naddress = \"ovl:A:0000:5002\"\nkind = \"function\"\n\
+             name = \"draw_stats\"\nsource = \"human\"\nconfidence = \"confirmed\"\n",
+        )
+        .unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
+        let knowledge = KnowledgeView::new(&ws, None);
+        let profile = decovery_toolchain::profile("aztec-c86-4.2b").unwrap();
+        let object = aztec_object(&["fun_A_0000_5000_", "fun_A_0000_5002_"]);
+        let mut hints = Vec::new();
+        let (_, placed) = place_objects(
+            &knowledge,
+            &profile,
+            None,
+            &HashMap::new(),
+            &[(0, "a.c", &object)],
+            &mut hints,
+        );
+        let shown: Vec<_> = placed
+            .iter()
+            .map(|b| (b.name.as_str(), b.label.as_str()))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("fun_A_0000_5000", "fun_A_0000_5000"),
+                ("fun_A_0000_5002", "draw_stats")
+            ]
         );
     }
 }

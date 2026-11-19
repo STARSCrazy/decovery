@@ -106,6 +106,11 @@ pub fn annotate(root: &Path, request: &Annotation) -> Result<Response, FacadeErr
         Err(e) => return Err(e),
     };
     let mut applied = apply(&mut session, request)?;
+    if let AnnotateAction::Name(name) = &request.action {
+        applied
+            .warnings
+            .extend(cut_name_warning(&session.workspace, name));
+    }
     let mut output = OutputReport::default();
     if applied.changed {
         match &applied.save {
@@ -232,6 +237,21 @@ fn non_empty(text: &str, what: &str) -> Result<(), FacadeError> {
     } else {
         Ok(())
     }
+}
+
+/// A warning when the rebuild compiler cuts `name` (profile `name_length`): the rebuilt object will carry only
+/// its first characters.
+fn cut_name_warning(ws: &Workspace, name: &str) -> Option<String> {
+    let (profile, _) = decovery_toolchain::rebuild_profile(ws).ok()?;
+    let length = profile.name_length?;
+    (name.len() > length).then(|| {
+        format!(
+            "'{name}' is {} characters long; {} keeps only the first {length} ('{}'): the build matches on those,              but two names that agree on them collide",
+            name.len(),
+            profile.id,
+            &name[..length]
+        )
+    })
 }
 
 fn check_name(name: &str) -> Result<(), FacadeError> {

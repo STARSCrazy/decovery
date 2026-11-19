@@ -9,7 +9,7 @@ use decovery_core::{Address, AddressRange, Analysis, DecompileInfo, LineRanges};
 
 use serde_json::json;
 
-use crate::exemplars::current_source;
+use crate::exemplars::{EXEMPLARS_DISABLED, current_source, exemplars_enabled};
 use crate::output::{
     STALE_ANALYSIS, analysis_stale, function_path, render_function, write_function,
 };
@@ -23,7 +23,18 @@ const LOCK_WAIT: Duration = Duration::from_secs(10);
 /// current definition in `src/` (`source`); neither goes into the generated file.
 /// The decompiler's signature (when the analyzer sent one) is in `signature` and the summary.
 pub fn show(session: &Session, target: &str, budget: Budget) -> Result<Response, FacadeError> {
-    show_impl(session, target, budget, false)
+    show_impl(session, target, budget, false, false)
+}
+
+/// `show` with the original's disassembly of the function (`show --asm`) in `asm`: address, bytes and
+/// instruction per line, as `diagnose` decodes them; `lines` as in [`show_with_lines`].
+pub fn show_with_asm(
+    session: &Session,
+    target: &str,
+    budget: Budget,
+    lines: bool,
+) -> Result<Response, FacadeError> {
+    show_impl(session, target, budget, lines, true)
 }
 
 /// `show` with the instruction address ranges of each pseudo-C line in front of it (`show --lines`); lines
@@ -33,7 +44,7 @@ pub fn show_with_lines(
     target: &str,
     budget: Budget,
 ) -> Result<Response, FacadeError> {
-    show_impl(session, target, budget, true)
+    show_impl(session, target, budget, true, false)
 }
 
 fn show_impl(
@@ -41,6 +52,7 @@ fn show_impl(
     target: &str,
     budget: Budget,
     with_lines: bool,
+    with_asm: bool,
 ) -> Result<Response, FacadeError> {
     let start = resolve(session, target)?.function;
     let root = &session.workspace.root;
@@ -69,18 +81,24 @@ fn show_impl(
     let name = session.name_of(start).name;
     let lines = text.lines().count();
     let mut summary = format!("{name} at {start}: {lines} lines");
-    if stale {
-        summary.push_str(&format!(" ({STALE_ANALYSIS})"));
-    }
     if let Some(signature) = &signature {
         summary.push_str(&format!("; signature: {signature}"));
     }
-    let mut warnings = Vec::new();
-    let exemplars = match exemplar_index(session).and_then(|ix| ix.similar(session, start, 3)) {
-        Ok(found) => found,
-        Err(e) => {
-            warnings.push(format!("no exemplars: {e}"));
-            Vec::new()
+    // once per call, as a warning (not in the summary too)
+    let mut warnings: Vec<String> = stale
+        .then(|| STALE_ANALYSIS.to_string())
+        .into_iter()
+        .collect();
+    let exemplars = if !exemplars_enabled(session) {
+        warnings.push(EXEMPLARS_DISABLED.to_string());
+        Vec::new()
+    } else {
+        match exemplar_index(session).and_then(|ix| ix.similar(session, start, 3)) {
+            Ok(found) => found,
+            Err(e) => {
+                warnings.push(format!("no exemplars: {e}"));
+                Vec::new()
+            }
         }
     };
     if !exemplars.is_empty() {
@@ -143,7 +161,28 @@ fn show_impl(
             "source": source,
         }),
     );
-    if !warnings.is_empty() {
+    if with_asm {
+        let index = session.analysis.index();
+        let sizes = super::build::symbol_sizes(&session.workspace);
+        let program = crate::program::load(&session.workspace)?;
+        let knowledge = crate::KnowledgeView::new(&session.workspace, Some(&session.analysis));
+        let asm = super::build::original_len(Some(&index), &sizes, start)
+            .map(|len| decovery_diff::disassembly(&program, start, len, &knowledge))
+            .unwrap_or_default();
+        if asm.is_empty() {
+            response.data["warnings"] = json!(
+                warnings
+                    .iter()
+                    .cloned()
+                    .chain([
+                        "no disassembly: the function's length or bytes are unknown".to_string()
+                    ])
+                    .collect::<Vec<_>>()
+            );
+        }
+        response.data["asm"] = json!(asm);
+    }
+    if !warnings.is_empty() && response.data.get("warnings").is_none() {
         response.data["warnings"] = json!(warnings);
     }
     response.handles = handles;

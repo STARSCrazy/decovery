@@ -123,3 +123,19 @@ fn short_image_is_unavailable() {
     assert_eq!(c.verdict, Verdict::Unchecked);
     assert_eq!(c.blockers, vec![Blocker::OriginalUnavailable]);
 }
+
+#[test]
+fn byte_differences_count_differing_instructions() {
+    let object = read_aztec(&write_aztec(&module()), "T.O").unwrap();
+    let f = &functions(&object.modules[0])[0];
+    assert_eq!(
+        compare_with_gaps(f, &image(), AT)
+            .metrics
+            .instructions_differing,
+        0
+    );
+    let mut other = image();
+    other[3] = 0xE9;
+    let c = compare_with_gaps(f, &other, AT);
+    assert!(c.metrics.instructions_differing > 0, "{c:?}");
+}

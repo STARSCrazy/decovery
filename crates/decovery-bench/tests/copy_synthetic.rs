@@ -3,7 +3,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use decovery_bench::{StartPoint, SuiteTask, ToolSet, copies_dir, prepare_copy, read_suite};
+use decovery_bench::{
+    StartPoint, SuiteTask, ToolSet, copies_dir, prepare_copy, prepare_copy_with, read_suite,
+};
 use decovery_core::{
     Address, Analysis, AnalyzedFunction, Provider, Workspace, archive_save, read_rebuild,
 };
@@ -577,4 +579,52 @@ fn bench_copy_has_no_exemplar_entry_of_the_function() {
     assert!(index.contains(build_fixture::ADD_AT));
     let index_text = std::fs::read_to_string(into.join(decovery_facade::EXEMPLARS_FILE)).unwrap();
     assert!(!index_text.contains("\"sub\""));
+}
+
+#[test]
+fn copy_without_exemplars_disables_them_in_its_config() {
+    let ws = workspace("synthetic-a");
+    let (_parent, into) = destination();
+    let copy = prepare_copy_with(
+        &task(ws.path()),
+        StartPoint::Stub,
+        ToolSet::Core,
+        false,
+        &into,
+    )
+    .unwrap();
+    let config = Workspace::open(&copy.root).unwrap().config;
+    assert_eq!(config.rebuild.unwrap().exemplars, Some(false));
+    // the default copy leaves the setting out (exemplars on)
+    let (_parent, into) = destination();
+    let copy = prepare_copy(&task(ws.path()), StartPoint::Stub, ToolSet::Core, &into).unwrap();
+    let config = Workspace::open(&copy.root).unwrap().config;
+    assert_eq!(config.rebuild.unwrap().exemplars, None);
+}
+
+#[test]
+fn suite_reads_exemplar_switch() {
+    let ws = workspace("synthetic-a");
+    let suite = tempfile::tempdir().unwrap();
+    let path = suite.path().join("suite.toml");
+    write(
+        suite.path(),
+        "suite.toml",
+        format!(
+            "schema = 1
+name = \"probe\"
+[defaults]
+exemplars = false
+[[task]]
+workspace = {}
+function = \"solve\"
+exemplars = true
+",
+            quoted(ws.path())
+        ),
+    );
+    let suite = read_suite(&path).unwrap();
+    assert!(!suite.defaults.exemplars);
+    assert_eq!(suite.tasks[0].exemplars, Some(true));
+    assert!(!suite.defaults.extra.contains_key("exemplars"));
 }

@@ -117,6 +117,35 @@ class RealModeTest(unittest.TestCase):
         self.assertEqual(self.emu(program).run(machine).exit_code, 1)  # memory was reset
         self.assertEqual(machine.runs, 2)
 
+    def test_reset_drops_code_a_run_loaded_in_place(self):
+        # Aztec's CC loads each pass over its own code: the next run on the same machine must not execute the
+        # translated code of the pass the last run loaded (it ran off into memory and hit INT 05h, sporadically).
+        patch = 0x200  # code offset of the routine replaced by the file: mov al, 1; ret
+        code = (
+            PUSH_CS_POP_DS
+            + b"\xe8" + struct.pack("<h", patch - 5)  # call patch (translated: mov al, 1)
+            + b"\x88\xc6"  # mov dh, al
+            + b"\x52"  # push dx
+            + mov_ah(0x3D) + b"\xb0\x00" + mov16("DX", 0x300) + int21()  # open P.BIN
+            + b"\x89\xc3"  # mov bx, ax
+            + mov_ah(0x3F) + mov16("CX", 3) + mov16("DX", patch) + int21()  # read the new routine over it
+            + b"\x5a"  # pop dx
+        )
+        call_at = len(code)
+        code += (
+            b"\xe8" + struct.pack("<h", patch - call_at - 3)  # call patch (mov al, 2)
+            + b"\xb1\x04\xd2\xe6"  # mov cl, 4; shl dh, cl
+            + b"\x08\xf0"  # or al, dh
+            + mov_ah(0x4C) + int21()
+        )
+        code = code.ljust(patch, b"\x90") + b"\xb0\x01\xc3"
+        code = code.ljust(0x300, b"\x90") + b"P.BIN\0"
+        (self.c / "P.BIN").write_bytes(b"\xb0\x02\xc3")
+        program = asm.mz_exe(code)
+        machine = self.realmode.RealModeMachine(program)
+        self.assertEqual(self.emu(program).run(machine).exit_code, 0x12)
+        self.assertEqual(self.emu(program).run(machine).exit_code, 0x12)
+
     def test_timeout_on_endless_loop(self):
         program = asm.loop_program16()
         machine = self.realmode.RealModeMachine(program)

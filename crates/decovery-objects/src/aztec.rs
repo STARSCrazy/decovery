@@ -259,6 +259,12 @@ fn read_module(d: &[u8], s: usize, file_name: &str) -> Result<(ObjectModule, u16
     };
     let mut module = ObjectModule::new(name, sections, symbols);
     module.start = start;
+    // an undefined name with a value is a common symbol of that size (an uninitialised global)
+    module.commons = globals
+        .iter()
+        .filter(|g| g.kind == T_UNDEF && g.value > 0)
+        .filter_map(|g| Some((g.name.clone()?, u32::from(g.value))))
+        .collect();
     Ok((module, h.next))
 }
 

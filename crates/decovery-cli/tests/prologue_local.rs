@@ -6,14 +6,15 @@
 //!
 //! Per overlay: prologue matches (profile pattern, call target = Decomp's `$csav` address) against the baseline's
 //! function addresses (every match must be a baseline function; the baseline also has frameless functions); the code segment decoded function by function (16-bit) must cover the code size exactly,
-//! and 386-prefixed (66h/67h) instructions are counted.
+//! and 386-prefixed (66h/67h) instructions are counted. The combined start search (prologues, direct call targets,
+//! overlay entry) must equal the baseline's function list.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use decovery_core::{Address, Workspace};
-use decovery_x86::find_prologues;
+use decovery_x86::{find_function_starts, find_prologues};
 
 fn s<'a>(v: &'a toml::Value, key: &str) -> &'a str {
     v.get(key).and_then(|x| x.as_str()).unwrap_or_default()
@@ -106,6 +107,7 @@ fn overlay_prologues_and_decoding() {
     }
     let mut problems = Vec::new();
     let (mut total_found, mut total_base, mut total_both) = (0, 0, 0);
+    let (mut starts_found, mut starts_false, mut starts_missing) = (0, 0, 0);
     for o in &w.config.overlays {
         let name = o.name.to_string();
         let code = regions
@@ -116,6 +118,38 @@ fn overlay_prologues_and_decoding() {
             .into_iter()
             .collect();
         let theirs = by_overlay.remove(&name).unwrap_or_default();
+        // combined search: prologues and direct call targets
+        let combined: BTreeSet<Address> = find_function_starts(
+            &code.data,
+            code.start,
+            &pattern,
+            &resolve,
+            &o.entry.into_iter().collect::<Vec<_>>(),
+        )
+        .into_iter()
+        .collect();
+        let c_false: Vec<String> = combined
+            .difference(&theirs)
+            .map(|a| a.to_string())
+            .collect();
+        let c_missing: Vec<String> = theirs
+            .difference(&combined)
+            .map(|a| a.to_string())
+            .collect();
+        println!(
+            "{name}: function starts {} found, {} false {c_false:?}, {} missing {c_missing:?}",
+            combined.intersection(&theirs).count(),
+            c_false.len(),
+            c_missing.len()
+        );
+        if !c_false.is_empty() || !c_missing.is_empty() {
+            problems.push(format!(
+                "{name}: function starts false {c_false:?}, missing {c_missing:?}"
+            ));
+        }
+        starts_found += combined.intersection(&theirs).count();
+        starts_false += c_false.len();
+        starts_missing += c_missing.len();
         let both = found.intersection(&theirs).count();
         let only_ours: Vec<String> = found.difference(&theirs).map(|a| a.to_string()).collect();
         let only_theirs: Vec<String> = theirs.difference(&found).map(|a| a.to_string()).collect();
@@ -170,5 +204,8 @@ fn overlay_prologues_and_decoding() {
         total_both += both;
     }
     println!("total: {total_found} found, {total_base} baseline, {total_both} both");
+    println!(
+        "function starts total: {starts_found} found, {starts_false} false, {starts_missing} missing"
+    );
     assert!(problems.is_empty(), "{problems:#?}");
 }

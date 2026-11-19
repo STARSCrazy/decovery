@@ -84,6 +84,9 @@ pub struct BlockerRecord {
     pub at: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub count: Option<u32>,
+    /// What the blocker found, in words (a wrong reference: `symbol: original A, rebuilt B`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 impl BlockerRecord {
@@ -92,6 +95,7 @@ impl BlockerRecord {
             kind: kind.into(),
             at,
             count,
+            detail: None,
         }
     }
 }

@@ -67,3 +67,25 @@ Verdicts against the frozen baseline, all 1144 functions (a function the build d
   the object's other functions.
 - The length of an original overlay function is taken within its own address space (overlay addresses have no linear
   address).
+
+## Ghidra analyzer on overlays (real run)
+
+`decovery analyze` with Ghidra 12.1.4 (JDK 21, pyghidra 3.1.0) on a scratch copy of the private workspace: main
+program plus 13 overlays, all overlay code at the same processor address.
+
+| | Count |
+|---|---:|
+| overlay address spaces created | 13 of 13 |
+| functions found (main / overlays) | 1139 (216 / 923) |
+| known overlay functions found | 923 of 927 |
+| known main-program functions found | 216 of 217 |
+| exported addresses outside `seg:` / `ovl:NAME:SSSS:OOOO` | 0 |
+| functions whose end lies in another space | 0 |
+| calls (same space / overlay to main / main to overlay / overlay to other overlay) | 11214 (4138 / 7063 / 13 / 0) |
+| decompiled / failed | 1138 / 1 |
+
+Wall time 4 min 6 s (first open: import, analysis, decompile, output). No crash, no warnings. The 13 main-to-overlay
+calls are the knowledge's computed-call references from the overlay dispatcher to each overlay's entry. The five
+missing functions have no reference to them and are not in `knowledge/symbols.toml`, so Ghidra never disassembles
+them; the one failure is a 19-byte function at the start of the image. The plugin's local test
+`test_two_overlays_at_one_address` covers the same mapping with a synthetic program.

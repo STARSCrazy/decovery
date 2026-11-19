@@ -134,3 +134,67 @@ fn prefixed_386_instructions_in_16_bit_code() {
             .collect();
     assert_ne!(shapes[0], shapes[6]);
 }
+
+/// `call rel16` at `at` to `target` (segment 0).
+fn call(code: &mut Vec<u8>, at: u16, target: u16) {
+    code.push(0xE8);
+    code.extend(target.wrapping_sub(at + 3).to_le_bytes());
+}
+
+#[test]
+fn call_target_without_prologue_is_a_start() {
+    // 0: call 4; 3: ret; 4: xor ax,ax; 6: ret
+    let mut code = Vec::new();
+    call(&mut code, 0x10, 0x14);
+    code.extend([0xC3, 0x31, 0xC0, 0xC3]);
+    let base = seg(0x10);
+    assert_eq!(
+        decovery_x86::find_call_targets(&code, base),
+        vec![seg(0x14)]
+    );
+    let starts = decovery_x86::find_function_starts(&code, base, &aztec(), &|_| None, &[]);
+    assert_eq!(starts, vec![seg(0x14)]);
+}
+
+#[test]
+fn call_target_into_middle_of_instruction_is_ignored() {
+    // 0: call 5; 3: ret; 4: mov ax,1234h (5 is inside it); 7: ret
+    let mut code = Vec::new();
+    call(&mut code, 0, 5);
+    code.extend([0xC3, 0xB8, 0x34, 0x12, 0xC3]);
+    assert!(decovery_x86::find_call_targets(&code, seg(0)).is_empty());
+}
+
+#[test]
+fn call_target_outside_code_is_ignored() {
+    let mut code = Vec::new();
+    call(&mut code, 0, 0x0100);
+    code.push(0xC3);
+    call(&mut code, 4, 0xFF00); // backwards before the start
+    code.push(0xC3);
+    assert!(decovery_x86::find_call_targets(&code, seg(0)).is_empty());
+    // truncated call at the end must not panic
+    assert!(decovery_x86::find_call_targets(&[0xE8, 0x00], seg(0)).is_empty());
+    assert!(decovery_x86::find_call_targets(&[], seg(0xFFFF)).is_empty());
+}
+
+#[test]
+fn prologue_and_call_targets_merge_sorted() {
+    // 0: frame calling $csav at 0x100; 6: call 0x0A; 9: ret; 0x0A: ret; 0x0B: call 0 (prologue start again)
+    let mut code = Vec::new();
+    frame(&mut code, 0, 4, 0x0100);
+    call(&mut code, 6, 0x0A);
+    code.extend([0xC3, 0xC3]);
+    call(&mut code, 0x0B, 0);
+    let starts = decovery_x86::find_function_starts(&code, seg(0), &aztec(), &csav_at(0x0100), &[]);
+    assert_eq!(starts, vec![seg(0), seg(0x0A)]);
+    // known entries count when inside the code
+    let starts = decovery_x86::find_function_starts(
+        &code,
+        seg(0),
+        &aztec(),
+        &csav_at(0x0100),
+        &[seg(0x09), seg(0x0200)],
+    );
+    assert_eq!(starts, vec![seg(0), seg(0x09), seg(0x0A)]);
+}

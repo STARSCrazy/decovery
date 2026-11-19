@@ -26,7 +26,10 @@ use super::diagnose::diagnose_tool;
 use super::history::RecordAs;
 use super::variants::Variant;
 use crate::plugins::{PluginConfig, plugin_config, read_user_plugins};
-use crate::{Budget, Control, FacadeError, Handle, Response, Session, resolve, store_handle};
+use crate::{
+    Budget, Control, FacadeError, Handle, Response, Session, function_by_name, resolve,
+    store_handle,
+};
 
 /// Name of the bridge plugin in `[plugins.<name>]`.
 pub const LEGACY_PLUGIN: &str = "decomp-legacy";
@@ -341,11 +344,23 @@ fn bridge_error(e: PluginError) -> FacadeError {
 
 // -- the request ---------------------------------------------------------------------------------------------
 
-/// The function a call is about: a rebuild record's name or address first, then a function symbol's, else what
-/// [`resolve`] resolves to.
+/// The function a call is about: a rebuild record's address first, then a name by [`function_by_name`], then a
+/// function symbol's address, else what [`resolve`] resolves to.
 pub(super) struct Function {
     pub(super) address: Address,
     pub(super) name: String,
+}
+
+/// Refuses an overlay function: the `decomp-legacy` plugin takes `flat:` and `seg:` addresses only.
+fn no_overlay(function: &Function, what: &str) -> Result<(), FacadeError> {
+    match function.address.overlay() {
+        Some(overlay) => Err(FacadeError::Invalid(format!(
+            "{what} is not available for overlay functions: {} ({}) lies in overlay {overlay}, and the \
+             decomp-legacy plugin takes flat: and seg: addresses only; use `decovery diagnose` without --deep",
+            function.name, function.address
+        ))),
+        None => Ok(()),
+    }
 }
 
 pub(super) fn function_of(session: &Session, target: &str) -> Result<Function, FacadeError> {
@@ -353,12 +368,31 @@ pub(super) fn function_of(session: &Session, target: &str) -> Result<Function, F
     if let Some(r) = session
         .rebuild
         .iter()
-        .find(|r| r.name == trimmed || r.address.to_string() == trimmed)
+        .find(|r| r.address.to_string() == trimmed)
     {
         return Ok(Function {
             address: r.address,
-            name: r.name.clone(),
+            name: session
+                .symbol_at(r.address)
+                .map_or_else(|| r.name.clone(), |s| s.name.clone()),
         });
+    }
+    // an exact name of the knowledge wins over a rebuild record's name; several candidates are an error
+    if let Some(address) = function_by_name(
+        &session.workspace,
+        Some(&session.analysis),
+        &session.rebuild,
+        trimmed,
+    )? {
+        let name = match session.symbol_at(address) {
+            Some(s) => s.name.clone(),
+            None => session
+                .rebuild
+                .iter()
+                .find(|r| r.address == address)
+                .map_or_else(|| session.name_of(address).name, |r| r.name.clone()),
+        };
+        return Ok(Function { address, name });
     }
     // a function symbol of the knowledge by its name or address (also outside the configured segments)
     if let Some(symbol) = session.workspace.symbols.iter().find(|s| {
@@ -703,6 +737,7 @@ pub fn diagnose_deep(
     let root = absolute_root(root)?;
     let session = Session::open(&root)?;
     let function = function_of(&session, &call.target)?;
+    no_overlay(&function, "deep diagnosis (--deep)")?;
     let answer = run_bridge(&root, &session, &function, call, control)?;
     let mut handles = Vec::new();
     let mut data = answer_data(&root, &answer, &function, call.budget, &mut handles)?;
@@ -746,6 +781,7 @@ pub fn search(root: &Path, call: &LegacyCall, control: &Control) -> Result<Respo
     let root = absolute_root(root)?;
     let session = Session::open(&root)?;
     let function = function_of(&session, &call.target)?;
+    no_overlay(&function, "Decomp's search")?;
     let answer = run_bridge(&root, &session, &function, call, control)?;
     let mut handles = Vec::new();
     let mut data = answer_data(&root, &answer, &function, call.budget, &mut handles)?;
@@ -996,6 +1032,7 @@ pub fn verify(root: &Path, call: &LegacyCall, control: &Control) -> Result<Respo
     let root = absolute_root(root)?;
     let session = Session::open(&root)?;
     let function = function_of(&session, &call.target)?;
+    no_overlay(&function, "Decomp's verify")?;
     let answer = run_bridge(&root, &session, &function, call, control)?;
     let mut handles = Vec::new();
     let mut data = answer_data(&root, &answer, &function, call.budget, &mut handles)?;

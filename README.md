@@ -39,6 +39,7 @@ decovery build --function <name> --function-source f.c
                                                    # candidate definition of the function alone
 decovery diagnose <name|address>                   # why a rebuilt function differs and what to try
 decovery diagnose <name> --deep registers          # plus Decomp's model: context, structure, registers, slots, joint
+decovery diagnose --deep <name>                    # --deep without a mode runs joint (structure and registers)
 decovery search <name> --strategy chain --minutes 20
                                                    # Decomp's search; decovery builds the candidate (--apply writes it)
 decovery verify <name> --check equivalence         # Decomp's evidence (equivalence, behavior --run <name>)
@@ -47,7 +48,8 @@ decovery mcp                                       # the same commands as MCP to
 ```
 
 Every command takes `--workspace <dir>` (default: the current directory), `--json` and `--jobs <n>` (most compile
-jobs in flight at once over all runners; default: the number of logical cores).
+jobs in flight at once over all runners; default: the number of logical cores). With `--json`, stdout holds the
+JSON response alone and `build`, `link` and `analyze` print no progress lines.
 
 `build` exits 0 when every built function is identical, 1 when one differs or a file failed, 2 on errors; `link`
 exits 0 when the program is identical, 1 when it differs, 2 when the link failed. Only decovery sets verdicts:
@@ -72,6 +74,24 @@ flags = "-ox -ot -oa -4s"
 profile = "watcom-9.5"             # linker profile; MZ: libraries, flags, startup (e.g. "C0S")
 ```
 
+Flags for single source files replace the `flags` above for that file. Either list them in the config:
+
+```toml
+[rebuild.file_flags]
+"npc.c" = "+b +c"
+```
+
+or put a comment in the first ten lines of the source itself, which survives renames and does not collide in merges
+(ADR 0014):
+
+```c
+/* decovery: flags = +b +c */
+```
+
+When both are present and differ, the build warns and the source comment wins. A `[rebuild.file_flags]` entry that
+names no file in `src/` is warned about. `build` takes a file name in `src/` or a path to it (relative to the
+workspace or to `src/`, or absolute inside `src/`); `find --limit <n|all>` lifts the 100-row default.
+
 ## Building
 
 ```sh
@@ -89,6 +109,19 @@ about 500 MB** (checksums are pinned; windows-x64 and linux-x64 only). Run it in
 `--plugins-dir`. `--extern <dir>` picks the install directory; `--ghidra-zip` / `--jdk-zip` take files you
 downloaded yourself. `DECOVERY_PYTHON` selects the Python that creates the venv. A second run keeps what is
 installed.
+
+An existing Ghidra and JDK are registered without any download: `decovery setup ghidra --ghidra-dir <ghidra install>
+--jdk-dir <jdk>` (the Ghidra directory holds `support/`, the JDK `bin/java`; Ghidra 12.1 needs JDK 21 or newer). Only
+the pyghidra venv is created. Setting `PYTHONPATH` to the plugin is not enough: `analyze` needs the `[plugins.ghidra]`
+entry with a `command` (in the workspace's `decovery.toml` or the user config, `%APPDATA%\decovery\config.toml` on
+Windows, `~/.config/decovery/config.toml` elsewhere), and its error names both files when the entry is missing. A
+hand-written entry looks like this:
+
+```toml
+[plugins.ghidra]
+command = ["<venv>/Scripts/python.exe", "-m", "decovery_ghidra"]
+env = { GHIDRA_INSTALL_DIR = "<ghidra install>", JAVA_HOME = "<jdk>" }
+```
 
 `decovery analyze` runs the `command` of the `[plugins.<name>]` entry in a workspace's `decovery.toml` (and in the
 user config) as a program on your machine. Only analyze workspaces you trust.
@@ -121,6 +154,27 @@ decovery overlay remove VINIT
 
 Functions in an overlay have addresses of the form `ovl:NAME:SSSS:OOOO` (ADR 0011). `migrate` takes Decomp's
 overlay list over unchanged.
+
+`diagnose` and `compare --function` take an overlay function by address, by its knowledge name (`VPCVW_ovmain`) or by
+its C name when that is unique; a C name used in several overlays (`ovmain`) is an error that lists the candidates.
+`diagnose --deep` is not available for overlay functions (the `decomp-legacy` plugin takes `flat:` and `seg:` only).
+
+An overlay module too large for the compiler in one piece is split into several source files and listed in link
+order (ADR 0013); building any of them builds the others too and compares the whole module:
+
+```toml
+[[rebuild.module]]
+overlay = "NPC"
+files = ["npc.c", "npc_b.c"]
+```
+
+Source files keep DOS 8.3 names (`[a-z0-9_-]{1,8}.(c|h|s|asm)`): the compilers run under DOS and see at most eight
+characters before the extension, so split files are named like `npc_b.c`, not `npc_part2.c`; the build refuses
+longer names. The build warns when the code of one file does not end where the functions of the next begin. Uninitialised globals
+the files share (Aztec common symbols) are placed in the module's BSS in order of first appearance and count into its
+size. Aztec cuts identifiers to 31 characters (profile key `name_length`); the build matches a cut name with the longer
+knowledge name, and `annotate --name` warns about a longer name. The memory DOS allocates behind an MZ image
+(`minalloc`: uninitialised data, stack) belongs to the memory map, so globals there can be named.
 
 The compilers run in an emulator plugin:
 

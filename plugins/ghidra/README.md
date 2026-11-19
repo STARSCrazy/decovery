@@ -77,10 +77,32 @@ Neither private inputs nor report data belong in this repository.
 ## Project persistence
 
 `project_dir` holds the Ghidra project (`decovery.gpr`, `decovery.rep/`), `project.json` (program hash, Ghidra
-version, calling convention the project was built with) and `applied.json` (what the last apply set, so the next
+version, calling convention and import-setup version the project was built with) and `applied.json` (what the last apply set, so the next
 one can take back what the knowledge dropped). A matching `project.json` reopens the saved program without
 re-analysis. A `project_dir` with a leading-dot path component moves to
 `%LOCALAPPDATA%/decovery/ghidra/<blake3 of the path>` (Ghidra rejects such paths).
+
+## Real mode and Aztec C86
+
+For `x86-real-16` the import prepares what Ghidra does not find on its own (`aztec.py`, `GhidraBackend._import`):
+
+- **Data segment.** When all non-executable overlay blocks share one segment, that is `DS` for all code; the part
+  of the segment no block covers (the main program's uninitialized data) becomes an uninitialized block. Unnamed
+  data in `DS` is labelled by its `DS` offset (`DAT_0ff6_8302`, `DAT_VTREA_0ff6_9202` in an overlay space)
+  instead of Ghidra's linear or normalized address (`DAT_VTREA__019162`, `DAT_1000_8262`).
+- **`$csav`** (`pop bx; push bp; mov bp,sp; add sp,ax`): a call fixup sets `BP` and the frame, so functions with
+  `mov ax,-frame; call $csav` read their parameters and locals instead of `unaff_BP`.
+- **Switch helper** (`mov cx,n; call $swt` + inline table of n-1 values, n-1 targets, default): the helper does
+  not return, the table is word data, the targets belong to the calling function and become a decompiler
+  jump-table override; a comment at the call lists value -> target. Ghidra's override carries targets only
+  (no label values, no start value) and the decompiler labels such cases by target address, so the import keeps
+  each table in the program property `decovery.aztec.switch` and decompiling rewrites the case tokens to the
+  table values (`case 0x52: case 0x53:`, `default:`). The override notice and the unreachable call block at
+  these switches are left out of the C text, as is a `WARNING (jumptable)` repeat of a plain warning.
+- **Dense switch** (`[sub ax,k;] cmp ax,n; jae default; xchg ax,bx; shl bx,1; jmp cs:[bx+table]`, the n-word
+  table right in front): Ghidra decodes such tables in overlays as code; they are marked and modelled like the
+  helper switch, case i having value i+k.
+- **Decompiler Parameter ID** runs during analysis, so calls get the callee's argument count.
 
 ## Layout
 
@@ -92,6 +114,7 @@ re-analysis. A `project_dir` with a leading-dot path component moves to
 | `export.py` | export records, deterministic writer, `read_program` |
 | `project.py` | project location and reuse key |
 | `mapping.py` | decovery program description and addresses to Ghidra and back |
+| `aztec.py` | Aztec C86 helper and switch-table patterns, data segment (no Ghidra imports) |
 | `hashing.py` | BLAKE3 (package if installed, else pure Python) |
 
 ## Plugin-specific error codes

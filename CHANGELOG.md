@@ -6,6 +6,52 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `setup ghidra --ghidra-dir <dir> --jdk-dir <dir>` registers existing installs without downloading them (only the
+  pyghidra venv is created); the README shows a hand-written `[plugins.ghidra]` entry.
+- `analyze` without an analyzer entry names the files it searched (the workspace's `decovery.toml`, the user config
+  path) and what is missing (`[plugins.<name>]` with a `command`; `PYTHONPATH` alone does not configure it).
+- `show --asm` (MCP `show` with `asm`): the original's disassembly of the function after the pseudo-C (address, bytes,
+  instruction, the known name of a branch target), decoded as `diagnose` does; in the data as `asm`.
+- The module verdict lists the commons its BSS layout places (`commons`: name, size, address, declaring files); when
+  the BSS size differs, a finding says that extern declarations with a size (`extern int x[3];`) count into it.
+- A module verdict whose BSS is smaller than the original's lists every external name bound inside the original BSS
+  with its address (`bss_externals`); the finding names the first eight and points there.
+- A module finding when an external name ends in a four-digit address (`word_91b8`, `table_84aa`, `DAT_…_9202`)
+  other than the one the original binds it to.
+- `build` and `diagnose` say when a source file defines its functions in another order than the original
+  (`a.c: the functions are not in the original's address order: f (…) comes after g (…)`): the cause of shifted
+  references that otherwise read as `wrong-relative-ref` or "no known cause". `diagnose` gives it as `order`.
+- `diagnose` shows each wrong reference `build` found with its instruction and what the field leads to against what the
+  rebuild gives (`wrong-absolute-ref at +0x7: mov ax,[91B8h]; word_91b8: original 91B8, rebuilt 91AA`); the build
+  record keeps that text as the blocker's `detail`, the module verdict's blockers carry it too.
+- `build` compares the data of Aztec main-program objects with the original (ADR 0012, amendment 2026-11-19): the
+  object's data start in DS is anchored by its placed functions' code fields, DS comes from the startup code or the
+  frame `DATA`; the response lists each object under `main_data` (`equal`, `differs`, `unchecked`) with findings,
+  and the summary counts them. Before, the main program's data was never checked.
+- `build` names the data segment of the main-program data comparison: the summary says `(DS 0FF6 from startup)` or
+  `(DS 0FF6 from frame DATA)`, the response carries `main_data_ds` (`value`, `source`) and `ds_source` per entry. An
+  object with data but no placed function (a data-only file built alone) is now listed as `unchecked` with the reason
+  (nothing in the build names where its data lies) instead of being missing from `main_data`.
+- `-j` is the short form of the global `--jobs` (e.g. `decovery build -j 2`).
+- Per-file compiler flags in the source: a header comment `/* decovery: flags = +b +c */` (first ten lines) as an
+  alternative to `[rebuild.file_flags]` (ADR 0014). The comment wins over a differing table entry, with a warning;
+  table entries that name no file in `src/` are warned about.
+- `show`, `annotate` and every target argument accept a bare hexadecimal offset (`show 9D6B`) when exactly one
+  function of the main program or the overlays starts there; otherwise the error lists the full addresses.
+- `build` accepts source paths relative to the workspace or to `src/`, and absolute paths inside `src/`; others are
+  rejected with a message.
+- `find --limit <n>|all`; a cut list says how many rows are missing.
+- `[[rebuild.module]]` (ADR 0013): an overlay module built from several source files in link order. Building one of
+  the files builds the others and compares the whole module; gaps and overlaps between the files' code are warned.
+- Aztec common symbols (uninitialised globals shared between files) are placed in the overlay module's BSS (order of
+  first appearance, largest size) and counted into its size; references to them are checked against that layout.
+- Profile key `name_length` (31 for the Aztec profiles): a name the compiler cut is matched with the longer knowledge
+  name; `annotate --name` warns about a name longer than that.
+- The memory behind an MZ load image (`minalloc` paragraphs: uninitialised data in DS, stack) is part of the memory
+  map as segment `uninitialized` (derived at session open, `decovery.toml` unchanged).
+- The archived `comparison.txt` of a differing attempt (`build`, its variants) lists the differing region side by
+  side, as `diagnose` shows it (rebuild against original, differing lines marked, equal runs collapsed), cut after
+  60 lines.
 - Phase-4 acceptance (`docs/parity/phase-4.md`): on the third target (MZ program with 13 overlays, Aztec C86 4.2b)
   `build` on the migrated workspace gives 322 identical functions and 7 identical overlay modules; 1144 of 1144
   verdicts equal Decomp's frozen baseline, no deviations.
@@ -42,7 +88,92 @@ and the project uses [Semantic Versioning](https://semver.org/).
   `watcom-10.6` profile uses it, so its LE links carry the preload flag like the original. The first target now links
   identical with WLINK 10.6 in DOSBox (`dosbox-lab`).
 
+### Changed
+- The refusal of a source name longer than DOS 8.3 says why (the DOS compilers take at most eight characters before
+  the extension); README and ADR 0013 document the rule for split module files.
+
 ### Fixed
+- `diagnose` no longer marks an equal branch as differing in main-program functions: the rebuild is
+  decoded at the original's address (both columns show the same targets), and a short branch whose target lies inside
+  the function on one side and beyond its (cut) length on the other is equal when its bytes are.
+- unicorn-dos: a reused machine no longer runs code translated in the previous run. Restoring the loaded state
+  wrote the pages back from the host, which leaves unicorn's translated code in place; Aztec's CC loads its passes
+  over its own code, so the next compile on that worker could execute the last pass of the previous one and stop
+  with `unsupported interrupt INT 05h` (BOUND on garbage). The reset now drops the translated code of every page it
+  restores (real mode and Phar Lap).
+- `build` warns about missing files only for `[[rebuild.module]]`s that take part in the build, not about
+  unrelated modules.
+- Overlay module comparison: every object's data starts on a word, as the Aztec linker places it (one zero byte
+  after an object with an odd data size). Before, the string literals of a later file were compared one byte early
+  and their references counted as wrong.
+- Overlay module comparison: an external name is bound to the address most of its uses agree on (before: its first
+  use), and each disagreeing use names its expression, the field's content and the address it implies (e.g.
+  `t_: bound at 84AA by its other uses; the field at E751 (t_) holds 84AC, as if t_ were at 84AC`).
+- `diagnose` of a function whose instructions are all equal but whose relocated fields `build` found wrong (module
+  comparison) no longer says only "no differing instructions": the summary lists the wrong references, and the
+  data carries them (`references`) with the build's message.
+- Overlay module comparison: when the files give less BSS than the original, a finding names the external names
+  bound inside the original's BSS range (globals the sources declare only `extern`, defined in none of the files)
+  instead of a bare `rebuilt: 0`.
+- The `@signature` line of a function's output follows a rename (`annotate --name`) instead of keeping the old name.
+- The header of an archived `comparison.txt` counted other instructions than its listing (2 against 1 for one
+  inserted instruction): both now give the listing's counts, changed, inserted and removed instructions separately.
+- `find similar` and `show` named exemplars by the rebuild record's name (`fun_…`) instead of the knowledge's name.
+- Overlay module findings in the build JSON name the first real difference like the text (`first real difference
+  at ovl:VPCVW:0000:5344 in cvw_show_message +0x2D; …`; the structured fields stay, plus
+  `code.first_difference_function_address`). The function holding it is `cause: true` (`(cause)` in the text). After
+  a size change, a function before the difference whose only blockers are wrong self-relative references into the
+  shifted part (a call into it) is `consequence: true` / `(follow-on)` as well.
+- "analysis is older than the knowledge" is said once per command and only where the analysis is used: in the
+  `status` summary, as a warning of `show` (no longer in its summary as well) and of `diagnose` (new); `build` never
+  says it. The CLI prints the warning of `show` and `diagnose` once as a `note:` on stderr.
+- `--json build` (and `link`, `analyze`) prints no progress lines: the output is the JSON alone, also when stdout
+  and stderr are read together.
+- `build` on Aztec C86 overlays: a function whose relocated field the overlay module comparison finds wrong (a
+  struct field at `+0x10` instead of `+0x14`) is no longer `identical` at function level; it differs with a
+  `wrong-absolute-ref`/`wrong-relative-ref` blocker at the field and a message pointing to the module verdict (when
+  the module's code size equals the original's). An identical Aztec function outside any overlay says how many bytes
+  of relocated fields were not checked.
+- `build --function <f> --function-source` on an Aztec C86 overlay function judges the variant like `build` (against
+  the image, relocated fields as link gaps) instead of reporting "the original bytes … are not in the program"; the
+  function may be given by its knowledge name (`VPCVW_ovmain`) when its rebuild record holds the C name. `find
+  similar` reads overlay functions (they have no linear address). A function source for a function that the current
+  file does not define yet says so: the function must be in the file already, or the whole file is passed.
+- `build` per function: blockers are counted per kind (`blocker_counts` in JSON, `wrong-relative-ref ×20` in the
+  text, kinds separated by `, `), and after a code size change of an overlay module the differing functions behind
+  its first real difference carry `consequence: true` and `(follow-on)` in the text.
+- The build summary names an overlay module's first real difference as address, function and offset
+  (`first real difference at ovl:VPCVW:0000:5344 in cvw_show_message +0x2D`), not only the size finding; the module
+  JSON adds `code.first_difference_address`, `code.first_difference_function` and
+  `code.first_difference_function_offset` next to the module offset `code.first_difference`.
+- Overlay module JSON: after a code size change the `ambiguous` list is left empty (nearly every later external
+  reference disagrees, 1378 entries on a shifted module); `ambiguous_count` gives the number and
+  `ambiguous_omitted` says the list was dropped. Changed meaning: `ambiguous` is no longer complete after a size
+  change.
+- Aztec C86 `build` no longer warns that frame `DATA` or section `DATA` has no anchor: those warnings came from the
+  module comparison of linked targets, whose verdicts an Aztec build discards (functions are compared with link
+  gaps, overlay data and BSS by the module comparison). The module JSON says what it checked: `data.state`
+  (`equal`, `differs`, or `unchecked` when every rebuilt data byte is a link gap) and `data.gaps`; `bss.state` and
+  `bss.checked = "size"` (BSS has no bytes, only its size and references into it are checked). Changed meaning:
+  `data.equal` is now `false` for data that was not compared (it was `true`).
+- `build` reports a function by its knowledge name: a source that still defines it under its default name
+  (`fun_VPCVW_0000_6096`) no longer hides the name given with `annotate`; the rebuild record takes the knowledge's
+  name, the source's name is the fallback, and `build --function` also accepts the default name.
+- Overlay module findings and the `diagnose --deep` refusal for overlay functions no longer carry a run of spaces
+  in the middle of the text (a continued string literal kept its indentation).
+- `diagnose --deep` works without a mode (`joint`, structure and registers together); `diagnose --deep NAME` takes
+  NAME as the function, `--deep registers` etc. still select a mode.
+- Overlay `diagnose` (Aztec C86) agreed with `build` only when no relocated field changed a branch: relocated fields
+  of the function now take the original's bytes (link gaps, as in `build`), and the module's functions take the
+  analysis' names at their placed addresses, so short jumps and calls inside the module compare by where they lead.
+- Overlay module comparison: relocated code fields are judged only as references, so `first_difference` is the first
+  real byte difference; `instructions_differing` is computed for modules and link-gap comparisons (it stayed 0); a
+  new `findings` list names a code size that differs from the original (a partial module with its covered range, or
+  a longer module whose later differences are likely consequences), and the build summary shows the first one.
+- `diagnose` and `compare --function` on overlay functions: the original bytes are read from the overlay, `compare`
+  finds overlay functions by address, knowledge name or default name (Aztec objects compared as `build` does), an
+  exact name wins over overlay-qualified ones and an ambiguous name lists its candidates; `diagnose --deep` refuses
+  overlay functions with a clear message.
 - Assembler sources: jump tables in a segment of their own, label offsets in another code segment and functions
   the analysis split are compared correctly (ADR 0006 item 13); `data_` default names resolve like `DAT_`.
 - Phase-2 parity refresh: 603 of Decomp's 618 identical functions confirmed, 15 listed deviations

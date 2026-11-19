@@ -5,6 +5,7 @@ mod annotate;
 mod build;
 mod detail;
 mod diagnose;
+mod file_flags;
 mod find;
 mod history;
 mod job;
@@ -12,6 +13,7 @@ mod legacy;
 mod link;
 mod link_symbols;
 mod show;
+mod source_path;
 mod status;
 mod variants;
 
@@ -30,6 +32,6 @@ pub use legacy::{
     keep_legacy_plugin, search, verify,
 };
 pub use link::link;
-pub use show::{c_line_near, differs_near, show, show_with_lines};
+pub use show::{c_line_near, differs_near, show, show_with_asm, show_with_lines};
 pub use status::status;
 pub use variants::{MAX_VARIANTS, Variant};

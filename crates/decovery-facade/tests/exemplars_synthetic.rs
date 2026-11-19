@@ -431,3 +431,69 @@ fn show_budget_covers_source_text() {
         .expect("a source-text handle");
     assert_eq!(response.data["source"]["handle"], handle.id.as_str());
 }
+
+#[test]
+fn find_similar_names_exemplars_by_the_knowledge() {
+    // the rebuild record still carries the default name; the knowledge calls the function `add`
+    let f = workspace();
+    seed(
+        &f,
+        &[record("seg:0000:0010", "fun_0000_0010", "a.c", "identical")],
+    );
+    let session = Session::open(f.root()).unwrap();
+    let mut query = FindQuery::new(FindWhat::Similar);
+    query.pattern = Some("sub".into());
+    query.limit = 3;
+    let response = find(&session, &query, Budget::default()).unwrap();
+    let items = response.data["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{}", response.data);
+    assert_eq!(items[0]["name"], "add");
+}
+
+/// Turns `[rebuild] exemplars = false` on in the fixture's `decovery.toml`.
+fn disable_exemplars(f: &Fixture) {
+    let path = f.root().join("decovery.toml");
+    let config = std::fs::read_to_string(&path).unwrap().replacen(
+        "[rebuild]\n",
+        "[rebuild]\nexemplars = false\n",
+        1,
+    );
+    std::fs::write(path, config).unwrap();
+}
+
+#[test]
+fn disabled_exemplars_are_not_shown() {
+    let f = workspace();
+    seed(&f, &[record("seg:0000:0010", "add", "a.c", "identical")]);
+    disable_exemplars(&f);
+    let session = Session::open(f.root()).unwrap();
+    let response = show(&session, "sub", Budget::default()).unwrap();
+    assert_eq!(response.data["exemplars"].as_array().unwrap().len(), 0);
+    assert!(
+        !response.summary.contains("exemplars:"),
+        "{}",
+        response.summary
+    );
+    let warnings = response.data["warnings"].to_string();
+    assert!(
+        warnings.contains("exemplars are disabled in this workspace"),
+        "{warnings}"
+    );
+}
+
+#[test]
+fn find_similar_refuses_when_disabled() {
+    let f = workspace();
+    seed(&f, &[record("seg:0000:0010", "add", "a.c", "identical")]);
+    disable_exemplars(&f);
+    let session = Session::open(f.root()).unwrap();
+    let mut query = FindQuery::new(FindWhat::Similar);
+    query.pattern = Some("sub".into());
+    let error = find(&session, &query, Budget::default()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("exemplars are disabled in this workspace"),
+        "{error}"
+    );
+}
