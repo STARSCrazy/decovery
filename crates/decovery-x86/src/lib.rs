@@ -21,7 +21,10 @@ use std::collections::BTreeSet;
 
 pub use calls::internal_calls;
 pub use decode::{DecodeOptions, Decoded, DecodedKind, FieldRole, decode_detailed};
-pub use prologue::{PatternByte, PatternError, ProloguePattern, find_prologues};
+pub use prologue::{
+    PatternByte, PatternError, ProloguePattern, find_call_targets, find_function_starts,
+    find_prologues,
+};
 
 /// One decoded instruction (or padding run, jump table, undecodable byte) of a function.
 #[derive(Debug, Clone, PartialEq, Eq)]

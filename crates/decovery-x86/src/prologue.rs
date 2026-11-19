@@ -155,3 +155,64 @@ fn wrap16(code: &[u8], end: usize, len: usize, off: u16) -> Option<u16> {
     let disp = u16::from_le_bytes(code.get(end.checked_sub(2)?..end)?.try_into().ok()?);
     Some(off.wrapping_add(len as u16).wrapping_add(disp))
 }
+
+/// Targets of direct near calls (`call rel16`, `E8`) in 16-bit segmented code that are function starts.
+///
+/// Rule: `code` is decoded once linearly with [`crate::decode_detailed`], which already separates jump tables and
+/// padding from instructions. A target counts only when the call itself decoded as code and the target is the
+/// offset of an instruction decoded as code inside `code` — a target into the middle of an instruction, into a
+/// jump table, into padding or outside the code range is dropped. Far calls are not followed (their segment is a
+/// relocation, not known from the bytes). Flat and selector addresses give an empty list.
+pub fn find_call_targets(code: &[u8], base: Address) -> Vec<Address> {
+    let off = match base {
+        Address::Seg { off, .. } | Address::Ovl { off, .. } => off,
+        _ => return Vec::new(),
+    };
+    let decoded = crate::decode_detailed(code, 16, u64::from(off), &Default::default());
+    let starts: std::collections::BTreeSet<u64> = decoded
+        .iter()
+        .filter(|d| d.kind == crate::DecodedKind::Code)
+        .map(|d| u64::from(d.offset))
+        .collect();
+    let mut out: std::collections::BTreeSet<Address> = std::collections::BTreeSet::new();
+    for d in &decoded {
+        if d.kind != crate::DecodedKind::Code || d.mnemonic != "call" {
+            continue;
+        }
+        let Some(target) = d.near_branch else {
+            continue;
+        };
+        let Some(rel) = target.checked_sub(u64::from(off)) else {
+            continue;
+        };
+        if rel >= code.len() as u64 || !starts.contains(&rel) {
+            continue;
+        }
+        if let Ok(a) = base.offset_by(rel as i64) {
+            out.insert(a);
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// Function starts: prologue matches ([`find_prologues`]) united with direct call targets
+/// ([`find_call_targets`]) and the known `entries` (e.g. an overlay header's entry point) that lie inside `code`,
+/// sorted and without duplicates.
+pub fn find_function_starts(
+    code: &[u8],
+    base: Address,
+    pattern: &ProloguePattern,
+    resolve: &dyn Fn(Address) -> Option<String>,
+    entries: &[Address],
+) -> Vec<Address> {
+    let mut all: std::collections::BTreeSet<Address> = find_prologues(code, base, pattern, resolve)
+        .into_iter()
+        .collect();
+    all.extend(find_call_targets(code, base));
+    all.extend(
+        entries
+            .iter()
+            .filter(|e| e.bytes_from(base).is_some_and(|d| d < code.len() as u64)),
+    );
+    all.into_iter().collect()
+}
