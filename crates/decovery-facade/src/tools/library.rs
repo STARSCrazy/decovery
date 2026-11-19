@@ -43,8 +43,16 @@ impl LibraryFile {
     pub fn read(path: &Path, label: &str) -> Result<LibraryFile, String> {
         let bytes =
             std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-        let members = read_aztec_library(&bytes, label)
-            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        LibraryFile::from_bytes(&bytes, label)
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))
+    }
+
+    /// A library or single object from its bytes.
+    pub fn from_bytes(
+        bytes: &[u8],
+        label: &str,
+    ) -> Result<LibraryFile, decovery_objects::ObjectError> {
+        let members = read_aztec_library(bytes, label)?;
         let is_library = bytes.get(..2) == Some(&[0x62, 0xEC][..]);
         Ok(LibraryFile {
             label: label.to_string(),
