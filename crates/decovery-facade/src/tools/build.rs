@@ -11,7 +11,9 @@ use decovery_core::{
     read_user_config, save_rebuild, today, write_atomic,
 };
 use decovery_diff::{Blocker, Comparison, ModuleOptions, Placement, SymbolView, Verdict};
-use decovery_objects::{FunctionView, ObjectFile, ObjectFormat, functions, read_object};
+use decovery_objects::{
+    FunctionView, ObjectFile, ObjectFormat, functions, public_functions, read_object,
+};
 use decovery_plugin::Progress;
 use decovery_toolchain::{
     AssembleError, BUILTIN_ASSEMBLER, CheatFinding, CompiledFile, JobSpan, Profile, Runner,
@@ -321,9 +323,10 @@ pub(super) fn file_name(path: &Path) -> String {
 /// Compiles the C sources of `src/` (all, or `request.files`) through the runners (object cache first, all misses
 /// in one request), compares every public function of the objects with the original in one module comparison,
 /// downgrades functions with inline assembly, and records the results under the workspace lock: rebuild records,
-/// kept objects and the affected output files. MASM sources (`.asm`) go to the built-in assembler first
-/// ([`assemble_listing`]); one with a line outside its subset is assembled by the profile's assembler when that
-/// toolchain is there, else skipped with the line. Other assembler sources (`.s`) are skipped.
+/// kept objects and the affected output files. MASM sources (`.asm`) of an OMF profile go to the built-in assembler
+/// first ([`assemble_listing`]); one with a line outside its subset is assembled by the profile's assembler when that
+/// toolchain is there, else skipped with the line. A profile with another object format (Aztec C86) uses its own
+/// assembler first and the built-in one as fallback (ADR 0015). Other assembler sources (`.s`) are skipped.
 ///
 /// Cancellation ([`Control::cancel`]) is checked before compiling, passed to the runner request, and checked after
 /// compiling and before recording; a cancelled build records nothing (no rebuild records, kept objects, output or
@@ -391,6 +394,17 @@ pub fn build(
                 Ok((text, hash)) => {
                     source.flags = String::new();
                     source.text = text.replace("\r\n", "\n");
+                    // a profile whose objects are not OMF (Aztec C86) builds with its own assembler when that is
+                    // there: the built-in assembler writes OMF and is only the fallback
+                    if profile.object_format != ObjectFormat::Omf
+                        && let Some((_, assembler)) =
+                            assembler.get_or_insert_with(|| profile_assembler(&ws, &profile))
+                    {
+                        source.compiler = assembler.id.clone();
+                        assembler_jobs.push(sources.len());
+                        sources.push(source);
+                        continue;
+                    }
                     match assemble_listing(&source.dos_name, &text) {
                         Ok(object) => {
                             source.compiler = BUILTIN_ASSEMBLER.to_string();
@@ -478,7 +492,12 @@ pub fn build(
         .count();
     for (&i, file) in staged.iter().zip(compiled) {
         if file.object.is_none() {
-            sources[i].error = Some(failure_text(&file));
+            let text = failure_text(&file);
+            sources[i].error = Some(if is_asm(&sources[i].name) {
+                with_assembler_errors(&text)
+            } else {
+                text
+            });
         }
         sources[i].compiled = Some(file);
     }
@@ -1600,8 +1619,14 @@ pub(super) fn place_objects<'o>(
     for &(id, source, object) in objects {
         let overlay = object_overlay(knowledge, profile, object);
         let first = placed.len();
+        // an assembler source's functions run from public label to public label (ADR 0015)
+        let split = if is_asm(source) {
+            public_functions
+        } else {
+            functions
+        };
         for module in &object.modules {
-            for view in functions(module).into_iter().filter(|f| is_public(f)) {
+            for view in split(module).into_iter().filter(|f| is_public(f)) {
                 let raw = view.name;
                 let found = overlay
                     .and_then(|o| place_in_overlay(knowledge, profile, raw, o))
@@ -1889,6 +1914,27 @@ pub(super) fn runner_names(ws: &Workspace, profile: &Profile) -> Vec<String> {
     match ws.config.rebuild.as_ref() {
         Some(r) if !r.runners.is_empty() => r.runners.clone(),
         _ => profile.runners.clone(),
+    }
+}
+
+/// An assembler failure with the assembler's error lines (`ERROR:<file>:<line>: <text>`, Aztec C86 AS) put in front
+/// in decovery's form, `line <line>: <text>` (as the built-in assembler words them); the assembler's own output
+/// follows. Text without such lines is returned as it is.
+pub(super) fn with_assembler_errors(text: &str) -> String {
+    let errors: Vec<String> = text
+        .lines()
+        .filter_map(|line| {
+            let rest = line.trim().strip_prefix("ERROR:")?;
+            let (_, rest) = rest.split_once(':')?;
+            let (number, message) = rest.split_once(':')?;
+            let number: usize = number.trim().parse().ok()?;
+            Some(format!("line {number}: {}", message.trim()))
+        })
+        .collect();
+    if errors.is_empty() {
+        text.to_string()
+    } else {
+        format!("{}\n{text}", errors.join("\n"))
     }
 }
 

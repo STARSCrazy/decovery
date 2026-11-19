@@ -141,6 +141,9 @@ This writes `[toolchains]` into the user config; `[rebuild] tool_dir` in a works
 `profiles/` (`watcom-9.5`, `watcom-10.6`, `turbo-c-2.0`, `aztec-c86-3.4b`, `aztec-c86-4.2b`, `aztec-c86-5.2a`)
 describe how each compiler and linker is called. Aztec C86 has no linker step: its objects are compared against the
 original image with the relocated fields as gaps, and a module of an overlay is compared as a whole (code, data, BSS).
+Assembler sources (`.asm`) of an Aztec C86 4.2b workspace are assembled by its AS (`BIN/AS.EXE` in the same
+directory, called as `AS X.ASM`); a function there runs from a public label to the next one, local labels stay inside
+it (ADR 0015). Without the toolchain, the built-in assembler takes byte-listing sources.
 
 ## Overlays
 

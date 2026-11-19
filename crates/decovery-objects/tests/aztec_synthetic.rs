@@ -3,8 +3,8 @@
 use decovery_core::RelocKind;
 use decovery_objects::{
     AztecModuleSpec, AztecRefSpec, AztecSection, AztecSymbolSpec, AztecTarget, Frame, ObjectError,
-    ObjectFormat, RefTarget, SectionKind, functions, read_aztec, read_object, write_aztec,
-    write_aztec_library,
+    ObjectFormat, RefTarget, SectionKind, functions, public_functions, read_aztec, read_object,
+    write_aztec, write_aztec_library,
 };
 
 fn sym(name: &str, section: AztecSection, value: u16, public: bool) -> AztecSymbolSpec {
@@ -432,4 +432,36 @@ fn undefined_names_with_a_size_are_common_symbols() {
         vec![("b_".to_string(), 4), ("a_".to_string(), 0x50)]
     );
     assert!(m.symbols.iter().all(|s| s.name != "b_" && s.name != "a_"));
+}
+
+/// An assembler module: public `key_` with two local labels behind it, then public `next_`. Only public labels start
+/// a function in [`public_functions`]; [`functions`] still splits at every label.
+#[test]
+fn local_labels_do_not_end_an_assembler_function() {
+    let label = |name: &str, value: u16, public: bool| sym(name, AztecSection::Code, value, public);
+    let bytes = write_aztec(&AztecModuleSpec {
+        name: "A".into(),
+        // key_: jmp short l1; l1: nop; l2: db 55h; ret | next_: ret
+        code: vec![0xEB, 0x00, 0x90, 0x55, 0xC3, 0xC3],
+        named: vec![
+            label("key_", 0, true),
+            label("l1", 2, false),
+            label("l2", 3, false),
+            label("next_", 5, true),
+        ],
+        ..AztecModuleSpec::default()
+    });
+    let file = read_aztec(&bytes, "A.O").unwrap();
+    let module = &file.modules[0];
+    let public: Vec<(&str, u32, u32)> = public_functions(module)
+        .iter()
+        .map(|f| (f.name, f.start, f.len))
+        .collect();
+    assert_eq!(public, [("key_", 0, 5), ("next_", 5, 1)]);
+    assert_eq!(
+        public_functions(module)[0].code(),
+        &[0xEB, 0x00, 0x90, 0x55, 0xC3]
+    );
+    assert_eq!(functions(module).len(), 4);
+    assert_eq!(functions(module)[0].len, 2);
 }

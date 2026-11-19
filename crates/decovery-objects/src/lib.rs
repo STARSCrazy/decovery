@@ -19,7 +19,7 @@ pub use aztec_write::{
     AztecModuleSpec, AztecRefSpec, AztecSection, AztecSymbolSpec, AztecTarget, write_aztec,
     write_aztec_library,
 };
-pub use functions::{FunctionView, functions};
+pub use functions::{FunctionView, functions, public_functions};
 pub use model::{
     Frame, Group, ObjReloc, ObjSymbol, ObjectError, ObjectFile, ObjectModule, RefTarget, Section,
     SectionKind,

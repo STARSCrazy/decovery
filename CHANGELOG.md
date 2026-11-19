@@ -6,6 +6,11 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Aztec C86 4.2b assembler sources: `aztec-c86-4.2b` names AS as its `[assembler]` (`AS {input}`, same runners
+  and preludes as CC), and `build` assembles `.asm` files with it before trying the built-in assembler (now the
+  fallback for non-OMF profiles). Each public function is compared against the original with link gaps like a C
+  function. AS errors (`ERROR:X.ASM:12: text`) are reported as `line 12: text` (ADR 0015).
+
 - `setup ghidra --ghidra-dir <dir> --jdk-dir <dir>` registers existing installs without downloading them (only the
   pyghidra venv is created); the README shows a hand-written `[plugins.ghidra]` entry.
 - `analyze` without an analyzer entry names the files it searched (the workspace's `decovery.toml`, the user config
@@ -93,6 +98,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
   the extension); README and ADR 0013 document the rule for split module files.
 
 ### Fixed
+- Functions of assembler objects end at the next public label, not at the next local label: an Aztec AS object names
+  its local labels, and a function was compared only up to the first one (`key_pressed` over 21 of 226 bytes).
 - `diagnose` no longer marks an equal branch as differing in main-program functions: the rebuild is
   decoded at the original's address (both columns show the same targets), and a short branch whose target lies inside
   the function on one side and beyond its (cut) length on the other is equal when its bytes are.
