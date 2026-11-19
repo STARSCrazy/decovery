@@ -1789,6 +1789,9 @@ fn function_line(f: &serde_json::Value) -> String {
         f["verdict"].as_str().unwrap_or(""),
         blockers.join(", ")
     );
+    if f["cause"] == true {
+        line.push_str("\t(cause)");
+    }
     if f["consequence"] == true {
         line.push_str("\t(follow-on)");
     }

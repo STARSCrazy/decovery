@@ -235,3 +235,94 @@ fn build_does_not_warn_about_a_stale_analysis() {
     let text = format!("{} {}", response.summary, response.data);
     assert!(!text.contains("older than the knowledge"), "{text}");
 }
+
+/// A shifted overlay A: `f1` (5000) calls `f3`, `f2` (5004) is one byte longer in the rebuild (the first real
+/// difference, at 5007), `f3` (5008) follows; the entry (`ret`) is at 5009.
+fn shifted_overlay(ws: &std::path::Path, objects: &std::path::Path) {
+    use decovery_objects::{AztecModuleSpec, AztecRefSpec, AztecSection, AztecSymbolSpec, AztecTarget};
+    // original: call f3 (field 5008 - 5003), mov ax,1; ret, ret, entry
+    std::fs::write(
+        ws.join("A.OVR"),
+        overlay_with_data(&[0xE8, 0x05, 0x00, 0xC3, 0xB8, 1, 0, 0xC3, 0xC3], &[]),
+    )
+    .unwrap();
+    let edit = |file: &str, f: &dyn Fn(String) -> String| {
+        let path = ws.join(file);
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(path, f(text)).unwrap();
+    };
+    edit("decovery.toml", &|t| {
+        t.replacen("length = 4\nfile_offset = 14", "length = 9\nfile_offset = 14", 1)
+            .replacen("size = 18", "size = 24", 1)
+    });
+    let mut symbols = String::from("schema = 1\n\n");
+    for (at, name, size) in [
+        ("ovl:A:0000:5000", "f1", 4),
+        ("ovl:A:0000:5004", "f2", 4),
+        ("ovl:A:0000:5008", "f3", 1),
+        (B_AT, "bmain", 4),
+    ] {
+        symbols.push_str(&format!(
+            "[[symbol]]\naddress = \"{at}\"\nkind = \"function\"\nname = \"{name}\"\nsize = {size}\n\
+             source = \"human\"\nconfidence = \"confirmed\"\n\n"
+        ));
+    }
+    std::fs::write(ws.join("knowledge/symbols.toml"), symbols).unwrap();
+    std::fs::write(
+        ws.join("src/a.c"),
+        "int f3();\nint f1()\n{\n    return f3();\n}\nint f2()\n{\n    return 1;\n}\nint f3()\n{\n}\n",
+    )
+    .unwrap();
+    let sym = |name: &str, value| AztecSymbolSpec {
+        name: name.into(),
+        section: AztecSection::Code,
+        value,
+        public: true,
+    };
+    let object = decovery_objects::write_aztec(&AztecModuleSpec {
+        name: "M".into(),
+        code: vec![0xE8, 0, 0, 0xC3, 0xB8, 1, 0, 0x90, 0xC3, 0xC3],
+        named: vec![sym("f1_", 0), sym("f2_", 4), sym("f3_", 9)],
+        refs: vec![AztecRefSpec {
+            section: AztecSection::Code,
+            offset: 1,
+            width: 2,
+            relative: true,
+            target: AztecTarget::Named(2),
+            addend: 0,
+        }],
+        ..AztecModuleSpec::default()
+    });
+    std::fs::write(objects.join("A.OBJ"), object).unwrap();
+}
+
+#[test]
+fn shifted_module_marks_cause_and_calls_into_the_shift() {
+    let python = python_or_skip!();
+    let (ws, objects) = buildable(&python);
+    shifted_overlay(ws.path(), objects.path());
+    let mut request = BuildRequest::default();
+    request.files = vec!["a.c".into()];
+    let response = run(ws.path(), &request);
+    let functions = response.data["functions"].as_array().unwrap();
+    let by_name = |n: &str| {
+        functions
+            .iter()
+            .find(|f| f["name"] == n)
+            .unwrap_or_else(|| panic!("{n}: {}", response.data))
+    };
+    let (f1, f2) = (by_name("f1"), by_name("f2"));
+    assert_eq!(f2["cause"], true, "{f2}");
+    assert!(f2.get("consequence").is_none(), "{f2}");
+    // f1 lies before the difference; its only blocker is the call into the shifted part
+    assert_eq!(f1["blockers"][0]["kind"], "wrong-relative-ref", "{f1}");
+    assert_eq!(f1["consequence"], true, "{f1}");
+    assert!(f1.get("cause").is_none(), "{f1}");
+    // the finding names the difference like the summary
+    let finding = response.data["modules"][0]["findings"][1].as_str().unwrap();
+    assert!(
+        finding.starts_with("first real difference at ovl:A:0000:5007 in f2 +0x3;"),
+        "{finding}"
+    );
+    assert_eq!(response.data["modules"][0]["code"]["first_difference"], 7);
+}

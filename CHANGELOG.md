@@ -46,6 +46,11 @@ and the project uses [Semantic Versioning](https://semver.org/).
   identical with WLINK 10.6 in DOSBox (`dosbox-lab`).
 
 ### Fixed
+- Overlay module findings in the build JSON name the first real difference like the text (`first real difference
+  at ovl:VPCVW:0000:5344 in cvw_show_message +0x2D; …`; the structured fields stay, plus
+  `code.first_difference_function_address`). The function holding it is `cause: true` (`(cause)` in the text). After
+  a size change, a function before the difference whose only blockers are wrong self-relative references into the
+  shifted part (a call into it) is `consequence: true` / `(follow-on)` as well.
 - "analysis is older than the knowledge" is said once per command and only where the analysis is used: in the
   `status` summary, as a warning of `show` (no longer in its summary as well) and of `diagnose` (new); `build` never
   says it. The CLI prints the warning of `show` and `diagnose` once as a `note:` on stderr.

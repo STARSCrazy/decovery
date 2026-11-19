@@ -519,6 +519,7 @@ pub fn build(
     drop(refs);
     let mut originals: HashMap<Address, String> = HashMap::new();
     let mut listings: HashMap<Address, String> = HashMap::new();
+    let mut relative_targets: HashMap<Address, Vec<Address>> = HashMap::new();
     progress(Progress::new(
         0,
         Some(placements.len() as u64),
@@ -553,6 +554,10 @@ pub fn build(
         );
         // the differing region of every differing function, side by side, for its attempt's comparison.txt
         for (p, c) in placements.iter().zip(&compared) {
+            let targets = wrong_relative_targets(p, c);
+            if !targets.is_empty() {
+                relative_targets.insert(p.at, targets);
+            }
             if c.verdict == decovery_diff::Verdict::Differs {
                 let pairs = super::diagnose::function_pairs(
                     &p.function,
@@ -770,7 +775,7 @@ pub fn build(
         timing,
     )
     .map(|mut response| {
-        add_modules(&mut response, modules, &functions);
+        add_modules(&mut response, modules, &functions, &relative_targets);
         response
     })
 }
@@ -824,7 +829,17 @@ fn compare_placed(
 
 /// Adds the overlay module verdicts to a build response (data `modules`, a note in the summary). `functions` are
 /// the built functions (address, reported name): they name the function holding a module's first real difference.
-fn add_modules(response: &mut Response, mut modules: Vec<Value>, functions: &[(Address, String)]) {
+///
+/// After a code size change, the differing functions behind the first real difference are its likely consequences
+/// (`consequence: true`), and so is a function before it whose only blockers are wrong self-relative references
+/// that lead behind it (`relative_targets`: the targets of each function's wrong self-relative fields). The function
+/// holding the first real difference is `cause: true`.
+fn add_modules(
+    response: &mut Response,
+    mut modules: Vec<Value>,
+    functions: &[(Address, String)],
+    relative_targets: &HashMap<Address, Vec<Address>>,
+) {
     if modules.is_empty() {
         return;
     }
@@ -845,6 +860,30 @@ fn add_modules(response: &mut Response, mut modules: Vec<Value>, functions: &[(A
         {
             m["code"]["first_difference_function"] = json!(name);
             m["code"]["first_difference_function_offset"] = json!(offset);
+            m["code"]["first_difference_function_address"] = json!(start.to_string());
+        }
+        // the finding names the difference as the text does: address, function and offset
+        let located = located_difference(m, at);
+        if let Some(list) = m["findings"].as_array_mut() {
+            for f in list {
+                if f.as_str()
+                    .is_some_and(|t| t.starts_with("first real difference at offset "))
+                {
+                    *f = json!(format!(
+                        "{located}; the differences after it are likely consequences of the size change"
+                    ));
+                }
+            }
+        }
+    }
+    // the function holding the first real difference
+    for m in &modules {
+        if let Some(start) = m["code"]["first_difference_function_address"].as_str()
+            && let Some(list) = response.data["functions"].as_array_mut()
+        {
+            for f in list.iter_mut().filter(|f| f["address"] == start) {
+                f["cause"] = json!(true);
+            }
         }
     }
     // after a size change, the differing functions behind the first real difference are its likely consequences
@@ -857,13 +896,24 @@ fn add_modules(response: &mut Response, mut modules: Vec<Value>, functions: &[(A
         else {
             continue;
         };
+        let behind = |a: &Address| a.overlay() == at.overlay() && *a > at;
         if let Some(list) = response.data["functions"].as_array_mut() {
             for f in list {
-                let after = f["address"]
-                    .as_str()
-                    .and_then(|a| a.parse::<Address>().ok())
-                    .is_some_and(|a| a.overlay() == at.overlay() && a > at);
-                if after && f["verdict"] != "identical" {
+                if f["verdict"] == "identical" || f["cause"] == true {
+                    continue;
+                }
+                let Some(start) = f["address"].as_str().and_then(|a| a.parse::<Address>().ok())
+                else {
+                    continue;
+                };
+                // before the difference: only wrong calls and jumps, each into the shifted part
+                let only_relative = f["blockers"].as_array().is_some_and(|b| {
+                    !b.is_empty() && b.iter().all(|b| b["kind"] == "wrong-relative-ref")
+                });
+                let into_shift = relative_targets.get(&start).is_some_and(|targets| {
+                    !targets.is_empty() && targets.iter().all(behind)
+                });
+                if behind(&start) || (only_relative && into_shift) {
                     f["consequence"] = json!(true);
                 }
             }
@@ -886,15 +936,11 @@ fn add_modules(response: &mut Response, mut modules: Vec<Value>, functions: &[(A
             .map(str::to_string)
             .into_iter()
             .collect();
-        if let Some(at) = m["code"]["first_difference_address"].as_str() {
-            let mut located = format!("first real difference at {at}");
-            if let (Some(f), Some(off)) = (
-                m["code"]["first_difference_function"].as_str(),
-                m["code"]["first_difference_function_offset"].as_u64(),
-            ) {
-                located.push_str(&format!(" in {f} +0x{off:X}"));
-            }
-            notes.push(located);
+        if let Some(at) = m["code"]["first_difference_address"]
+            .as_str()
+            .and_then(|a| a.parse::<Address>().ok())
+        {
+            notes.push(located_difference(m, at));
         }
         if !notes.is_empty() {
             response
@@ -903,6 +949,50 @@ fn add_modules(response: &mut Response, mut modules: Vec<Value>, functions: &[(A
         }
     }
     response.data["modules"] = json!(modules);
+}
+
+/// `first real difference at <address>`, with ` in <function> +0x<offset>` when a built function holds it.
+fn located_difference(m: &Value, at: Address) -> String {
+    let mut located = format!("first real difference at {at}");
+    if let (Some(f), Some(off)) = (
+        m["code"]["first_difference_function"].as_str(),
+        m["code"]["first_difference_function_offset"].as_u64(),
+    ) {
+        located.push_str(&format!(" in {f} +0x{off:X}"));
+    }
+    located
+}
+
+/// Where the wrong self-relative fields of a placed function lead: the object's target placed relative to the
+/// function's original address (the fields `compare_with_gaps` checks, targets in the function's own section).
+fn wrong_relative_targets(p: &Placement<'_>, c: &Comparison) -> Vec<Address> {
+    let f = &p.function;
+    c.blockers
+        .iter()
+        .filter_map(|b| match *b {
+            Blocker::WrongRelativeRef { at } => Some(at),
+            _ => None,
+        })
+        .filter_map(|at| {
+            let r = f
+                .relocs()
+                .find(|r| r.offset.checked_sub(f.start) == Some(at))?;
+            let target = match &r.target {
+                decovery_objects::RefTarget::Section { index, offset } if *index == f.section => {
+                    *offset
+                }
+                decovery_objects::RefTarget::Symbol(name) => {
+                    f.module
+                        .symbols
+                        .iter()
+                        .find(|s| s.section == f.section && s.name == *name)?
+                        .offset
+                }
+                _ => return None,
+            };
+            p.at.offset_by(i64::from(target) - i64::from(f.start)).ok()
+        })
+        .collect()
 }
 
 /// A relocated code field the overlay module comparison found wrong: its address and whether it is self-relative.
