@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import re
 import struct
 from dataclasses import dataclass
 
@@ -35,6 +36,19 @@ class SwitchSite:
         """What the table says, for a comment at the call: the decompiler labels the cases by target address."""
         pairs = ", ".join(f"{case:#x} -> {target:04X}" for case, target in zip(self.cases, self.targets))
         return f"switch (AX): {pairs}; default -> {self.targets[-1]:04X}"
+
+
+def case_labels(cases: list[int], targets: list[int]) -> dict[int, str]:
+    """Label text for each switch target (`targets` in table order, the default last), in the form the decompiler
+    prints after `case `: `0x52`, `0x52: case 0x53`, `default`, `0x7: default`. The decompiler only knows the
+    targets of an overridden jump table and labels each case by its address."""
+    values: dict[int, list[int]] = {}
+    for case, target in zip(cases, targets):
+        values.setdefault(target, []).append(case)
+    labels = {target: ": case ".join(f"{v:#x}" for v in found) for target, found in values.items()}
+    default = targets[-1]
+    labels[default] = f"{labels[default]}: default" if default in labels else "default"
+    return labels
 
 
 def _find_all(data: bytes, pattern: bytes) -> list[int]:
@@ -111,3 +125,30 @@ def data_label(address: GhidraAddress) -> str:
     itself names by the linear or a normalized address), in an overlay space with the overlay name."""
     prefix = f"DAT_{address.space}_" if address.space else "DAT_"
     return f"{prefix}{address.segment:04x}_{address.offset:04x}"
+
+
+_WARNING = re.compile(r"/\* WARNING( \(jumptable\))?: (.*) \*/")
+_UNREACHABLE = re.compile(r"Removing unreachable block \([^,]*,0x([0-9a-fA-F]+)\)")
+
+
+def expected_warnings(lines: list[str], switch_calls: set[int]) -> set[int]:
+    """Indices of decompiler warning lines to leave out in a function with Aztec switch calls (`switch_calls`:
+    address offsets of the calls): the override notice and the unreachable call block are what the switch model
+    does; a `WARNING (jumptable)` repeats the same warning from the jump-table pass; exact repeats go too."""
+    drop, seen = set(), set()
+    plain = {m.group(2) for line in lines if (m := _WARNING.fullmatch(line.strip())) and not m.group(1)}
+    for index, line in enumerate(lines):
+        match = _WARNING.fullmatch(line.strip())
+        if match is None:
+            continue
+        message = match.group(2)
+        unreachable = _UNREACHABLE.fullmatch(message)
+        if (
+            (switch_calls and message == "Switch is manually overridden")
+            or (unreachable and int(unreachable.group(1), 16) in switch_calls)
+            or (match.group(1) and message in plain)
+            or line.strip() in seen
+        ):
+            drop.add(index)
+        seen.add(line.strip())
+    return drop

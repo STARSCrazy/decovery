@@ -260,7 +260,7 @@ class PluginTests(unittest.TestCase):
                 "program_hash": "a" * 64,
                 "ghidra_version": EXPECTED_GHIDRA_VERSION,
                 "calling_convention": None,
-                "import_setup": 2,
+                "import_setup": 3,
             },
         )
         before = (self.root / "proj" / "project.json").read_bytes()
@@ -648,6 +648,7 @@ class PluginTests(unittest.TestCase):
     def test_backend_reads_markup_and_high_function_without_starting_ghidra(self):
         backend = GhidraBackend()
         backend._program = mock.Mock()
+        backend._program.getUsrPropertyManager.return_value.getStringPropertyMap.return_value = None
         backend._pyghidra = mock.Mock()
         backend._decompiler = mock.Mock()
         backend._to_g = lambda address: address

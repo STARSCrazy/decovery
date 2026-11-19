@@ -295,6 +295,13 @@ class LocalGhidraTests(unittest.TestCase):
             self.assertIn("g2", code)
             self.assertNotIn("unaff_BP", code)
             self.assertIn("param_1", code)
+            self.assertIn("case 0x1:", code)
+            self.assertIn("case 0x2:", code)
+            self.assertIn("default:", code)
+            self.assertNotIn("case 0x1001", code)
+            self.assertNotIn("case default", code)
+            self.assertNotIn("Switch is manually overridden", code)
+            self.assertNotIn("Removing unreachable block", code)
             self.assertIn("switch (AX): 0x1 -> 0019, 0x2 -> 001D; default -> 0021", code)
 
 

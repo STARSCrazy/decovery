@@ -52,6 +52,26 @@ class AztecTests(unittest.TestCase):
         )
         self.assertEqual(sites[0].comment(), "switch (AX): 0x1 -> 0019, 0x2 -> 001D; default -> 0021")
 
+    def test_case_labels_by_target(self):
+        self.assertEqual(aztec.case_labels([1, 2], [0x19, 0x1D, 0x21]), {0x19: "0x1", 0x1D: "0x2", 0x21: "default"})
+        self.assertEqual(aztec.case_labels([0x52, 0x53, 7], [0x19, 0x19, 0x21, 0x21]),
+                         {0x19: "0x52: case 0x53", 0x21: "0x7: default"})
+
+    def test_expected_warnings(self):
+        lines = [
+            "/* WARNING: Function: fun_1000_0200 replaced with injection: decovery_aztec_switch */",
+            "/* WARNING (jumptable): Removing unreachable block (ram,0x0001000c) */",
+            "/* WARNING: Removing unreachable block (ram,0x0001000c) */",
+            "/* WARNING (jumptable): Removing unreachable block (ram,0x00010040) */",
+            "/* WARNING: Removing unreachable block (ram,0x00010040) */",
+            "",
+            "                    /* WARNING: Switch is manually overridden */",
+            "                    /* WARNING: Switch is manually overridden */",
+            "/* WARNING: Bad instruction */",
+        ]
+        self.assertEqual(aztec.expected_warnings(lines, {0x1000C}), {1, 2, 3, 6, 7})
+        self.assertEqual(aztec.expected_warnings(lines, set()), {1, 3, 7})
+
     def test_switch_sites_respect_the_block_offset(self):
         image = switch_image()
         sites = aztec.switch_sites(image[0x009:], 0x009, [0x200])

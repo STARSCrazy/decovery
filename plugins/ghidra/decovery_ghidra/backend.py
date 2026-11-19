@@ -8,6 +8,7 @@ Ghidra only by `tests/test_local_ghidra.py` (skipped unless `GHIDRA_INSTALL_DIR`
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from abc import ABC, abstractmethod
@@ -134,6 +135,10 @@ SWITCH_FIXUP_XML = f"""<callfixup name="{SWITCH_FIXUP}">
   </pcode>
 </callfixup>
 """
+
+
+# Per switch call: {"cases": [...], "targets": [address offsets, default last]}; read back when decompiling.
+SWITCH_PROPERTY = "decovery.aztec.switch"
 
 
 class Backend(ABC):
@@ -460,7 +465,7 @@ class GhidraBackend(Backend):
                 for target in targets:
                     found.add(target)
                 DisassembleCommand(found, None, True).applyTo(program)
-                sites.append((call, targets, site.comment()))
+                sites.append((call, targets, site))
         return sites
 
     def _finish_aztec(self, program, blocks, sites, parameter_id: bool) -> None:
@@ -477,13 +482,15 @@ class GhidraBackend(Backend):
         functions = program.getFunctionManager()
         monitor = self._pyghidra.task_monitor()
         entries = AddressSet()
-        for call, targets, comment in sites:
+        cases = program.getUsrPropertyManager().createStringPropertyMap(SWITCH_PROPERTY)
+        for call, targets, site in sites:
             function = functions.getFunctionContaining(call)
             if function is None:
                 continue
             CreateFunctionCmd.fixupFunctionBody(program, function, monitor)
             JumpTable(call, java.util.ArrayList(targets), True, 0).writeOverride(function)
-            _pre_comment(program, call, comment)
+            _pre_comment(program, call, site.comment())
+            cases.add(call, json.dumps({"cases": site.cases, "targets": [int(t.getOffset()) for t in targets]}))
             entries.add(function.getEntryPoint())
         if parameter_id and not entries.isEmpty():
             DecompilerParameterIdCmd("switch tables", entries, SourceType.ANALYSIS, False, False,
@@ -575,8 +582,7 @@ class GhidraBackend(Backend):
         outcome = self._decompiler.decompileFunction(function, DECOMPILE_TIMEOUT_SECONDS, self._pyghidra.task_monitor())
         decompiled = outcome.getDecompiledFunction() if outcome.decompileCompleted() else None
         if decompiled is not None:
-            code = str(decompiled.getC())
-            lines = self._decompile_lines(function, outcome.getCCodeMarkup())
+            code, lines = self._printed(function, outcome.getCCodeMarkup(), str(decompiled.getC()))
             signature, variables = self._high_metadata(outcome.getHighFunction())
             return DecompileResult(code, None, lines=lines, signature=signature, variables=variables)
         error = str(outcome.getErrorMessage() or "").strip() or "decompilation did not complete"
@@ -586,15 +592,61 @@ class GhidraBackend(Backend):
                 disassembly.append((at, str(ins)))
         return DecompileResult(None, error, disassembly)
 
-    def _decompile_lines(self, function, markup) -> list[DecompileLine] | None:
+    def _label_switch_cases(self, function, markup) -> bool:
+        """Aztec switch tables (aztec.py): the decompiler labels the cases of an overridden jump table by target
+        address; relabel them with the table's values. Its override carries no label values, so the case tokens
+        are rewritten (line structure unchanged). True when a token changed."""
+        import java.util  # type: ignore[import-not-found]
+        from ghidra.app.decompiler import ClangCaseToken, ClangToken  # type: ignore[import-not-found]
+
+        sites = self._switch_calls(function)
+        text = ClangToken.class_.getDeclaredField("text")
+        text.setAccessible(True)
+        nodes = java.util.ArrayList()
+        markup.flatten(nodes)
+        tokens = list(nodes)
+        changed = False
+        for index, token in enumerate(tokens):
+            if not isinstance(token, ClangCaseToken) or (switch := token.getSwitchOp()) is None:
+                continue
+            site = sites.get(int(switch.getSeqnum().getTarget().getOffset()))
+            if site is None:
+                continue
+            labels = aztec.case_labels(site["cases"], site["targets"])
+            value = int(token.getValue())
+            label = labels.get(value) or next(
+                (labels[t] for t in labels if (t & 0xFFFF) == (value & 0xFFFF)), None)
+            if label is None:
+                continue
+            text.set(token, label)
+            if label.startswith("default"):  # drop the `case ` before it
+                back = index - 1
+                while back >= 0 and str(tokens[back].getText()).strip() in ("", "case"):
+                    keyword = str(tokens[back].getText()).strip() == "case"
+                    text.set(tokens[back], "")
+                    back -= 1
+                    if keyword:
+                        break
+            changed = True
+        return changed
+
+    def _printed(self, function, markup, code: str) -> tuple[str, list[DecompileLine] | None]:
+        """C text and line records from the markup, with Aztec switch cases relabelled and expected warnings left
+        out. Without markup, the decompiler's own text."""
         if markup is None:
-            return None
+            return code, None
         from ghidra.app.decompiler import PrettyPrinter  # type: ignore[import-not-found]
 
-        # getDecompiledFunction().getC() uses this same printer. Enumerating its lines preserves blank lines
+        calls = self._switch_calls(function)
+        relabelled = bool(calls) and self._label_switch_cases(function, markup)
+        # getDecompiledFunction().getC() is this printer's text. Enumerating its lines preserves blank lines
         # and avoids matching text (identical C statements may have different instruction origins).
+        printed = list(PrettyPrinter(function, markup, None).getLines())
+        texts = [str(PrettyPrinter.getText(line)) for line in printed]
+        drop = aztec.expected_warnings(texts, set(calls))
+        kept = [(line, text) for index, (line, text) in enumerate(zip(printed, texts)) if index not in drop]
         result = []
-        for number, line in enumerate(PrettyPrinter(function, markup, None).getLines(), 1):
+        for number, (line, _) in enumerate(kept, 1):
             ranges = []
             for token in line.getAllTokens():
                 start = self._to_spec(token.getMinAddress())
@@ -602,7 +654,21 @@ class GhidraBackend(Backend):
                 if start is not None and end is not None:
                     ranges.append((start, end))
             result.append(DecompileLine(number, ranges))
-        return result
+        if relabelled or drop:
+            from ghidra.util import StringUtilities  # type: ignore[import-not-found]
+
+            code = "".join(text + str(StringUtilities.LINE_SEPARATOR) for _, text in kept)
+        return code, result
+
+    def _switch_calls(self, function) -> dict:
+        """Aztec switch calls in `function`: {address offset: {"cases", "targets"}} (see SWITCH_PROPERTY)."""
+        cases = self._require_program().getUsrPropertyManager().getStringPropertyMap(SWITCH_PROPERTY)
+        if cases is None:
+            return {}
+        found = {}
+        for address in cases.getPropertyIterator(function.getBody()):
+            found[int(address.getOffset())] = json.loads(str(cases.getString(address)))
+        return found
 
     @staticmethod
     def _storage(storage) -> str | None:

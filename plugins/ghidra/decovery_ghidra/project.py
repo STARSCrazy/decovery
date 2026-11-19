@@ -56,7 +56,8 @@ def project_location(
 
 # Version of what the import sets up before and after analysis; projects built by another version are rebuilt.
 # 2: data segment, Aztec C86 `$csav` and switch helpers (aztec.py).
-IMPORT_SETUP = 2
+# 3: switch case values kept for decompiling (`decovery.aztec.switch` property).
+IMPORT_SETUP = 3
 
 
 def project_key(program_hash: str, ghidra_version: str, calling_convention: str | None) -> dict:
