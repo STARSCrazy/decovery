@@ -29,6 +29,20 @@ fn jobs_must_be_positive() {
 }
 
 #[test]
+fn j_is_the_short_form_of_jobs() {
+    for args in [["build", "-j", "0"], ["-j", "0", "status"]] {
+        let out = Command::new(env!("CARGO_BIN_EXE_decovery"))
+            .args(args)
+            .output()
+            .expect("run decovery");
+        // 0 is out of range: the value reached the jobs parser (an unknown flag says so instead)
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{stderr}");
+        assert!(!stderr.contains("unexpected argument"), "{stderr}");
+    }
+}
+
+#[test]
 fn compare_without_workspace_exits_with_2() {
     let dir = tempfile::tempdir().unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_decovery"))

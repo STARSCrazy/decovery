@@ -30,7 +30,7 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
     /// Most compile jobs in flight at once over all runners; default: the number of logical cores.
-    #[arg(long, global = true, value_parser = clap::value_parser!(u32).range(1..))]
+    #[arg(short = 'j', long, global = true, value_parser = clap::value_parser!(u32).range(1..))]
     jobs: Option<u32>,
     #[command(subcommand)]
     command: Command,
