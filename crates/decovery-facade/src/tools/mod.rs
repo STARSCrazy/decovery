@@ -10,6 +10,7 @@ mod find;
 mod history;
 mod job;
 mod legacy;
+pub mod library;
 mod link;
 mod link_symbols;
 mod show;

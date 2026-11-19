@@ -13,7 +13,7 @@ mod model;
 mod omf;
 mod omf_write;
 
-pub use aztec::read_aztec;
+pub use aztec::{AztecLibraryMember, read_aztec, read_aztec_library};
 #[cfg(feature = "test-writer")]
 pub use aztec_write::{
     AztecModuleSpec, AztecRefSpec, AztecSection, AztecSymbolSpec, AztecTarget, write_aztec,

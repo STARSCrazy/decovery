@@ -661,7 +661,88 @@ fn section_of(kind: u8) -> Option<u32> {
 }
 
 /// Module positions from the dictionary blocks, then the modules in file order.
+/// One member of an Aztec library: its module (an Aztec object), where it starts in the library, how many bytes
+/// it occupies (up to the next member or the end of the file) and its public symbol names.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct AztecLibraryMember {
+    /// The module name from the member's header (the source file's name without extension, e.g. `strcmp`).
+    pub name: String,
+    /// Offset of the member's header in the library file.
+    pub offset: u64,
+    /// Bytes of the member in the library (header, symbol tables, load items, padding).
+    pub len: u64,
+    /// Public symbols the member defines (code, data or BSS), in table order.
+    pub publics: Vec<String>,
+    pub module: ObjectModule,
+}
+
+impl AztecLibraryMember {
+    /// The member as a stand-alone object file (one module).
+    pub fn object(&self) -> ObjectFile {
+        ObjectFile {
+            modules: vec![self.module.clone()],
+            ..ObjectFile::default()
+        }
+    }
+
+    /// The member's bytes within the library it was read from (`library` = the same file).
+    pub fn bytes<'a>(&self, library: &'a [u8]) -> Option<&'a [u8]> {
+        let s = usize::try_from(self.offset).ok()?;
+        let e = s.checked_add(usize::try_from(self.len).ok()?)?;
+        library.get(s..e)
+    }
+}
+
+/// Reads an Aztec library (`.LIB`) member by member. A single object (`.O`) reads as a library of one member, so
+/// objects outside libraries (`OVLD.O`) are handled alike. Malformed input is an error naming the offset.
+pub fn read_aztec_library(
+    bytes: &[u8],
+    file_name: &str,
+) -> Result<Vec<AztecLibraryMember>, ObjectError> {
+    let magic = u16_at(bytes, 0)?;
+    let located = match magic {
+        MAGIC_SMALL | MAGIC_LARGE => {
+            let (module, _) = read_module(bytes, 0, file_name)?;
+            vec![(0, bytes.len(), module)]
+        }
+        MAGIC_LIBRARY => library_modules(bytes, file_name)?,
+        _ => {
+            return Err(malformed(
+                0,
+                format!("not an Aztec object or library (magic {magic:#06x})"),
+            ));
+        }
+    };
+    Ok(located
+        .into_iter()
+        .map(|(offset, len, module)| AztecLibraryMember {
+            name: module.name.clone(),
+            offset: offset as u64,
+            len: len as u64,
+            publics: module
+                .symbols
+                .iter()
+                .filter(|s| s.public)
+                .map(|s| s.name.clone())
+                .collect(),
+            module,
+        })
+        .collect())
+}
+
 fn read_library(d: &[u8], file_name: &str) -> Result<Vec<ObjectModule>, ObjectError> {
+    Ok(library_modules(d, file_name)?
+        .into_iter()
+        .map(|(_, _, m)| m)
+        .collect())
+}
+
+/// The modules of a library with their offset and length in the file.
+fn library_modules(
+    d: &[u8],
+    file_name: &str,
+) -> Result<Vec<(usize, usize, ObjectModule)>, ObjectError> {
     let mut positions = BTreeMap::new(); // module position -> dictionary entry offset
     let mut blocks = BTreeSet::new();
     let mut blk = 0usize;
@@ -722,7 +803,12 @@ fn read_library(d: &[u8], file_name: &str) -> Result<Vec<ObjectModule>, ObjectEr
             }
         }
         let (module, next) = read_module(d, i, file_name)?;
-        modules.push(module);
+        let len = if next == 0 {
+            d.len() - i
+        } else {
+            usize::from(next).min(d.len() - i)
+        };
+        modules.push((i, len, module));
         if next == 0 {
             break;
         }

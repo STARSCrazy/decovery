@@ -7,6 +7,7 @@ use decovery_diff::{
     Blocker, CompareOptions, Comparison, Decoration, Verdict, compare, compare_with_gaps,
 };
 use decovery_facade::KnowledgeView;
+use decovery_facade::tools::library::{LibraryFile, library_function};
 use decovery_objects::{ObjectFormat, functions, read_object};
 use serde_json::{Value, json};
 
@@ -54,15 +55,72 @@ pub fn run(request: &Request) -> Result<Outcome, String> {
     let target = request.function.trim();
     // an address (`flat:`, `seg:`, `ovl:`), else a name: exact first, then rebuild records and overlay-qualified
     // names (`<OVERLAY>_<name>`), else a default name `fun_…`
-    let address = if target.contains(':') {
-        target
-            .parse::<Address>()
-            .map_err(|e| format!("{target}: {e}"))?
+    let known = if target.contains(':') {
+        Some(
+            target
+                .parse::<Address>()
+                .map_err(|e| format!("{target}: {e}"))?,
+        )
     } else {
         decovery_facade::function_by_name(&ws, analysis.as_ref(), &rebuild, target)
             .map_err(|e| e.to_string())?
             .or_else(|| decovery_facade::parse_default_name(target))
-            .ok_or_else(|| format!("no function named {target} in the knowledge"))?
+    };
+
+    let object_path = resolve(&request.object, &ws.root);
+    let bytes = std::fs::read(&object_path)
+        .map_err(|e| format!("cannot read object {}: {e}", object_path.display()))?;
+    let file_name = object_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let profile = ws
+        .config
+        .rebuild
+        .as_ref()
+        .and_then(|r| r.compiler.as_deref())
+        .and_then(|id| decovery_toolchain::profile(id).ok());
+    let format = profile
+        .as_ref()
+        .map_or(ObjectFormat::Omf, |p| p.object_format);
+    let object = read_object(format, &bytes, &file_name)
+        .map_err(|e| format!("cannot read object {}: {e}", object_path.display()))?;
+    let decoration = profile.map_or_else(Decoration::watcom, |p| p.decoration);
+    let program = decovery_facade::program::load(&ws).map_err(|e| e.to_string())?;
+    // an Aztec library (or library object): a member function by its object symbol or at the knowledge's
+    // address, placed as `build` places library members (ADR 0016)
+    let library = (format == ObjectFormat::Aztec)
+        .then(|| LibraryFile::from_bytes(&bytes, &file_name).ok())
+        .flatten();
+    let in_library = |address: Option<Address>| {
+        library.as_ref().and_then(|lib| {
+            library_function(
+                &ws,
+                analysis.as_ref(),
+                &program,
+                &decoration,
+                lib,
+                target,
+                address,
+            )
+        })
+    };
+    let mut placed = None;
+    let address = match known {
+        Some(a) => a,
+        None => {
+            placed = in_library(None);
+            placed
+                .as_ref()
+                .map(|f| f.at)
+                .ok_or_else(|| match &library {
+                    Some(_) => format!(
+                        "no function named {target} in the knowledge, and no member of {} that defines {target} matches the original",
+                        object_path.display()
+                    ),
+                    None => format!("no function named {target} in the knowledge"),
+                })?
+        }
     };
     let symbol = ws
         .symbols
@@ -102,36 +160,18 @@ pub fn run(request: &Request) -> Result<Outcome, String> {
     }
     let shown = symbol.map_or_else(|| target.to_string(), |s| s.name.clone());
 
-    let object_path = resolve(&request.object, &ws.root);
-    let bytes = std::fs::read(&object_path)
-        .map_err(|e| format!("cannot read object {}: {e}", object_path.display()))?;
-    let file_name = object_path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let profile = ws
-        .config
-        .rebuild
-        .as_ref()
-        .and_then(|r| r.compiler.as_deref())
-        .and_then(|id| decovery_toolchain::profile(id).ok());
-    let format = profile
-        .as_ref()
-        .map_or(ObjectFormat::Omf, |p| p.object_format);
-    let object = read_object(format, &bytes, &file_name)
-        .map_err(|e| format!("cannot read object {}: {e}", object_path.display()))?;
-    let decoration = profile.map_or_else(Decoration::watcom, |p| p.decoration);
-    let view = object
-        .modules
-        .iter()
-        .flat_map(functions)
-        .find(|f| {
+    let by_name = || {
+        object.modules.iter().flat_map(functions).find(|f| {
             let name = decoration.undecorate(f.name);
             names.iter().any(|n| n == name || n == f.name)
         })
-        .ok_or_else(|| format!("function {shown} is not in {}", object_path.display()))?;
-
-    let program = decovery_facade::program::load(&ws).map_err(|e| e.to_string())?;
+    };
+    let view = match placed {
+        Some(f) => f.view,
+        None => by_name()
+            .or_else(|| in_library(Some(address)).map(|f| f.view))
+            .ok_or_else(|| format!("function {shown} is not in {}", object_path.display()))?,
+    };
     let options = CompareOptions::new(request.padding, original_len);
     let comparison = if format == ObjectFormat::Aztec {
         // no linker (phase 4): object against image, relocated fields are link gaps, as `build` compares

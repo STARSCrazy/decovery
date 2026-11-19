@@ -719,6 +719,33 @@ pub fn build(
         new_records.push(r);
     }
 
+    // library members (ADR 0016): in a full build, at the functions no source rebuilds
+    let mut library_summary = None;
+    let mut library_report = None;
+    let mut built_files = built_files;
+    let mut existing_files = existing_files;
+    if all
+        && profile.object_format == ObjectFormat::Aztec
+        && (!rebuild.libraries.is_empty() || !rebuild.library_objects.is_empty())
+    {
+        let program = crate::program::load(&ws)?;
+        let taken: BTreeSet<Address> = placed.iter().map(|b| b.address).collect();
+        let outcome = super::library::compare_libraries(
+            &ws,
+            analysis.as_ref(),
+            &profile,
+            &program,
+            &taken,
+            &date,
+            &mut warnings,
+        );
+        new_records.extend(outcome.records);
+        built_files.extend(outcome.files.iter().cloned());
+        existing_files.extend(outcome.files);
+        library_summary = outcome.summary;
+        library_report = outcome.report;
+    }
+
     let fingerprint = fingerprint_of(&ws, &profile);
 
     // record under the lock; from here on a cancel takes effect after recording
@@ -842,6 +869,12 @@ pub fn build(
         add_modules(&mut response, modules, &functions, &relative_targets);
         add_main_data(&mut response, main_data);
         add_leading(&mut response, leading);
+        if let Some(report) = library_report {
+            response.data["library"] = report;
+        }
+        if let Some(summary) = library_summary {
+            response.summary.push_str(&format!("; {summary}"));
+        }
         response
     })
 }
@@ -2133,6 +2166,21 @@ pub(super) fn blocker_record(b: &Blocker) -> BlockerRecord {
 
 /// The record of one compared function: Decomp's `result`, decovery's verdict and blockers, the metrics.
 fn record(built: &Built, c: &Comparison, source: &Source, date: &str) -> RebuildRecord {
+    let mut r = comparison_record(built.address, &built.label, c, date);
+    r.file = Some(source.name.clone());
+    r.compiler = Some(source.compiler.clone());
+    r.flags = Some(source.flags.clone());
+    r.code_hash = Some(built.code_hash.clone());
+    r
+}
+
+/// The record of a comparison at `address` (verdict, result, blockers, metrics, date), without its source.
+pub(super) fn comparison_record(
+    address: Address,
+    label: &str,
+    c: &Comparison,
+    date: &str,
+) -> RebuildRecord {
     let m = &c.metrics;
     let verdict = verdict_id(&c.verdict);
     let result = if verdict == VerdictId::Unchecked {
@@ -2142,10 +2190,7 @@ fn record(built: &Built, c: &Comparison, source: &Source, date: &str) -> Rebuild
     } else {
         RebuildResult::Differs
     };
-    let mut r = RebuildRecord::new(built.address, built.label.clone(), result);
-    r.file = Some(source.name.clone());
-    r.compiler = Some(source.compiler.clone());
-    r.flags = Some(source.flags.clone());
+    let mut r = RebuildRecord::new(address, label.to_string(), result);
     r.verdict = Some(verdict);
     r.blockers = c.blockers.iter().map(blocker_record).collect();
     if result == RebuildResult::Error {
@@ -2162,7 +2207,6 @@ fn record(built: &Built, c: &Comparison, source: &Source, date: &str) -> Rebuild
     r.padding_bytes = m.padding;
     r.first_difference = m.first_difference;
     r.diagnoses = c.diagnoses.clone();
-    r.code_hash = Some(built.code_hash.clone());
     r.date = Some(date.to_string());
     r
 }
