@@ -538,16 +538,16 @@ mod tests {
         let p = profile("aztec-c86-4.2b").unwrap();
         let line = p
             .whole_link_line(
-                "+c af02 -r",
-                &strings(&["DSMAIN.O", "DSASM.O"]),
+                "+c 8000 -r",
+                &strings(&["MAIN.O", "HELPERS.O"]),
                 &strings(&[r"D:\LIB\OVLD.O"]),
-                "DS.EXE",
+                "GAME.EXE",
                 &strings(&["C.LIB"]),
             )
             .unwrap();
         assert_eq!(
             line.line,
-            r"LN +c af02 -r -o DS.EXE DSMAIN.O DSASM.O D:\LIB\OVLD.O -lc"
+            r"LN +c 8000 -r -o GAME.EXE MAIN.O HELPERS.O D:\LIB\OVLD.O -lc"
         );
         assert_eq!(line.control, None);
     }
@@ -560,17 +560,17 @@ mod tests {
             .whole_link_line(
                 "",
                 &objects,
-                &strings(&[r"D:\LIB\OVBGN.O", "DS.RSM"]),
-                "VMAZE.OVR",
+                &strings(&[r"D:\LIB\OVBGN.O", "GAME.RSM"]),
+                "MAZE.OVR",
                 &strings(&["C.LIB"]),
             )
             .unwrap();
         assert_eq!(
             line.line,
-            r"LN -o VMAZE.OVR -f VMAZE.LNK D:\LIB\OVBGN.O DS.RSM -lc"
+            r"LN -o MAZE.OVR -f MAZE.LNK D:\LIB\OVBGN.O GAME.RSM -lc"
         );
         let (file, text) = line.control.unwrap();
-        assert_eq!(file, "VMAZE.LNK");
+        assert_eq!(file, "MAZE.LNK");
         assert!(text.starts_with("PART00.O\r\nPART01.O\r\n"));
         assert_eq!(text.lines().count(), 20);
     }

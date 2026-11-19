@@ -131,7 +131,7 @@ fn workspace(python: &str, link: &str) -> (tempfile::TempDir, tempfile::TempDir)
     (ws, objects)
 }
 
-const LINK: &str = "[link]\nobjects = [\"dsmain.c\", \"OVLD.O\"]\nflags = \"+c af02\"\n\
+const LINK: &str = "[link]\nobjects = [\"dsmain.c\", \"OVLD.O\"]\nflags = \"+c 8000\"\n\
                     overlay_objects = [\"OVBGN.O\"]\n\n[[link.overlay]]\nname = \"VONE\"\n";
 
 fn run(root: &Path) -> Response {
@@ -168,7 +168,7 @@ fn full_build_links_root_and_overlay_and_compares_whole_files() {
     assert_eq!(
         log(objects.path()),
         [
-            r"LN +c af02 -r -o T.EXE DSMAIN.O D:\LIB\OVLD.O -lc",
+            r"LN +c 8000 -r -o T.EXE DSMAIN.O D:\LIB\OVLD.O -lc",
             r"LN -o VONE.OVR VONE.O D:\LIB\OVBGN.O T.RSM -lc",
         ]
     );
