@@ -1,10 +1,12 @@
 //! `diagnose`: why a rebuilt function differs from the original and what to try.
 
 use decovery_core::Address;
+use decovery_core::Program;
 use decovery_diff::{
-    CompareOptions, PairKind, classify_deviation, diagnose, instruction_pairs, pairs_text,
+    CompareOptions, PairKind, SymbolView, classify_deviation, diagnose, instruction_pairs,
+    pairs_text,
 };
-use decovery_objects::{functions, read_object};
+use decovery_objects::{FunctionView, ObjectFormat, ObjectModule, functions, read_object};
 use decovery_toolchain::rebuild_profile;
 use serde_json::{Value, json};
 
@@ -72,6 +74,17 @@ pub fn diagnose_tool(
         .map_or(0, |s| s.bits);
     let program = crate::program::load(ws)?;
     let knowledge = KnowledgeView::new(ws, Some(&session.analysis));
+    // Aztec C86 objects are compared with the image directly (no linker step, `build` uses link gaps): the
+    // relocated fields of the function take the original's bytes, as in `compare_with_gaps`
+    let patched = (profile.object_format == ObjectFormat::Aztec)
+        .then(|| with_original_fields(&view, start, &program, &knowledge));
+    let view = match &patched {
+        Some(module) => functions(module)
+            .into_iter()
+            .find(|f| f.section == view.section && f.start == view.start)
+            .unwrap_or(view),
+        None => view,
+    };
     let index = session.analysis.index();
     let length = original_len(Some(&index), &symbol_sizes(ws), start);
     let pairs = instruction_pairs(
@@ -150,6 +163,49 @@ pub fn diagnose_tool(
     );
     response.handles = handles;
     Ok(response)
+}
+
+/// A copy of the module of `f` whose relocated fields inside `f` hold the original's bytes at `start` and carry
+/// no relocation any more: the fields are link gaps, the rest of the code is compared as it is. The symbols of
+/// the section take the original's names at their placed addresses, so an unrelocated call to another function
+/// of the module is judged by where it leads, not by the name the source still gives that function.
+fn with_original_fields(
+    f: &FunctionView,
+    start: Address,
+    program: &Program,
+    symbols: &dyn SymbolView,
+) -> ObjectModule {
+    let mut module = f.module.clone();
+    for s in module.symbols.iter_mut().filter(|s| s.section == f.section) {
+        let placed = start.offset_by(i64::from(s.offset) - i64::from(f.start));
+        if let Some(n) = placed
+            .ok()
+            .and_then(|a| symbols.name_at(a))
+            .filter(|n| !n.is_default)
+        {
+            s.name = n.name;
+        }
+    }
+    let original = program.read(start, f.len as usize).unwrap_or(&[]);
+    if let Some(section) = module.sections.get_mut(f.section as usize) {
+        let end = f.start.saturating_add(f.len);
+        let (inside, outside): (Vec<_>, Vec<_>) = section
+            .relocs
+            .drain(..)
+            .partition(|r| r.offset >= f.start && r.offset < end);
+        for r in &inside {
+            for q in r.offset..r.offset.saturating_add(u32::from(r.width)).min(end) {
+                if let (Some(b), Some(&o)) = (
+                    section.data.get_mut(q as usize),
+                    original.get((q - f.start) as usize),
+                ) {
+                    *b = o;
+                }
+            }
+        }
+        section.relocs = outside;
+    }
+    module
 }
 
 /// The function `target` names: a rebuild record's address, else a name by [`function_by_name`] (the analyzed

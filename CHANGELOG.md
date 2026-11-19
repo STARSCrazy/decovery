@@ -43,6 +43,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
   identical with WLINK 10.6 in DOSBox (`dosbox-lab`).
 
 ### Fixed
+- Overlay `diagnose` (Aztec C86) agreed with `build` only when no relocated field changed a branch: relocated fields
+  of the function now take the original's bytes (link gaps, as in `build`), and the module's functions take the
+  analysis' names at their placed addresses, so short jumps and calls inside the module compare by where they lead.
 - Overlay module comparison: relocated code fields are judged only as references, so `first_difference` is the first
   real byte difference; `instructions_differing` is computed for modules and link-gap comparisons (it stayed 0); a
   new `findings` list names a code size that differs from the original (a partial module with its covered range, or
