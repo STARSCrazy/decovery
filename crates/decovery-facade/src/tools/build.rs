@@ -569,6 +569,10 @@ pub fn build(
     } else {
         Vec::new()
     };
+    let functions: Vec<(Address, String)> = placed
+        .iter()
+        .map(|b| (b.address, b.label.clone()))
+        .collect();
 
     // inline assembly
     let mut cheats: Vec<Vec<CheatFinding>> = Vec::new();
@@ -746,7 +750,7 @@ pub fn build(
         timing,
     )
     .map(|mut response| {
-        add_modules(&mut response, modules);
+        add_modules(&mut response, modules, &functions);
         response
     })
 }
@@ -794,10 +798,30 @@ fn compare_placed(
     module.functions
 }
 
-/// Adds the overlay module verdicts to a build response (data `modules`, a note in the summary).
-fn add_modules(response: &mut Response, modules: Vec<Value>) {
+/// Adds the overlay module verdicts to a build response (data `modules`, a note in the summary). `functions` are
+/// the built functions (address, reported name): they name the function holding a module's first real difference.
+fn add_modules(response: &mut Response, mut modules: Vec<Value>, functions: &[(Address, String)]) {
     if modules.is_empty() {
         return;
+    }
+    for m in &mut modules {
+        let Some(at) = m["code"]["first_difference_address"]
+            .as_str()
+            .and_then(|a| a.parse::<Address>().ok())
+        else {
+            continue;
+        };
+        // the last function starting at or before the difference, in the same overlay
+        let holder = functions
+            .iter()
+            .filter(|(a, _)| a.overlay() == at.overlay() && *a <= at)
+            .max_by_key(|(a, _)| *a);
+        if let Some((start, name)) = holder
+            && let Some(offset) = at.bytes_from(*start)
+        {
+            m["code"]["first_difference_function"] = json!(name);
+            m["code"]["first_difference_function_offset"] = json!(offset);
+        }
     }
     let same = modules
         .iter()
@@ -808,8 +832,28 @@ fn add_modules(response: &mut Response, modules: Vec<Value>) {
         modules.len()
     ));
     for m in &modules {
-        if let (Some(overlay), Some(first)) = (m["overlay"].as_str(), m["findings"][0].as_str()) {
-            response.summary.push_str(&format!(" ({overlay}: {first})"));
+        let Some(overlay) = m["overlay"].as_str() else {
+            continue;
+        };
+        let mut notes: Vec<String> = m["findings"][0]
+            .as_str()
+            .map(str::to_string)
+            .into_iter()
+            .collect();
+        if let Some(at) = m["code"]["first_difference_address"].as_str() {
+            let mut located = format!("first real difference at {at}");
+            if let (Some(f), Some(off)) = (
+                m["code"]["first_difference_function"].as_str(),
+                m["code"]["first_difference_function_offset"].as_u64(),
+            ) {
+                located.push_str(&format!(" in {f} +0x{off:X}"));
+            }
+            notes.push(located);
+        }
+        if !notes.is_empty() {
+            response
+                .summary
+                .push_str(&format!(" ({overlay}: {})", notes.join("; ")));
         }
     }
     response.data["modules"] = json!(modules);
@@ -847,7 +891,7 @@ pub(super) fn overlay_modules(
         } else {
             "differs"
         };
-        out.push(json!({
+        let mut entry = json!({
             "overlay": name.as_str(),
             "identical": v.identical,
             "code": {
@@ -881,10 +925,23 @@ pub(super) fn overlay_modules(
             },
             "externals": v.externals.len(),
             "findings": v.findings,
-        }));
-        if let Some(Value::Object(m)) = out.last_mut() {
-            m.extend(ambiguous_json(&v.ambiguous, v.code_size.0 != v.code_size.1));
+        });
+        if let Value::Object(e) = &mut entry {
+            e.extend(ambiguous_json(&v.ambiguous, v.code_size.0 != v.code_size.1));
         }
+        // the first real difference as an address of the overlay (the module starts at corg)
+        if let Some(off) = m
+            .first_difference
+            .and_then(|x| u16::try_from(u32::from(overlay.header.corg) + x).ok())
+        {
+            let at = Address::Ovl {
+                overlay: name,
+                seg: 0,
+                off,
+            };
+            entry["code"]["first_difference_address"] = json!(at.to_string());
+        }
+        out.push(entry);
     }
     out
 }
@@ -1830,6 +1887,62 @@ size = 21
     }
 
     #[test]
+    fn first_real_difference_is_an_overlay_address() {
+        let dir = workspace(2);
+        let ws = Workspace::open(dir.path()).unwrap();
+        let spec = AztecModuleSpec {
+            name: "A".into(),
+            code: vec![0xB8, 2, 0, 0xC3],
+            data: vec![b'x'],
+            bss: 2,
+            ..AztecModuleSpec::default()
+        };
+        let object = read_aztec(&write_aztec(&spec), "A.O").unwrap();
+        let mut warnings = Vec::new();
+        let modules = overlay_modules(
+            &ws,
+            &[(OverlayName::new("A").unwrap(), &object)],
+            &mut warnings,
+        );
+        assert_eq!(modules[0]["code"]["first_difference"], 1);
+        assert_eq!(
+            modules[0]["code"]["first_difference_address"],
+            "ovl:A:0000:5001"
+        );
+    }
+
+    #[test]
+    fn summary_locates_the_first_real_difference_in_its_function() {
+        let mut response = Response::new("a.c: 2 functions", json!({}));
+        let module = json!({
+            "overlay": "A",
+            "identical": false,
+            "code": {"first_difference": 0x2E6, "first_difference_address": "ovl:A:0000:5344"},
+            "findings": ["module code is 1085 bytes longer than the original (rebuilt 39965, original 38880)"],
+        });
+        let at = |s: &str| s.parse::<Address>().unwrap();
+        let functions = [
+            (at("ovl:A:0000:5317"), "show_message".to_string()),
+            (at("ovl:A:0000:5000"), "first".to_string()),
+            (at("ovl:B:0000:5340"), "elsewhere".to_string()),
+            (at("ovl:A:0000:5400"), "later".to_string()),
+        ];
+        add_modules(&mut response, vec![module], &functions);
+        assert!(
+            response.summary.contains(
+                "(A: module code is 1085 bytes longer than the original (rebuilt 39965, original 38880); \
+                 first real difference at ovl:A:0000:5344 in show_message +0x2D)"
+            ),
+            "{}",
+            response.summary
+        );
+        let code = &response.data["modules"][0]["code"];
+        assert_eq!(code["first_difference"], 0x2E6, "the offset stays");
+        assert_eq!(code["first_difference_function"], "show_message");
+        assert_eq!(code["first_difference_function_offset"], 0x2D);
+    }
+
+    #[test]
     fn ambiguous_references_after_a_size_change_are_only_counted() {
         let list = vec!["a_: 0010 and 0012 (field at 5003)".to_string(); 3];
         let kept = ambiguous_json(&list, false);
@@ -1939,7 +2052,11 @@ size = 21
             &profile.decoration,
             &ModuleOptions::new(profile.padding, BTreeMap::new()),
         );
-        assert!(!module.warnings.is_empty(), "the case must provoke a warning: {:?}", module.functions);
+        assert!(
+            !module.warnings.is_empty(),
+            "the case must provoke a warning: {:?}",
+            module.functions
+        );
         let mut warnings = Vec::new();
         let compared = compare_placed(
             &ws,

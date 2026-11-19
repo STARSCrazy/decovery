@@ -43,6 +43,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
   identical with WLINK 10.6 in DOSBox (`dosbox-lab`).
 
 ### Fixed
+- The build summary names an overlay module's first real difference as address, function and offset
+  (`first real difference at ovl:VPCVW:0000:5344 in cvw_show_message +0x2D`), not only the size finding; the module
+  JSON adds `code.first_difference_address`, `code.first_difference_function` and
+  `code.first_difference_function_offset` next to the module offset `code.first_difference`.
 - Overlay module JSON: after a code size change the `ambiguous` list is left empty (nearly every later external
   reference disagrees, 1378 entries on a shifted module); `ambiguous_count` gives the number and
   `ambiguous_omitted` says the list was dropped. Changed meaning: `ambiguous` is no longer complete after a size
