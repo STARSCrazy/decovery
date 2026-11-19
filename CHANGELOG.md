@@ -66,6 +66,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - `diagnose` of a function whose instructions are all equal but whose relocated fields `build` found wrong (module
   comparison) no longer says only "no differing instructions": the summary lists the wrong references, and the
   data carries them (`references`) with the build's message.
+- Overlay module comparison: when the files give less BSS than the original, a finding names the external names
+  bound inside the original's BSS range (globals the sources declare only `extern`, defined in none of the files)
+  instead of a bare `rebuilt: 0`.
 - The header of an archived `comparison.txt` counted other instructions than its listing (2 against 1 for one
   inserted instruction): both now give the listing's counts, changed, inserted and removed instructions separately.
 - `find similar` and `show` named exemplars by the rebuild record's name (`fun_…`) instead of the knowledge's name.

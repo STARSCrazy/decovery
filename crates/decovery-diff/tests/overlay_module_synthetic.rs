@@ -392,3 +392,30 @@ fn common_at_a_fixed_offset_uses_the_addend() {
     assert_eq!(v.code.metrics.refs_wrong, 0, "{v:#?}");
     assert!(v.identical, "{v:#?}");
 }
+
+#[test]
+fn bss_missing_from_the_files_names_the_externs_bound_inside_it() {
+    // the original's BSS holds tbl_ (2002); the files only declare it extern: no BSS of their own
+    let (e, f) = extern_with_addends(false);
+    let ovl = read_overlay(&addend_overlay(0x2002, 8), "T").expect("overlay");
+    let v = compare_overlay_module(&[&object(&e), &object(&f)], &ovl);
+    assert_eq!(v.bss, (8, 0));
+    assert!(
+        v.findings.contains(
+            &"BSS: 8 bytes in the original, 0 from the module's files; 1 external name bound inside the \
+              original BSS (2000..2008), defined in none of the files: tbl_"
+                .to_string()
+        ),
+        "{:?}",
+        v.findings
+    );
+    // an extern outside the BSS is not named
+    let ovl = read_overlay(&addend_overlay(0x84AA, 8), "T").expect("overlay");
+    let v = compare_overlay_module(&[&object(&e), &object(&f)], &ovl);
+    assert!(
+        v.findings
+            .contains(&"BSS: 8 bytes in the original, 0 from the module's files; no external name is bound inside the original BSS (2000..2008)".to_string()),
+        "{:?}",
+        v.findings
+    );
+}

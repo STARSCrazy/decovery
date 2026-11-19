@@ -450,7 +450,10 @@ pub fn compare_overlay_module(objects: &[&ObjectFile], overlay: &Overlay) -> Mod
     let data_equal = data_diffs.is_empty();
     let bss = (h.bss, u16::try_from(bss).unwrap_or(u16::MAX));
     let identical = code_ok && data_equal && bss.0 == bss.1 && ambiguous.is_empty();
-    let findings = size_findings(code_size, comparison.metrics.first_difference);
+    let mut findings = size_findings(code_size, comparison.metrics.first_difference);
+    if bss.0 > bss.1 {
+        findings.push(bss_finding(bss, bss_start, &externals));
+    }
     ModuleVerdict {
         code: comparison,
         code_size,
@@ -467,6 +470,39 @@ pub fn compare_overlay_module(objects: &[&ObjectFile], overlay: &Overlay) -> Mod
         findings,
         data_gaps: u32::try_from(gaps_data.len()).unwrap_or(u32::MAX),
     }
+}
+
+/// Names the external names bound inside the original's BSS when the files give less BSS than the original: a
+/// global the sources only declare `extern` is not placed by the linker (an undefined name without a size is no
+/// common symbol), so its definition is missing from the module's files.
+fn bss_finding(
+    (original, rebuilt): (u16, u16),
+    bss_start: i64,
+    externals: &BTreeMap<String, u16>,
+) -> String {
+    let end = bss_start + i64::from(original);
+    let range = format!("{bss_start:04X}..{end:04X}");
+    let inside: Vec<&str> = externals
+        .iter()
+        .filter(|(_, a)| (bss_start..end).contains(&i64::from(**a)))
+        .map(|(n, _)| n.as_str())
+        .collect();
+    let head = format!("BSS: {original} bytes in the original, {rebuilt} from the module's files;");
+    if inside.is_empty() {
+        return format!("{head} no external name is bound inside the original BSS ({range})");
+    }
+    const SHOWN: usize = 8;
+    let n = inside.len();
+    let more = if n > SHOWN {
+        format!(" and {} more", n - SHOWN)
+    } else {
+        String::new()
+    };
+    format!(
+        "{head} {n} external name{} bound inside the original BSS ({range}), defined in none of the files: {}{more}",
+        if n == 1 { "" } else { "s" },
+        inside[..n.min(SHOWN)].join(", ")
+    )
 }
 
 /// Findings from the code size (original, rebuilt) and the first real byte difference.

@@ -50,6 +50,11 @@ files = ["npc.c", "npc_b.c"]   # link order
   each in its symbol-table order), with the largest size any object declares, without alignment.
 - The BSS size the module comparison reports and checks against the overlay header includes the commons, and every
   reference to a common is checked against its computed address (a wrong layout is a wrong reference).
+- A name declared only `extern` (undefined, size 0) is not a common: the linker does not place it, it must be
+  defined somewhere in the program. It is not counted into the module's BSS. When the files give less BSS than the
+  overlay header, the module verdict names the external names whose binding lies inside the original's BSS range:
+  their definitions belong in one of the module's files (third target, VMAZE: eight files that declare every
+  global `extern`, BSS 3220 in the original, 0 rebuilt).
 
 ## Consequences
 
