@@ -6,6 +6,7 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `-j` is the short form of the global `--jobs` (e.g. `decovery build -j 2`).
 - `[[rebuild.module]]` (ADR 0013): an overlay module built from several source files in link order. Building one of
   the files builds the others and compares the whole module; gaps and overlaps between the files' code are warned.
 - Aztec common symbols (uninitialised globals shared between files) are placed in the overlay module's BSS (order of
@@ -56,6 +57,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ### Fixed
 - `build` warns about missing files only for `[[rebuild.module]]`s that take part in the build, not about
   unrelated modules.
+- Overlay module comparison: every object's data starts on a word, as the Aztec linker places it (one zero byte
+  after an object with an odd data size). Before, the string literals of a later file were compared one byte early
+  and their references counted as wrong.
 - The header of an archived `comparison.txt` counted other instructions than its listing (2 against 1 for one
   inserted instruction): both now give the listing's counts, changed, inserted and removed instructions separately.
 - `find similar` and `show` named exemplars by the rebuild record's name (`fun_…`) instead of the knowledge's name.
