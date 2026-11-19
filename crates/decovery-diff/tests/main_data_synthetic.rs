@@ -179,3 +179,16 @@ fn a_module_without_data_gives_nothing() {
     )];
     assert!(compare_main_data(&m, &placements, &program(0x40, [0, 0], &[]), DS).is_none());
 }
+
+#[test]
+fn data_without_a_placed_function_says_why_it_is_unchecked() {
+    let m = module([0, 2], vec![0x11, 0x22, 0, 0, 0, 0]);
+    let d = compare_main_data(&m, &[], &program(0x40, [0x40, 0x42], &[]), DS).unwrap();
+    assert_eq!(d.state, DataState::Unchecked);
+    assert_eq!(d.ds, DS);
+    assert!(
+        d.findings[0].contains("none of the object's functions is placed"),
+        "{:?}",
+        d.findings
+    );
+}

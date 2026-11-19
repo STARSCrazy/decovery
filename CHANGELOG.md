@@ -10,6 +10,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
   object's data start in DS is anchored by its placed functions' code fields, DS comes from the startup code or the
   frame `DATA`; the response lists each object under `main_data` (`equal`, `differs`, `unchecked`) with findings,
   and the summary counts them. Before, the main program's data was never checked.
+- `build` names the data segment of the main-program data comparison: the summary says `(DS 0FF6 from startup)` or
+  `(DS 0FF6 from frame DATA)`, the response carries `main_data_ds` (`value`, `source`) and `ds_source` per entry. An
+  object with data but no placed function (a data-only file built alone) is now listed as `unchecked` with the reason
+  (nothing in the build names where its data lies) instead of being missing from `main_data`.
 - `-j` is the short form of the global `--jobs` (e.g. `decovery build -j 2`).
 - Per-file compiler flags in the source: a header comment `/* decovery: flags = +b +c */` (first ten lines) as an
   alternative to `[rebuild.file_flags]` (ADR 0014). The comment wins over a differing table entry, with a warning;

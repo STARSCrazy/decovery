@@ -183,7 +183,11 @@ pub fn compare_main_data(
         findings: Vec::new(),
     };
     let Some((base, _)) = start else {
-        out.findings.push(if total == 0 {
+        out.findings.push(if own.is_empty() {
+            format!(
+                "data ({bytes} bytes) not compared: none of the object's functions is placed in this build, so                  nothing names its place in DS {ds:04X}; build the files that use it together with it"
+            )
+        } else if total == 0 {
             format!(
                 "data ({bytes} bytes) not compared: no code field of the built functions names it, so its place in \
                  DS {ds:04X} is unknown"
