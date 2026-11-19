@@ -278,7 +278,11 @@ fn finish(
         let text: String = rows.iter().map(|r| format!("{}\n", r.line)).collect();
         let mut handle = store_handle(&session.workspace.root, "find-results", &text)?;
         handle.description = format!("all {total} {noun}, one per line");
-        let summary = format!("{shown} of {total} {noun}; full list: detail {}", handle.id);
+        let summary = format!(
+            "{shown} of {total} {noun}; {} more, use --limit; full list: detail {}",
+            total - shown,
+            handle.id
+        );
         handles.push(handle);
         summary
     } else {

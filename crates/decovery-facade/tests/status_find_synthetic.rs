@@ -355,7 +355,10 @@ fn find_over_limit_returns_handle() {
     assert_eq!(h.kind, "find-results");
     assert_eq!(
         r.summary,
-        format!("2 of 5 functions; full list: detail {}", h.id)
+        format!(
+            "2 of 5 functions; 3 more, use --limit; full list: detail {}",
+            h.id
+        )
     );
     let stored =
         std::fs::read_to_string(d.path().join("cache/handles").join(format!("{}.txt", h.id)))
