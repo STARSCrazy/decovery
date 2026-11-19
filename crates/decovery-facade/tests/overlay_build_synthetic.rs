@@ -356,3 +356,103 @@ fn shifted_module_marks_cause_and_calls_into_the_shift() {
     );
     assert_eq!(response.data["modules"][0]["code"]["first_difference"], 7);
 }
+
+/// Overlay A holds `f1` (5000, `mov ax,1; ret`) and `f2` (5004, `mov ax,2; ret`); the source calls the second one
+/// `g2`, a name the knowledge does not know. `f2_names` are the knowledge names at 5004.
+fn renamed_overlay(ws: &std::path::Path, objects: &std::path::Path, f2_names: &[&str]) {
+    use decovery_objects::{AztecModuleSpec, AztecSection, AztecSymbolSpec};
+    let code = [0xB8, 1, 0, 0xC3, 0xB8, 2, 0, 0xC3];
+    std::fs::write(ws.join("A.OVR"), overlay_with_data(&code, &[])).unwrap();
+    let path = ws.join("decovery.toml");
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(
+        path,
+        text.replacen(
+            "length = 4\nfile_offset = 14",
+            "length = 8\nfile_offset = 14",
+            1,
+        )
+        .replacen("size = 18", "size = 23", 1),
+    )
+    .unwrap();
+    let mut symbols = String::from("schema = 1\n\n");
+    let mut entries = vec![("ovl:A:0000:5000", "f1"), (B_AT, "bmain")];
+    entries.extend(f2_names.iter().map(|n| ("ovl:A:0000:5004", *n)));
+    for (at, name) in entries {
+        symbols.push_str(&format!(
+            "[[symbol]]\naddress = \"{at}\"\nkind = \"function\"\nname = \"{name}\"\nsize = 4\n\
+             source = \"human\"\nconfidence = \"confirmed\"\n\n"
+        ));
+    }
+    std::fs::write(ws.join("knowledge/symbols.toml"), symbols).unwrap();
+    std::fs::write(
+        ws.join("src/a.c"),
+        "int f1()\n{\n    return 1;\n}\nint g2()\n{\n    return 2;\n}\n",
+    )
+    .unwrap();
+    let sym = |name: &str, value| AztecSymbolSpec {
+        name: name.into(),
+        section: AztecSection::Code,
+        value,
+        public: true,
+    };
+    let object = decovery_objects::write_aztec(&AztecModuleSpec {
+        name: "M".into(),
+        code: code.to_vec(),
+        named: vec![sym("f1_", 0), sym("g2_", 4)],
+        ..AztecModuleSpec::default()
+    });
+    std::fs::write(objects.join("A.OBJ"), object).unwrap();
+}
+
+#[test]
+fn renamed_function_is_matched_by_its_address_in_a_placed_module() {
+    let python = python_or_skip!();
+    let (ws, objects) = buildable(&python);
+    renamed_overlay(ws.path(), objects.path(), &["f2"]);
+    let mut request = BuildRequest::default();
+    request.files = vec!["a.c".into()];
+    let response = run(ws.path(), &request);
+    let functions = response.data["functions"].as_array().unwrap();
+    let f2 = functions
+        .iter()
+        .find(|f| f["address"] == "ovl:A:0000:5004")
+        .unwrap_or_else(|| panic!("{}", response.data));
+    assert_eq!(f2["verdict"], "identical", "{f2}");
+    assert!(
+        f2["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("matched by address; knowledge name f2, source name g2")),
+        "{f2}"
+    );
+    assert_eq!(response.data["counts"]["unmatched"], 0);
+    assert_eq!(response.data["counts"]["matched_by_address"], 1);
+    assert!(
+        response.summary.contains("annotate --name")
+            && response
+                .summary
+                .contains("overlay modules: 1 of 1 identical"),
+        "{}",
+        response.summary
+    );
+}
+
+#[test]
+fn function_without_counterpart_keeps_its_module_from_reading_identical() {
+    let python = python_or_skip!();
+    let (ws, objects) = buildable(&python);
+    // two names at 5004: the address does not name one function, so g2 stays without counterpart
+    renamed_overlay(ws.path(), objects.path(), &["f2", "other"]);
+    let mut request = BuildRequest::default();
+    request.files = vec!["a.c".into()];
+    let response = run(ws.path(), &request);
+    assert_eq!(response.data["counts"]["unmatched"], 1, "{}", response.data);
+    assert_eq!(response.data["modules"][0]["unmatched_functions"], 1);
+    let summary = &response.summary;
+    assert!(
+        summary.contains("; 1 function without counterpart")
+            && summary.contains("overlay modules: 0 of 1 identical")
+            && summary.contains("(A: bytes identical, but 1 function without counterpart)"),
+        "{summary}"
+    );
+}

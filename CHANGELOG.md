@@ -25,6 +25,11 @@ and the project uses [Semantic Versioning](https://semver.org/).
   pointer table) as one block at the object's start, placed by its first placed public function, with link gaps.
   Each file reports `N bytes before the first public label: equal|differs|unchecked` (`files[].leading`,
   `counts.leading_differs`); a difference fails the build (ADR 0015).
+- `build` pairs a function whose name has no counterpart with the original by address when its section's
+  placement is known (all by-name placed functions of the section agree on it) and exactly one knowledge name
+  starts at its offset. Its verdict notes `matched by address; knowledge name X, source name Y`
+  (`functions[].message`), and the summary counts it with the advice to run `annotate --name`
+  (`counts.matched_by_address`).
 
 - `setup ghidra --ghidra-dir <dir> --jdk-dir <dir>` registers existing installs without downloading them (only the
   pyghidra venv is created); the README shows a hand-written `[plugins.ghidra]` entry.
@@ -113,6 +118,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
   the extension); README and ADR 0013 document the rule for split module files.
 
 ### Fixed
+- A `build` that leaves functions without counterpart in the original no longer looks complete: the summary says
+  `N functions without counterpart` (`counts.unmatched`), the CLI exits 1, and an overlay module whose files have
+  such functions does not count as identical (`modules[].unmatched_functions`, `bytes identical, but …`).
 - Functions of assembler objects end at the next public label, not at the next local label: an Aztec AS object names
   its local labels, and a function was compared only up to the first one (`key_pressed` over 21 of 226 bytes).
 - `diagnose` no longer marks an equal branch as differing in main-program functions: the rebuild is

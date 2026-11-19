@@ -216,7 +216,8 @@ enum Command {
         function: Vec<String>,
     },
     /// Compile the rebuild sources (`src/`), compare their functions with the original and record the results.
-    /// Exit code 0 when every built function is identical, 1 when not (or a file failed), 2 on errors.
+    /// Exit code 0 when every built function is identical, 1 when not (or a file failed, or a function has no
+    /// counterpart in the original), 2 on errors.
     /// Progress goes to stderr.
     /// With `--variant` / `--function-source`: compile candidates for `--function` instead and rank them (best
     /// first, nothing is recorded); exit code 0 when the best is identical.
@@ -1781,7 +1782,9 @@ fn build(
     // bytes before the first public label of an assembler object that differ fail the build too (ADR 0015)
     let complete = counts["failed_files"] == 0
         && counts["identical"] == counts["functions"]
-        && counts["leading_differs"].as_u64().unwrap_or(0) == 0;
+        && counts["leading_differs"].as_u64().unwrap_or(0) == 0
+        // a function without counterpart in the original was not compared at all
+        && counts["unmatched"].as_u64().unwrap_or(0) == 0;
     if json {
         print_json(&response)?;
         return Ok(complete);

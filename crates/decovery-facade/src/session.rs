@@ -155,6 +155,8 @@ pub struct KnowledgeView<'a> {
     by_address: BTreeMap<Address, &'a str>,
     by_name: BTreeMap<&'a str, Address>,
     function_starts: Option<BTreeSet<Address>>,
+    /// Addresses with more than one distinct active name.
+    shared: BTreeSet<Address>,
     flat: bool,
 }
 
@@ -197,9 +199,13 @@ impl<'a> KnowledgeView<'a> {
 
     pub fn new(workspace: &'a Workspace, analysis: Option<&Analysis>) -> Self {
         let mut by_address = BTreeMap::new();
+        let mut shared = BTreeSet::new();
         for s in &workspace.symbols {
             if s.confidence != Confidence::Refuted && !s.name.is_empty() {
-                by_address.entry(s.address).or_insert(s.name.as_str());
+                let first = *by_address.entry(s.address).or_insert(s.name.as_str());
+                if first != s.name {
+                    shared.insert(s.address);
+                }
             }
         }
         let mut by_name = BTreeMap::new();
@@ -217,7 +223,25 @@ impl<'a> KnowledgeView<'a> {
             by_address,
             by_name,
             function_starts,
+            shared,
             flat,
+        }
+    }
+
+    /// The knowledge's one name of a function starting at `at`: its active name, else the default name where the
+    /// analysis has a function start. `None` when several names share the address or nothing names a function
+    /// there.
+    pub fn function_name_at(&self, at: Address) -> Option<String> {
+        if self.shared.contains(&at) {
+            return None;
+        }
+        match self.by_address.get(&at) {
+            Some(&name) => Some(name.to_string()),
+            None => self
+                .function_starts
+                .as_ref()
+                .is_some_and(|s| s.contains(&at))
+                .then(|| default_name(at)),
         }
     }
 }
