@@ -6,6 +6,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `build` compares the data of Aztec main-program objects with the original (ADR 0012, amendment 2026-11-19): the
+  object's data start in DS is anchored by its placed functions' code fields, DS comes from the startup code or the
+  frame `DATA`; the response lists each object under `main_data` (`equal`, `differs`, `unchecked`) with findings,
+  and the summary counts them. Before, the main program's data was never checked.
 - `-j` is the short form of the global `--jobs` (e.g. `decovery build -j 2`).
 - Per-file compiler flags in the source: a header comment `/* decovery: flags = +b +c */` (first ten lines) as an
   alternative to `[rebuild.file_flags]` (ADR 0014). The comment wins over a differing table entry, with a warning;
@@ -63,6 +67,11 @@ and the project uses [Semantic Versioning](https://semver.org/).
   identical with WLINK 10.6 in DOSBox (`dosbox-lab`).
 
 ### Fixed
+- unicorn-dos: a reused machine no longer runs code translated in the previous run. Restoring the loaded state
+  wrote the pages back from the host, which leaves unicorn's translated code in place; Aztec's CC loads its passes
+  over its own code, so the next compile on that worker could execute the last pass of the previous one and stop
+  with `unsupported interrupt INT 05h` (BOUND on garbage). The reset now drops the translated code of every page it
+  restores (real mode and Phar Lap).
 - `build` warns about missing files only for `[[rebuild.module]]`s that take part in the build, not about
   unrelated modules.
 - Overlay module comparison: every object's data starts on a word, as the Aztec linker places it (one zero byte

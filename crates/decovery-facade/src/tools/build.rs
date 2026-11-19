@@ -533,10 +533,19 @@ pub fn build(
         Some(placements.len() as u64),
         Some(format!("comparing {} functions", placements.len())),
     ));
+    let mut main_data: Vec<Value> = Vec::new();
     let comparisons: Vec<Comparison> = if placements.is_empty() {
         Vec::new()
     } else {
         let program = crate::program::load(&ws)?;
+        main_data = main_program_data(
+            &ws,
+            &profile,
+            &rebuild.frames,
+            &program,
+            &placements,
+            &mut warnings,
+        );
         for p in &placements {
             if let Some(bytes) = p
                 .original_len
@@ -780,8 +789,111 @@ pub fn build(
     )
     .map(|mut response| {
         add_modules(&mut response, modules, &functions, &relative_targets);
+        add_main_data(&mut response, main_data);
         response
     })
+}
+
+/// The data of the main-program objects of an Aztec build (MZ target) against the original: each object's
+/// data start is anchored by its placed functions' code fields, DS is the configured frame `DATA` or the startup
+/// code's data segment. Objects of overlays are judged by [`overlay_modules`].
+fn main_program_data(
+    ws: &Workspace,
+    profile: &Profile,
+    frames: &BTreeMap<String, Address>,
+    program: &Program,
+    placements: &[Placement<'_>],
+    warnings: &mut Vec<String>,
+) -> Vec<Value> {
+    if profile.object_format != ObjectFormat::Aztec || ws.config.target.format != TargetFormat::Mz {
+        return Vec::new();
+    }
+    let main: Vec<Placement<'_>> = placements
+        .iter()
+        .filter(|p| matches!(p.at, Address::Seg { .. }))
+        .cloned()
+        .collect();
+    let mut modules: Vec<&decovery_objects::ObjectModule> = Vec::new();
+    for p in &main {
+        if !modules.iter().any(|m| std::ptr::eq(*m, p.function.module)) {
+            modules.push(p.function.module);
+        }
+    }
+    if modules.is_empty() {
+        return Vec::new();
+    }
+    let configured = match frames.get("DATA") {
+        Some(Address::Seg { seg, off: 0 }) => Some(*seg),
+        Some(other) => {
+            warnings.push(format!(
+                "frame DATA: configured address {other} is no real-mode paragraph (seg:XXXX:0000); ignored"
+            ));
+            None
+        }
+        None => None,
+    };
+    let startup = decovery_diff::aztec_data_segment(program);
+    if let (Some(c), Some(s)) = (configured, startup)
+        && c != s
+    {
+        warnings.push(format!(
+            "frame DATA: configured segment {c:04X} differs from the startup code's data segment {s:04X}"
+        ));
+    }
+    let Some(ds) = configured.or(startup) else {
+        warnings.push(
+            "main program data not compared: the startup code does not load DS with its first instruction and              [rebuild] frames has no DATA"
+                .to_string(),
+        );
+        return Vec::new();
+    };
+    modules
+        .iter()
+        .filter_map(|m| decovery_diff::compare_main_data(m, &main, program, ds))
+        .map(|d| {
+            json!({
+                "module": d.module,
+                "state": d.state.id(),
+                "equal": d.state == decovery_diff::DataState::Equal,
+                "ds": format!("{:04X}", d.ds),
+                "start": d.start.map(|s| format!("{s:04X}")),
+                "votes": d.votes,
+                "dissent": d.dissent,
+                "bytes": d.bytes,
+                "gaps": d.gaps,
+                "refs_ok": d.refs_ok,
+                "refs_wrong": d.refs_wrong,
+                "differing": d.diffs.len(),
+                "first_differences": d.diffs.iter().take(16).collect::<Vec<_>>(),
+                "findings": d.findings,
+            })
+        })
+        .collect()
+}
+
+/// Adds the main-program data verdicts to a build response (data `main_data`, a note in the summary).
+fn add_main_data(response: &mut Response, entries: Vec<Value>) {
+    if entries.is_empty() {
+        return;
+    }
+    let count = |state: &str| entries.iter().filter(|e| e["state"] == state).count();
+    response.summary.push_str(&format!(
+        "; main program data: {} of {} equal",
+        count("equal"),
+        entries.len()
+    ));
+    let unchecked = count("unchecked");
+    if unchecked > 0 {
+        response
+            .summary
+            .push_str(&format!(", {unchecked} unchecked"));
+    }
+    for e in entries.iter().filter(|e| e["state"] != "equal") {
+        if let (Some(m), Some(f)) = (e["module"].as_str(), e["findings"][0].as_str()) {
+            response.summary.push_str(&format!(" ({m}: {f})"));
+        }
+    }
+    response.data["main_data"] = json!(entries);
 }
 
 /// Compares one placed function of an Aztec object with the image, its relocated fields as link gaps (no linker
