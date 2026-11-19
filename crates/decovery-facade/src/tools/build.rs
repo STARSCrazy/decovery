@@ -2320,6 +2320,12 @@ fn record(built: &Built, c: &Comparison, source: &Source, date: &str) -> Rebuild
     r.compiler = Some(source.compiler.clone());
     r.flags = Some(source.flags.clone());
     r.code_hash = Some(built.code_hash.clone());
+    if let Some(note) = &built.note {
+        r.message = Some(match r.message.take() {
+            Some(before) => format!("{note}\n{before}"),
+            None => note.clone(),
+        });
+    }
     r
 }
 
@@ -2344,15 +2350,6 @@ pub(super) fn comparison_record(
     r.blockers = c.blockers.iter().map(blocker_record).collect();
     if result == RebuildResult::Error {
         r.message = Some("the original bytes of the function are not in the program".into());
-    }
-    if let Some(note) = &built.note {
-        r.message = Some(match r.message.take() {
-            Some(before) => format!(
-                "{note}
-{before}"
-            ),
-            None => note.clone(),
-        });
     }
     r.bytes = m.bytes;
     r.equal = m.equal;
