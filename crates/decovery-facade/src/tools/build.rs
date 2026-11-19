@@ -533,10 +533,42 @@ pub fn build(
         Some(placements.len() as u64),
         Some(format!("comparing {} functions", placements.len())),
     ));
+    let mut main_data: Option<MainDataReport> = None;
+    let data_modules: Vec<&decovery_objects::ObjectModule> = objects
+        .iter()
+        .flat_map(|(_, o)| o.modules.iter())
+        .filter(|m| {
+            m.sections
+                .iter()
+                .any(|s| s.kind == decovery_objects::SectionKind::Data && !s.data.is_empty())
+        })
+        .collect();
     let comparisons: Vec<Comparison> = if placements.is_empty() {
+        // no function to compare, but a data-only object is still reported
+        if !data_modules.is_empty() {
+            let program = crate::program::load(&ws)?;
+            main_data = main_program_data(
+                &ws,
+                &profile,
+                &rebuild.frames,
+                &program,
+                &placements,
+                &data_modules,
+                &mut warnings,
+            );
+        }
         Vec::new()
     } else {
         let program = crate::program::load(&ws)?;
+        main_data = main_program_data(
+            &ws,
+            &profile,
+            &rebuild.frames,
+            &program,
+            &placements,
+            &data_modules,
+            &mut warnings,
+        );
         for p in &placements {
             if let Some(bytes) = p
                 .original_len
@@ -780,8 +812,159 @@ pub fn build(
     )
     .map(|mut response| {
         add_modules(&mut response, modules, &functions, &relative_targets);
+        add_main_data(&mut response, main_data);
         response
     })
+}
+
+/// The data segment a main-program data comparison used and where it came from.
+struct DataSegment {
+    ds: u16,
+    /// `frame DATA` (configured) or `startup` (the startup code's first instruction).
+    source: &'static str,
+}
+
+/// What [`main_program_data`] found: the data segment and one verdict per object with data.
+struct MainDataReport {
+    segment: DataSegment,
+    entries: Vec<Value>,
+}
+
+/// The data of the main-program objects of an Aztec build (MZ target) against the original: each object's
+/// data start is anchored by its placed functions' code fields, DS is the configured frame `DATA` or the startup
+/// code's data segment. Objects of overlays are judged by [`overlay_modules`]. An object with data but no placed
+/// function (a data-only file, or one whose functions have no counterpart) is listed as unchecked: nothing in a
+/// build of that file alone names where its data lies.
+fn main_program_data(
+    ws: &Workspace,
+    profile: &Profile,
+    frames: &BTreeMap<String, Address>,
+    program: &Program,
+    placements: &[Placement<'_>],
+    data_modules: &[&decovery_objects::ObjectModule],
+    warnings: &mut Vec<String>,
+) -> Option<MainDataReport> {
+    if profile.object_format != ObjectFormat::Aztec || ws.config.target.format != TargetFormat::Mz {
+        return None;
+    }
+    let main: Vec<Placement<'_>> = placements
+        .iter()
+        .filter(|p| matches!(p.at, Address::Seg { .. }))
+        .cloned()
+        .collect();
+    let overlay_placed = |m: &decovery_objects::ObjectModule| {
+        placements
+            .iter()
+            .any(|p| std::ptr::eq(p.function.module, m) && !matches!(p.at, Address::Seg { .. }))
+    };
+    let mut modules: Vec<&decovery_objects::ObjectModule> = Vec::new();
+    for m in main
+        .iter()
+        .map(|p| p.function.module)
+        .chain(data_modules.iter().copied())
+    {
+        if !overlay_placed(m) && !modules.iter().any(|x| std::ptr::eq(*x, m)) {
+            modules.push(m);
+        }
+    }
+    if modules.is_empty() {
+        return None;
+    }
+    let configured = match frames.get("DATA") {
+        Some(Address::Seg { seg, off: 0 }) => Some(*seg),
+        Some(other) => {
+            warnings.push(format!(
+                "frame DATA: configured address {other} is no real-mode paragraph (seg:XXXX:0000); ignored"
+            ));
+            None
+        }
+        None => None,
+    };
+    let startup = decovery_diff::aztec_data_segment(program);
+    if let (Some(c), Some(s)) = (configured, startup)
+        && c != s
+    {
+        warnings.push(format!(
+            "frame DATA: configured segment {c:04X} differs from the startup code's data segment {s:04X}"
+        ));
+    }
+    let segment = match (configured, startup) {
+        (Some(ds), _) => DataSegment {
+            ds,
+            source: "frame DATA",
+        },
+        (None, Some(ds)) => DataSegment {
+            ds,
+            source: "startup",
+        },
+        (None, None) => {
+            warnings.push(
+                "main program data not compared: the startup code does not load DS with its first instruction and                  [rebuild] frames has no DATA"
+                    .to_string(),
+            );
+            return None;
+        }
+    };
+    let ds = segment.ds;
+    let entries = modules
+        .iter()
+        .filter_map(|m| decovery_diff::compare_main_data(m, &main, program, ds))
+        .map(|d| {
+            json!({
+                "module": d.module,
+                "state": d.state.id(),
+                "equal": d.state == decovery_diff::DataState::Equal,
+                "ds": format!("{:04X}", d.ds),
+                "ds_source": segment.source,
+                "start": d.start.map(|s| format!("{s:04X}")),
+                "votes": d.votes,
+                "dissent": d.dissent,
+                "bytes": d.bytes,
+                "gaps": d.gaps,
+                "refs_ok": d.refs_ok,
+                "refs_wrong": d.refs_wrong,
+                "differing": d.diffs.len(),
+                "first_differences": d.diffs.iter().take(16).collect::<Vec<_>>(),
+                "findings": d.findings,
+            })
+        })
+        .collect();
+    Some(MainDataReport { segment, entries })
+}
+
+/// Adds the main-program data verdicts to a build response: `main_data` (the list) and `main_data_ds` (the data
+/// segment and its source) in the data, a note in the summary. With no object holding data the list is empty and
+/// says why.
+fn add_main_data(response: &mut Response, report: Option<MainDataReport>) {
+    let Some(MainDataReport { segment, entries }) = report else {
+        return;
+    };
+    let ds = format!("{:04X}", segment.ds);
+    response.data["main_data_ds"] = json!({"value": ds, "source": segment.source});
+    response.data["main_data"] = json!(entries);
+    if entries.is_empty() {
+        return;
+    }
+    let count = |state: &str| entries.iter().filter(|e| e["state"] == state).count();
+    response.summary.push_str(&format!(
+        "; main program data: {} of {} equal",
+        count("equal"),
+        entries.len()
+    ));
+    let unchecked = count("unchecked");
+    if unchecked > 0 {
+        response
+            .summary
+            .push_str(&format!(", {unchecked} unchecked"));
+    }
+    response
+        .summary
+        .push_str(&format!(" (DS {ds} from {})", segment.source));
+    for e in entries.iter().filter(|e| e["state"] != "equal") {
+        if let (Some(m), Some(f)) = (e["module"].as_str(), e["findings"][0].as_str()) {
+            response.summary.push_str(&format!(" ({m}: {f})"));
+        }
+    }
 }
 
 /// Compares one placed function of an Aztec object with the image, its relocated fields as link gaps (no linker

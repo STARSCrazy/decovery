@@ -62,6 +62,7 @@ mod compare;
 mod diagnose;
 mod gaps;
 mod instructions;
+mod main_data;
 mod module;
 mod pairs;
 mod program_le;
@@ -82,6 +83,7 @@ pub use compare::{
 };
 pub use diagnose::{Finding, diagnose};
 pub use gaps::compare_with_gaps;
+pub use main_data::{DataState, MainData, aztec_data_segment, compare_main_data};
 pub use module::{Common, ModuleVerdict, WrongRef, compare_overlay_module};
 pub use pairs::{Pair, PairCounts, PairKind, instruction_pairs, pairs_text};
 pub use program_le::compare_le;

@@ -24,6 +24,14 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - `diagnose` shows each wrong reference `build` found with its instruction and what the field leads to against what the
   rebuild gives (`wrong-absolute-ref at +0x7: mov ax,[91B8h]; word_91b8: original 91B8, rebuilt 91AA`); the build
   record keeps that text as the blocker's `detail`, the module verdict's blockers carry it too.
+- `build` compares the data of Aztec main-program objects with the original (ADR 0012, amendment 2026-11-19): the
+  object's data start in DS is anchored by its placed functions' code fields, DS comes from the startup code or the
+  frame `DATA`; the response lists each object under `main_data` (`equal`, `differs`, `unchecked`) with findings,
+  and the summary counts them. Before, the main program's data was never checked.
+- `build` names the data segment of the main-program data comparison: the summary says `(DS 0FF6 from startup)` or
+  `(DS 0FF6 from frame DATA)`, the response carries `main_data_ds` (`value`, `source`) and `ds_source` per entry. An
+  object with data but no placed function (a data-only file built alone) is now listed as `unchecked` with the reason
+  (nothing in the build names where its data lies) instead of being missing from `main_data`.
 - `-j` is the short form of the global `--jobs` (e.g. `decovery build -j 2`).
 - Per-file compiler flags in the source: a header comment `/* decovery: flags = +b +c */` (first ten lines) as an
   alternative to `[rebuild.file_flags]` (ADR 0014). The comment wins over a differing table entry, with a warning;
@@ -88,6 +96,11 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - `diagnose` no longer marks an equal branch as differing in main-program functions: the rebuild is
   decoded at the original's address (both columns show the same targets), and a short branch whose target lies inside
   the function on one side and beyond its (cut) length on the other is equal when its bytes are.
+- unicorn-dos: a reused machine no longer runs code translated in the previous run. Restoring the loaded state
+  wrote the pages back from the host, which leaves unicorn's translated code in place; Aztec's CC loads its passes
+  over its own code, so the next compile on that worker could execute the last pass of the previous one and stop
+  with `unsupported interrupt INT 05h` (BOUND on garbage). The reset now drops the translated code of every page it
+  restores (real mode and Phar Lap).
 - `build` warns about missing files only for `[[rebuild.module]]`s that take part in the build, not about
   unrelated modules.
 - Overlay module comparison: every object's data starts on a word, as the Aztec linker places it (one zero byte

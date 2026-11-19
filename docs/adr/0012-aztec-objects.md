@@ -74,3 +74,17 @@ with the profile's format.
   (and single large-model modules inside the small-model libraries) read without error, but Decomp's reader skips
   them, so their content has no oracle yet; the third target is small model.
 - Public tests use objects from a test-only writer (feature `test-writer`); real objects stay in local tests.
+
+## Amendment 2026-11-19: data of main-program objects
+
+The main program has no link step either, and a rebuild compiles only some of its objects, so the start of one
+object's data in DS cannot be computed from the link order as in an overlay module. It is read off the original:
+every absolute code field of the object's placed functions that names a position of the object's own data (an
+unnamed data position or one of its data symbols) votes for the start (original field less that position). A unique
+majority is the anchor; without one the data stays unchecked and the build says why. DS is the configured frame
+`DATA` (`[rebuild] frames`, `seg:XXXX:0000`) or the segment the startup code loads with its first instruction
+(`mov bp, <DS>`, relocated by the MZ loader; 0FF6 on the third target). With the anchor the data bytes are compared
+at DS:start; relocated data fields naming the object's own data or code are resolved and must equal the original,
+other fields (external names, BSS, segment paragraphs) are link gaps. An odd start is reported: the linker starts
+every object's data on a word. `build` reports each object as `main_data` (state `equal`, `differs` or
+`unchecked`, start, votes, differing offsets, findings).
