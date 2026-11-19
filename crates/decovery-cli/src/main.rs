@@ -75,6 +75,9 @@ enum Command {
         /// Print the instruction address ranges each pseudo-C line came from in front of it.
         #[arg(long)]
         lines: bool,
+        /// Print the original's disassembly of the function after the pseudo-C.
+        #[arg(long)]
+        asm: bool,
     },
     /// Why a rebuilt function differs from the original and what to try: findings of the diagnosis rules, the
     /// kind of deviation and the instructions side by side. Reads the object of the last `build`.
@@ -413,6 +416,13 @@ enum SetupCommand {
         /// Pre-downloaded JDK archive (offline); its sha256 must match the pinned one.
         #[arg(long)]
         jdk_zip: Option<PathBuf>,
+        /// An existing Ghidra install to register instead of downloading one (the directory holding
+        /// `support/` and `ghidraRun`).
+        #[arg(long, value_name = "DIR", conflicts_with = "ghidra_zip")]
+        ghidra_dir: Option<PathBuf>,
+        /// An existing JDK (21 or newer) to register instead of downloading one (the directory holding `bin/`).
+        #[arg(long, value_name = "DIR", conflicts_with = "jdk_zip")]
+        jdk_dir: Option<PathBuf>,
         /// Directory with `decovery-plugin-sdk` and `ghidra`; default: `plugins/` of the repository.
         #[arg(long, value_name = "DIR")]
         plugins_dir: Option<PathBuf>,
@@ -737,7 +747,9 @@ fn run(cli: Cli) -> ExitCode {
                 }
             }
         }
-        Command::Show { target, lines } => finish(show(&cli.workspace, &target, lines, cli.json)),
+        Command::Show { target, lines, asm } => {
+            finish(show(&cli.workspace, &target, lines, asm, cli.json))
+        }
         Command::Diagnose {
             target, deep: None, ..
         } => finish(diagnose(
@@ -1035,12 +1047,14 @@ fn run(cli: Cli) -> ExitCode {
                     extern_dir,
                     ghidra_zip,
                     jdk_zip,
+                    ghidra_dir,
+                    jdk_dir,
                     plugins_dir,
                 },
         } => finish(setup_ghidra(
             extern_dir,
-            ghidra_zip,
-            jdk_zip,
+            (ghidra_zip, jdk_zip),
+            (ghidra_dir, jdk_dir),
             plugins_dir,
             cli.json,
         )),
@@ -1314,8 +1328,8 @@ fn migrate_attempts(root: &Path, from: Option<&Path>, json: bool) -> Result<(), 
 
 fn setup_ghidra(
     extern_dir: Option<PathBuf>,
-    ghidra_zip: Option<PathBuf>,
-    jdk_zip: Option<PathBuf>,
+    (ghidra_zip, jdk_zip): (Option<PathBuf>, Option<PathBuf>),
+    (ghidra_dir, jdk_dir): (Option<PathBuf>, Option<PathBuf>),
     plugins_dir: Option<PathBuf>,
     json: bool,
 ) -> Result<(), FacadeError> {
@@ -1335,6 +1349,8 @@ fn setup_ghidra(
         extern_dir: absolute(extern_dir),
         ghidra_archive: ghidra_zip.map(absolute),
         jdk_archive: jdk_zip.map(absolute),
+        ghidra_dir: ghidra_dir.map(absolute),
+        jdk_dir: jdk_dir.map(absolute),
         plugins_dir: absolute(plugins_dir),
         python: std::env::var("DECOVERY_PYTHON")
             .ok()
@@ -1537,10 +1553,18 @@ fn print_json(response: &Response) -> Result<(), FacadeError> {
     Ok(())
 }
 
-fn show(workspace: &Path, target: &str, lines: bool, json: bool) -> Result<(), FacadeError> {
+fn show(
+    workspace: &Path,
+    target: &str,
+    lines: bool,
+    asm: bool,
+    json: bool,
+) -> Result<(), FacadeError> {
     let session = Session::open(workspace)?;
     let run = |budget| {
-        if lines {
+        if asm {
+            decovery_facade::show_with_asm(&session, target, budget, lines)
+        } else if lines {
             decovery_facade::show_with_lines(&session, target, budget)
         } else {
             decovery_facade::show(&session, target, budget)
@@ -1555,6 +1579,10 @@ fn show(workspace: &Path, target: &str, lines: bool, json: bool) -> Result<(), F
     }
     if let Some(text) = response.data["text"].as_str() {
         print!("{text}");
+    }
+    if let Some(asm) = response.data["asm"].as_str().filter(|a| !a.is_empty()) {
+        println!("\n/* original disassembly */");
+        print!("{asm}");
     }
     for warning in response.data["warnings"].as_array().into_iter().flatten() {
         if let Some(text) = warning.as_str() {

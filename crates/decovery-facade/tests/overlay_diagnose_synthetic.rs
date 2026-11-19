@@ -240,13 +240,13 @@ fn reference_blockers_of_the_build_are_shown() {
     assert_eq!(r.data["function"]["instructions_differing"], 0);
     assert_eq!(
         r.summary,
-        "fun_C_0000_5004: no differing instructions, but build found 2 wrong references (wrong-absolute-ref at +0x7, \
-         wrong-relative-ref at +0xB); see the module verdict of `build`"
+        "fun_C_0000_5004: no differing instructions, but build found 2 wrong references (wrong-absolute-ref at +0x7: \
+         call 5000h, wrong-relative-ref at +0xB); see the module verdict of `build`"
     );
     assert_eq!(
         r.data["references"],
         serde_json::json!([
-            { "kind": "wrong-absolute-ref", "at": 7 },
+            { "kind": "wrong-absolute-ref", "at": 7, "instruction": "call 5000h" },
             { "kind": "wrong-relative-ref", "at": 11 },
         ])
     );
@@ -258,4 +258,84 @@ fn reference_blockers_of_the_build_are_shown() {
         "{}",
         r.data
     );
+}
+
+#[test]
+fn reference_blocker_shows_its_instruction_and_the_addresses() {
+    let dir = workspace(false);
+    add_overlay_c(dir.path());
+    let path = dir.path().join("knowledge/rebuild.toml");
+    let records = std::fs::read_to_string(&path).unwrap().replace(
+        "address = \"ovl:C:0000:5004\"
+name = \"g\"
+file = \"c.c\"
+result = \"identical\"
+",
+        "address = \"ovl:C:0000:5004\"
+name = \"g\"
+file = \"c.c\"
+result = \"differs\"
+         
+[[function.blockers]]
+kind = \"wrong-relative-ref\"
+at = 7
+         detail = \"pre_: original 5000, rebuilt 5002\"
+",
+    );
+    std::fs::write(&path, records).unwrap();
+    let session = Session::open(dir.path()).unwrap();
+    let r = decovery_facade::diagnose(&session, "ovl:C:0000:5004", Budget::default()).unwrap();
+    let reference = &r.data["references"][0];
+    assert_eq!(reference["detail"], "pre_: original 5000, rebuilt 5002");
+    let instruction = reference["instruction"].as_str().unwrap();
+    assert!(instruction.starts_with("call"), "{instruction}");
+    assert!(
+        r.summary.contains(&format!(
+            "wrong-relative-ref at +0x7: {instruction}; pre_: original 5000, rebuilt 5002"
+        )),
+        "{}",
+        r.summary
+    );
+}
+
+#[test]
+fn functions_out_of_address_order_are_named_by_diagnose() {
+    // the knowledge places pre_ behind g: the file defines them in another order than the original
+    let dir = workspace(false);
+    add_overlay_c(dir.path());
+    let path = dir.path().join("knowledge/symbols.toml");
+    let mut symbols = std::fs::read_to_string(&path).unwrap();
+    symbols.push_str(
+        "[[symbol]]
+address = \"ovl:C:0000:500E\"
+kind = \"function\"
+name = \"pre\"
+size = 1
+source = \"human\"
+confidence = \"confirmed\"
+
+",
+    );
+    std::fs::write(&path, symbols).unwrap();
+    let session = Session::open(dir.path()).unwrap();
+    let r = decovery_facade::diagnose(&session, "ovl:C:0000:5004", Budget::default()).unwrap();
+    let hint = r.data["order"].as_str().unwrap_or_default();
+    assert!(
+        hint.contains("g (ovl:C:0000:5004) comes after pre"),
+        "{}",
+        r.data
+    );
+    assert!(r.summary.contains(hint), "{}", r.summary);
+}
+
+#[test]
+fn show_with_asm_gives_the_original_disassembly() {
+    let dir = workspace(false);
+    let session = Session::open(dir.path()).unwrap();
+    let r = decovery_facade::show_with_asm(&session, "A_ovmain", Budget::default(), false).unwrap();
+    let asm = r.data["asm"].as_str().unwrap();
+    assert!(asm.starts_with(&format!("{A_AT}  ")), "{asm}");
+    assert!(asm.contains("mov ax,"), "{asm}");
+    let plain = decovery_facade::show(&session, "A_ovmain", Budget::default()).unwrap();
+    assert!(plain.data.get("asm").is_none());
 }

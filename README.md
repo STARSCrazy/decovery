@@ -110,6 +110,19 @@ about 500 MB** (checksums are pinned; windows-x64 and linux-x64 only). Run it in
 downloaded yourself. `DECOVERY_PYTHON` selects the Python that creates the venv. A second run keeps what is
 installed.
 
+An existing Ghidra and JDK are registered without any download: `decovery setup ghidra --ghidra-dir <ghidra install>
+--jdk-dir <jdk>` (the Ghidra directory holds `support/`, the JDK `bin/java`; Ghidra 12.1 needs JDK 21 or newer). Only
+the pyghidra venv is created. Setting `PYTHONPATH` to the plugin is not enough: `analyze` needs the `[plugins.ghidra]`
+entry with a `command` (in the workspace's `decovery.toml` or the user config, `%APPDATA%\decovery\config.toml` on
+Windows, `~/.config/decovery/config.toml` elsewhere), and its error names both files when the entry is missing. A
+hand-written entry looks like this:
+
+```toml
+[plugins.ghidra]
+command = ["<venv>/Scripts/python.exe", "-m", "decovery_ghidra"]
+env = { GHIDRA_INSTALL_DIR = "<ghidra install>", JAVA_HOME = "<jdk>" }
+```
+
 `decovery analyze` runs the `command` of the `[plugins.<name>]` entry in a workspace's `decovery.toml` (and in the
 user config) as a program on your machine. Only analyze workspaces you trust.
 
@@ -155,7 +168,9 @@ overlay = "NPC"
 files = ["npc.c", "npc_b.c"]
 ```
 
-The build warns when the code of one file does not end where the functions of the next begin. Uninitialised globals
+Source files keep DOS 8.3 names (`[a-z0-9_-]{1,8}.(c|h|s|asm)`): the compilers run under DOS and see at most eight
+characters before the extension, so split files are named like `npc_b.c`, not `npc_part2.c`; the build refuses
+longer names. The build warns when the code of one file does not end where the functions of the next begin. Uninitialised globals
 the files share (Aztec common symbols) are placed in the module's BSS in order of first appearance and count into its
 size. Aztec cuts identifiers to 31 characters (profile key `name_length`); the build matches a cut name with the longer
 knowledge name, and `annotate --name` warns about a longer name. The memory DOS allocates behind an MZ image

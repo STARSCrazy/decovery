@@ -181,6 +181,9 @@ fn wrong_internal_reference_is_reported() {
             .blockers
             .contains(&Blocker::WrongAbsoluteRef { at: 7 })
     );
+    let texts: Vec<String> = v.wrong_refs.iter().map(|w| w.text()).collect();
+    assert_eq!(texts, ["A DATA: original 2001, rebuilt 2000"], "{v:#?}");
+    assert_eq!(v.wrong_refs[0].place, 0x1007);
 }
 
 #[test]
@@ -380,6 +383,8 @@ fn disagreeing_extern_use_names_its_addend_and_field() {
     // the majority of the uses binds the name: the one disagreeing use is the wrong reference
     assert_eq!(v.code.blockers, [Blocker::WrongAbsoluteRef { at: 1 }]);
     assert_eq!(v.externals.get("tbl_"), Some(&0x84AA));
+    let texts: Vec<String> = v.wrong_refs.iter().map(|w| w.text()).collect();
+    assert_eq!(texts, ["tbl_-2: original 84AA, rebuilt 84A8"]);
 }
 
 #[test]
@@ -415,6 +420,55 @@ fn bss_missing_from_the_files_names_the_externs_bound_inside_it() {
     assert!(
         v.findings
             .contains(&"BSS: 8 bytes in the original, 0 from the module's files; no external name is bound inside the original BSS (2000..2008)".to_string()),
+        "{:?}",
+        v.findings
+    );
+}
+
+#[test]
+fn extern_whose_name_says_another_address_is_a_finding() {
+    let (mut e, mut f) = extern_with_addends(false);
+    for spec in [&mut e, &mut f] {
+        spec.named[0].name = "word_84a0_".into();
+    }
+    let ovl = read_overlay(&addend_overlay(0x84AA, 0), "T").expect("overlay");
+    let v = compare_overlay_module(&[&object(&e), &object(&f)], &ovl);
+    assert_eq!(v.externals.get("word_84a0_"), Some(&0x84AA), "{v:#?}");
+    assert!(
+        v.findings
+            .iter()
+            .any(|x| x.starts_with("word_84a0_: bound at 84AA, but its name says 84A0")),
+        "{:?}",
+        v.findings
+    );
+    // a name that says its address is no finding
+    for spec in [&mut e, &mut f] {
+        spec.named[0].name = "word_84aa_".into();
+    }
+    let v = compare_overlay_module(&[&object(&e), &object(&f)], &ovl);
+    assert!(v.findings.is_empty(), "{:?}", v.findings);
+}
+
+#[test]
+fn bss_externals_lists_every_name_with_its_address() {
+    let (e, f) = extern_with_addends(false);
+    let ovl = read_overlay(&addend_overlay(0x2002, 8), "T").expect("overlay");
+    let v = compare_overlay_module(&[&object(&e), &object(&f)], &ovl);
+    assert_eq!(v.bss_externals, [("tbl_".to_string(), 0x2002)]);
+}
+
+#[test]
+fn commons_counted_into_a_differing_bss_are_named() {
+    // C and D declare commons (cnt_ 2, tbl_ 4, z_ 2): 8 bytes; the original has 10
+    let (c, d) = commons();
+    let ovl = read_overlay(&commons_overlay(0x2002, 0x2006, 0x2000, 10), "T").expect("overlay");
+    let v = compare_overlay_module(&[&object(&c), &object(&d)], &ovl);
+    assert_eq!(v.commons.len(), 3, "{v:#?}");
+    assert!(
+        v.findings
+            .iter()
+            .any(|f| f.starts_with("BSS counts 8 bytes of commons")
+                && f.contains("cnt_ 2 bytes at 2000 (C, D)")),
         "{:?}",
         v.findings
     );

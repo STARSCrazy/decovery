@@ -132,6 +132,8 @@ struct ShowParams {
     /// Put the instruction address ranges each pseudo-C line came from in front of it (when the analyzer
     /// recorded them).
     lines: Option<bool>,
+    /// Add the original's disassembly of the function (`asm`: address, bytes, instruction per line).
+    asm: Option<bool>,
 }
 
 #[derive(Clone, Copy, Deserialize, JsonSchema)]
@@ -507,7 +509,9 @@ impl Server {
         let budget = budget(p.budget);
         self.blocking(move |root| {
             let session = Session::open(root)?;
-            if p.lines == Some(true) {
+            if p.asm == Some(true) {
+                decovery_facade::show_with_asm(&session, &p.target, budget, p.lines == Some(true))
+            } else if p.lines == Some(true) {
                 decovery_facade::show_with_lines(&session, &p.target, budget)
             } else {
                 decovery_facade::show(&session, &p.target, budget)

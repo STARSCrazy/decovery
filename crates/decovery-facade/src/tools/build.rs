@@ -1001,8 +1001,9 @@ fn wrong_relative_targets(p: &Placement<'_>, c: &Comparison) -> Vec<Address> {
         .collect()
 }
 
-/// A relocated code field the overlay module comparison found wrong: its address and whether it is self-relative.
-type WrongField = (Address, bool);
+/// A relocated code field the overlay module comparison found wrong: its address, whether it is self-relative and
+/// what the field leads to against what the rebuild gives (`symbol: original A, rebuilt B`).
+type WrongField = (Address, bool, Option<String>);
 
 /// The function-level verdict of an Aztec function (link gaps) leaves its relocated fields unchecked: a field the
 /// module comparison found wrong makes an identical function differ (blocker, message), and an identical function
@@ -1011,20 +1012,23 @@ fn judge_fields(r: &mut RebuildRecord, start: Address, c: &Comparison, wrong: &[
     if r.result != RebuildResult::Identical {
         return;
     }
-    let inside: Vec<(u32, bool)> = wrong
+    let inside: Vec<(u32, bool, Option<String>)> = wrong
         .iter()
-        .filter_map(|&(at, relative)| {
+        .filter_map(|(at, relative, detail)| {
             let offset = u32::try_from(at.bytes_from(start)?).ok()?;
-            (offset < c.metrics.bytes).then_some((offset, relative))
+            (offset < c.metrics.bytes).then(|| (offset, *relative, detail.clone()))
         })
         .collect();
     if !inside.is_empty() {
-        for &(at, relative) in &inside {
-            r.blockers.push(blocker_record(&if relative {
+        for (at, relative, detail) in &inside {
+            let at = *at;
+            let mut b = blocker_record(&if *relative {
                 Blocker::WrongRelativeRef { at }
             } else {
                 Blocker::WrongAbsoluteRef { at }
-            }));
+            });
+            b.detail = detail.clone();
+            r.blockers.push(b);
         }
         r.refs_wrong += inside.len() as u32;
         r.result = RebuildResult::Differs;
@@ -1208,7 +1212,8 @@ fn overlay_modules_with_fields(
                         seg: 0,
                         off,
                     };
-                    wrong.push((address, relative));
+                    let detail = v.wrong_refs.iter().find(|w| w.at == at).map(|w| w.text());
+                    wrong.push((address, relative, detail));
                 }
             }
         }
@@ -1234,7 +1239,11 @@ fn overlay_modules_with_fields(
                 "refs_unchecked": m.refs_unchecked,
                 "gaps": m.gaps,
                 "blockers": v.code.blockers.iter().take(16).map(|b| {
-                    json!({"kind": b.kind(), "at": b.at(), "count": b.count()})
+                    let detail = b.at().and_then(|at| v.wrong_refs.iter().find(|w| w.at == at));
+                    match detail {
+                        Some(w) => json!({"kind": b.kind(), "at": b.at(), "count": b.count(), "detail": w.text()}),
+                        None => json!({"kind": b.kind(), "at": b.at(), "count": b.count()}),
+                    }
                 }).collect::<Vec<_>>(),
             },
             "data": {
@@ -1255,6 +1264,27 @@ fn overlay_modules_with_fields(
             "externals": v.externals.len(),
             "findings": v.findings,
         });
+        if !v.commons.is_empty() {
+            entry["commons"] = v
+                .commons
+                .iter()
+                .map(|c| {
+                    json!({
+                        "name": c.name,
+                        "size": c.size,
+                        "address": format!("{:04X}", c.address),
+                        "declared_in": c.declared_in,
+                    })
+                })
+                .collect();
+        }
+        if !v.bss_externals.is_empty() {
+            entry["bss_externals"] = v
+                .bss_externals
+                .iter()
+                .map(|(n, a)| json!({"name": n, "address": format!("{a:04X}")}))
+                .collect();
+        }
         if let Value::Object(e) = &mut entry {
             e.extend(ambiguous_json(&v.ambiguous, v.code_size.0 != v.code_size.1));
         }
@@ -1386,6 +1416,7 @@ pub(super) fn place_objects<'o>(
     let mut taken: HashMap<Address, String> = HashMap::new();
     for &(id, source, object) in objects {
         let overlay = object_overlay(knowledge, profile, object);
+        let first = placed.len();
         for module in &object.modules {
             for view in functions(module).into_iter().filter(|f| is_public(f)) {
                 let raw = view.name;
@@ -1422,13 +1453,49 @@ pub(super) fn place_objects<'o>(
                 placements.push(Placement::new(view, address, original_len));
             }
         }
+        let order: Vec<(&str, Address)> = placed[first..]
+            .iter()
+            .map(|b| (b.label.as_str(), b.address))
+            .collect();
+        hints.extend(order_hint(source, &order));
     }
     (placements, placed)
 }
 
+/// The functions of `source` (in object order, with their original addresses) that come after a function the
+/// original places behind them: the file defines them in another order than the original, so every function
+/// after the first misplaced one is shifted (wrong relative references, no known cause).
+pub(super) fn order_hint(source: &str, functions: &[(&str, Address)]) -> Option<String> {
+    let mut misplaced = Vec::new();
+    for (k, &(name, at)) in functions.iter().enumerate() {
+        // the function the original places last among those the file defines before this one
+        let before = functions[..k]
+            .iter()
+            .filter(|(_, b)| b.bytes_from(at).is_some_and(|d| d > 0))
+            .max_by_key(|(_, b)| *b);
+        if let Some(&(other, b)) = before {
+            misplaced.push(format!("{name} ({at}) comes after {other} ({b})"));
+        }
+    }
+    if misplaced.is_empty() {
+        return None;
+    }
+    let n = misplaced.len();
+    let shown: Vec<&str> = misplaced.iter().take(4).map(String::as_str).collect();
+    Some(format!(
+        "{source}: the functions are not in the original's address order: {}{}; define them in address order",
+        shown.join(", "),
+        if n > 4 {
+            format!(" and {} more", n - 4)
+        } else {
+            String::new()
+        }
+    ))
+}
+
 /// The C name and original address of a function of an object, as the build places it: by the undecorated name,
 /// else by the raw one.
-fn place_name<'a>(
+pub(super) fn place_name<'a>(
     knowledge: &KnowledgeView<'_>,
     profile: &Profile,
     raw: &'a str,
@@ -1658,6 +1725,9 @@ pub(super) fn blocker_json(b: &BlockerRecord) -> Value {
     }
     if let Some(count) = b.count {
         v["count"] = json!(count);
+    }
+    if let Some(detail) = &b.detail {
+        v["detail"] = json!(detail);
     }
     v
 }
@@ -2043,6 +2113,21 @@ fn respond(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn functions_out_of_address_order_are_named() {
+        let at = |off: u32| Address::Flat(0x1000 + off);
+        assert_eq!(
+            order_hint("a.c", &[("f", at(0)), ("g", at(0x10)), ("h", at(0x20))]),
+            None
+        );
+        assert_eq!(
+            order_hint("a.c", &[("g", at(0x10)), ("f", at(0)), ("h", at(0x20))]).as_deref(),
+            Some(
+                "a.c: the functions are not in the original's address order: f (flat:00001000) comes after g (flat:00001010); define them in address order"
+            )
+        );
+    }
     use decovery_objects::{
         AztecModuleSpec, AztecSection, AztecSymbolSpec, read_aztec, write_aztec,
     };

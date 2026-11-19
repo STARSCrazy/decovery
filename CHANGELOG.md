@@ -6,6 +6,24 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `setup ghidra --ghidra-dir <dir> --jdk-dir <dir>` registers existing installs without downloading them (only the
+  pyghidra venv is created); the README shows a hand-written `[plugins.ghidra]` entry.
+- `analyze` without an analyzer entry names the files it searched (the workspace's `decovery.toml`, the user config
+  path) and what is missing (`[plugins.<name>]` with a `command`; `PYTHONPATH` alone does not configure it).
+- `show --asm` (MCP `show` with `asm`): the original's disassembly of the function after the pseudo-C (address, bytes,
+  instruction, the known name of a branch target), decoded as `diagnose` does; in the data as `asm`.
+- The module verdict lists the commons its BSS layout places (`commons`: name, size, address, declaring files); when
+  the BSS size differs, a finding says that extern declarations with a size (`extern int x[3];`) count into it.
+- A module verdict whose BSS is smaller than the original's lists every external name bound inside the original BSS
+  with its address (`bss_externals`); the finding names the first eight and points there.
+- A module finding when an external name ends in a four-digit address (`word_91b8`, `table_84aa`, `DAT_…_9202`)
+  other than the one the original binds it to.
+- `build` and `diagnose` say when a source file defines its functions in another order than the original
+  (`a.c: the functions are not in the original's address order: f (…) comes after g (…)`): the cause of shifted
+  references that otherwise read as `wrong-relative-ref` or "no known cause". `diagnose` gives it as `order`.
+- `diagnose` shows each wrong reference `build` found with its instruction and what the field leads to against what the
+  rebuild gives (`wrong-absolute-ref at +0x7: mov ax,[91B8h]; word_91b8: original 91B8, rebuilt 91AA`); the build
+  record keeps that text as the blocker's `detail`, the module verdict's blockers carry it too.
 - `-j` is the short form of the global `--jobs` (e.g. `decovery build -j 2`).
 - Per-file compiler flags in the source: a header comment `/* decovery: flags = +b +c */` (first ten lines) as an
   alternative to `[rebuild.file_flags]` (ADR 0014). The comment wins over a differing table entry, with a warning;
@@ -62,7 +80,14 @@ and the project uses [Semantic Versioning](https://semver.org/).
   `watcom-10.6` profile uses it, so its LE links carry the preload flag like the original. The first target now links
   identical with WLINK 10.6 in DOSBox (`dosbox-lab`).
 
+### Changed
+- The refusal of a source name longer than DOS 8.3 says why (the DOS compilers take at most eight characters before
+  the extension); README and ADR 0013 document the rule for split module files.
+
 ### Fixed
+- `diagnose` no longer marks an equal branch as differing in main-program functions: the rebuild is
+  decoded at the original's address (both columns show the same targets), and a short branch whose target lies inside
+  the function on one side and beyond its (cut) length on the other is equal when its bytes are.
 - `build` warns about missing files only for `[[rebuild.module]]`s that take part in the build, not about
   unrelated modules.
 - Overlay module comparison: every object's data starts on a word, as the Aztec linker places it (one zero byte

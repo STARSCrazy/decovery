@@ -50,9 +50,52 @@ pub struct ModuleVerdict {
     /// References whose binding disagrees with an earlier use of the same external name.
     pub ambiguous: Vec<String>,
     pub identical: bool,
+    /// Every external name bound inside the original's BSS when the files give less BSS than the original (name,
+    /// address); the BSS finding names only the first of them.
+    pub bss_externals: Vec<(String, u16)>,
+    /// The common symbols the layout placed behind the files' own BSS, in order.
+    pub commons: Vec<Common>,
+    /// The wrong code references (one per wrong-reference blocker, same order): what the original's field leads
+    /// to and what the rebuild's symbol and addend give.
+    pub wrong_refs: Vec<WrongRef>,
     /// Plain-language findings for a module that is not identical, most telling first: a code size that differs
     /// from the original (a partial module, or a shift whose later differences are likely consequences).
     pub findings: Vec<String>,
+}
+
+/// A relocated code field of the module whose value differs from the original's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct WrongRef {
+    /// Offset of the field from the code origin.
+    pub at: u32,
+    /// Address of the field.
+    pub place: i64,
+    /// The symbol the rebuild references (an unnamed section target: `<module> <section>`).
+    pub symbol: String,
+    /// The addend the rebuild adds to it.
+    pub addend: i64,
+    /// The address the original's field leads to (for a self-relative field: its target).
+    pub original: i64,
+    /// The address the rebuild's symbol plus addend gives.
+    pub rebuilt: i64,
+    pub relative: bool,
+}
+
+impl WrongRef {
+    /// `symbol+addend: original A, rebuilt B`.
+    pub fn text(&self) -> String {
+        let expr = match self.addend {
+            0 => self.symbol.clone(),
+            k if k > 0 => format!("{}+{k}", self.symbol),
+            k => format!("{}{k}", self.symbol),
+        };
+        format!(
+            "{expr}: original {:04X}, rebuilt {:04X}",
+            self.original & 0xFFFF,
+            self.rebuilt & 0xFFFF
+        )
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -122,15 +165,15 @@ fn layout(modules: &[&ObjectModule], corg: i64, dorg: i64, bss_start: i64) -> La
 
 /// Places the common symbols no module defines behind the modules' own BSS (ADR 0013): each name once, in the
 /// order of its first appearance (objects in link order, each in symbol-table order), with the largest size any
-/// object declares, without alignment. Returns the BSS size including them.
+/// object declares, without alignment. Returns the BSS size including them and the placed commons.
 fn place_commons<'a>(
     modules: &[&'a ObjectModule],
     public: &mut BTreeMap<&'a str, i64>,
     bss_start: i64,
     own_bss: u32,
-) -> u32 {
+) -> (u32, Vec<Common>) {
     let mut order: Vec<&str> = Vec::new();
-    let mut sizes: BTreeMap<&str, u32> = BTreeMap::new();
+    let mut sizes: BTreeMap<&str, (u32, Vec<String>)> = BTreeMap::new();
     for m in modules {
         for (name, size) in &m.commons {
             if public.contains_key(name.as_str()) {
@@ -138,17 +181,42 @@ fn place_commons<'a>(
             }
             let entry = sizes.entry(name.as_str()).or_insert_with(|| {
                 order.push(name.as_str());
-                0
+                (0, Vec::new())
             });
-            *entry = (*entry).max(*size);
+            entry.0 = entry.0.max(*size);
+            if !entry.1.contains(&m.name) {
+                entry.1.push(m.name.clone());
+            }
         }
     }
     let mut bss = own_bss;
+    let mut placed = Vec::new();
     for name in order {
-        public.insert(name, bss_start + i64::from(bss));
-        bss = bss.saturating_add(sizes[name]);
+        let address = bss_start + i64::from(bss);
+        public.insert(name, address);
+        let (size, declared_in) = &sizes[name];
+        placed.push(Common {
+            name: name.to_string(),
+            size: *size,
+            address,
+            declared_in: declared_in.clone(),
+        });
+        bss = bss.saturating_add(*size);
     }
-    bss
+    (bss, placed)
+}
+
+/// A common symbol placed in the module's BSS: an uninitialised global or an `extern` declaration with a size
+/// (`extern int x[3];`), which the compiler emits the same way and which counts into the layout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Common {
+    pub name: String,
+    /// The largest size any object declares.
+    pub size: u32,
+    pub address: i64,
+    /// The objects declaring it.
+    pub declared_in: Vec<String>,
 }
 
 /// One use of an external name: the address it binds the name to (the original field less the object's number).
@@ -216,12 +284,13 @@ pub fn compare_overlay_module(objects: &[&ObjectFile], overlay: &Overlay) -> Mod
             }
         }
     }
-    let bss = place_commons(&modules, &mut public, bss_start, own_bss);
+    let (bss, commons) = place_commons(&modules, &mut public, bss_start, own_bss);
 
     let mut metrics = Metrics::default();
     let mut blockers = Vec::new();
     let mut externals: BTreeMap<String, u16> = BTreeMap::new();
     let mut ambiguous = Vec::new();
+    let mut wrong_refs: Vec<WrongRef> = Vec::new();
     // the uses of external names, judged once every use is known
     let mut uses: Vec<ExternUse> = Vec::new();
     let mut gaps_code = BTreeSet::new();
@@ -268,6 +337,31 @@ pub fn compare_overlay_module(objects: &[&ObjectFile], overlay: &Overlay) -> Mod
                 }
                 let relative = r.kind == RelocKind::Relative;
                 // the address the reference names inside the module, or the external name
+                // what the rebuild names: the symbol and its addend
+                let (symbol, addend) = match &r.target {
+                    RefTarget::Symbol(n) => (n.clone(), sign(stored, width)),
+                    RefTarget::Section { index, offset } => {
+                        let at = i64::from(*offset) + if relative { 0 } else { stored };
+                        match m
+                            .symbols
+                            .iter()
+                            .find(|x| x.section == *index && i64::from(x.offset) == at)
+                        {
+                            Some(x) => (x.name.clone(), 0),
+                            None => (
+                                format!(
+                                    "{} {}",
+                                    m.name,
+                                    m.sections
+                                        .get(*index as usize)
+                                        .map_or("?", |x| x.name.as_str())
+                                ),
+                                at,
+                            ),
+                        }
+                    }
+                    _ => (String::new(), 0),
+                };
                 let (internal, name): (Option<i64>, Option<&str>) = match &r.target {
                     RefTarget::Section { index, offset } => {
                         match bases[mi].get(*index as usize).copied().flatten() {
@@ -306,14 +400,28 @@ pub fn compare_overlay_module(objects: &[&ObjectFile], overlay: &Overlay) -> Mod
                     metrics.refs_unchecked += 1;
                     continue;
                 };
-                let wrong = |blockers: &mut Vec<Blocker>| {
-                    let at = (place - corg).max(0) as u32;
-                    blockers.push(if relative {
-                        Blocker::WrongRelativeRef { at }
-                    } else {
-                        Blocker::WrongAbsoluteRef { at }
-                    });
-                };
+                let wrong =
+                    |blockers: &mut Vec<Blocker>, wrong_refs: &mut Vec<WrongRef>, t: i64| {
+                        let at = (place - corg).max(0) as u32;
+                        wrong_refs.push(WrongRef {
+                            at,
+                            place,
+                            symbol: symbol.clone(),
+                            addend,
+                            original: if relative {
+                                end + sign(orig, width)
+                            } else {
+                                orig
+                            },
+                            rebuilt: t,
+                            relative,
+                        });
+                        blockers.push(if relative {
+                            Blocker::WrongRelativeRef { at }
+                        } else {
+                            Blocker::WrongAbsoluteRef { at }
+                        });
+                    };
                 match (internal, name) {
                     (Some(t), _) => {
                         let value = to_field(t);
@@ -323,7 +431,7 @@ pub fn compare_overlay_module(objects: &[&ObjectFile], overlay: &Overlay) -> Mod
                         } else {
                             metrics.refs_wrong += 1;
                             if part == Part::Code {
-                                wrong(&mut blockers);
+                                wrong(&mut blockers, &mut wrong_refs, t);
                             }
                         }
                     }
@@ -387,6 +495,15 @@ pub fn compare_overlay_module(objects: &[&ObjectFile], overlay: &Overlay) -> Mod
             u.place, u.orig, u.bound
         ));
         if u.code {
+            wrong_refs.push(WrongRef {
+                at: u.at,
+                place: u.place,
+                symbol: n.to_string(),
+                addend: u.number,
+                original: u.bound + u.number,
+                rebuilt: b + u.number,
+                relative: u.relative,
+            });
             blockers.push(if u.relative {
                 Blocker::WrongRelativeRef { at: u.at }
             } else {
@@ -394,6 +511,7 @@ pub fn compare_overlay_module(objects: &[&ObjectFile], overlay: &Overlay) -> Mod
             });
         }
     }
+    wrong_refs.sort_by_key(|w| w.at);
     blockers.sort_by_key(|b| match *b {
         Blocker::WrongRelativeRef { at } | Blocker::WrongAbsoluteRef { at } => at,
         _ => 0,
@@ -451,8 +569,20 @@ pub fn compare_overlay_module(objects: &[&ObjectFile], overlay: &Overlay) -> Mod
     let bss = (h.bss, u16::try_from(bss).unwrap_or(u16::MAX));
     let identical = code_ok && data_equal && bss.0 == bss.1 && ambiguous.is_empty();
     let mut findings = size_findings(code_size, comparison.metrics.first_difference);
-    if bss.0 > bss.1 {
+    let bss_externals = if bss.0 > bss.1 {
         findings.push(bss_finding(bss, bss_start, &externals));
+        let end = bss_start + i64::from(bss.0);
+        externals
+            .iter()
+            .filter(|(_, a)| (bss_start..end).contains(&i64::from(**a)))
+            .map(|(n, a)| (n.clone(), *a))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    findings.extend(externals.iter().filter_map(|(n, &a)| suffix_mismatch(n, a)));
+    if bss.0 != bss.1 && !commons.is_empty() {
+        findings.push(commons_finding(&commons));
     }
     ModuleVerdict {
         code: comparison,
@@ -466,6 +596,9 @@ pub fn compare_overlay_module(objects: &[&ObjectFile], overlay: &Overlay) -> Mod
         bss,
         externals,
         ambiguous,
+        wrong_refs,
+        bss_externals,
+        commons,
         identical,
         findings,
         data_gaps: u32::try_from(gaps_data.len()).unwrap_or(u32::MAX),
@@ -498,11 +631,64 @@ fn bss_finding(
     } else {
         String::new()
     };
+    let more = if more.is_empty() {
+        more
+    } else {
+        format!("{more} (all with addresses: the module's bss_externals)")
+    };
     format!(
         "{head} {n} external name{} bound inside the original BSS ({range}), defined in none of the files: {}{more}",
         if n == 1 { "" } else { "s" },
         inside[..n.min(SHOWN)].join(", ")
     )
+}
+
+/// Says which declared sizes the BSS layout counts: extern declarations with a size count like definitions.
+fn commons_finding(commons: &[Common]) -> String {
+    let total: u32 = commons.iter().map(|c| c.size).sum();
+    let list: Vec<String> = commons
+        .iter()
+        .take(8)
+        .map(|c| {
+            format!(
+                "{} {} byte{} at {:04X} ({})",
+                c.name,
+                c.size,
+                if c.size == 1 { "" } else { "s" },
+                c.address,
+                c.declared_in.join(", ")
+            )
+        })
+        .collect();
+    let more = if commons.len() > 8 {
+        format!(" and {} more", commons.len() - 8)
+    } else {
+        String::new()
+    };
+    format!(
+        "BSS counts {total} bytes of commons (uninitialised globals and extern declarations with a size, such as          `extern int x[3];`): {}{more}",
+        list.join(", ")
+    )
+}
+
+/// An external name that ends in a four-digit hexadecimal address (`word_91b8`, `table_84aa`, `DAT_seg_9202`,
+/// the compiler's trailing `_` aside) other than the one the original binds it to: the name was likely given
+/// for another address, or the extern is used at the wrong one.
+fn suffix_mismatch(name: &str, bound: u16) -> Option<String> {
+    let base = name.strip_suffix('_').unwrap_or(name);
+    let (_, suffix) = base.rsplit_once('_')?;
+    if suffix.len() != 4
+        || !suffix.chars().all(|c| c.is_ascii_hexdigit())
+        || !suffix.chars().any(|c| c.is_ascii_digit())
+    {
+        return None;
+    }
+    let named = u16::from_str_radix(suffix, 16).ok()?;
+    (named != bound).then(|| {
+        format!(
+            "{name}: bound at {bound:04X}, but its name says {named:04X}; check the extern's name or the address its uses give"
+        )
+    })
 }
 
 /// Findings from the code size (original, rebuilt) and the first real byte difference.

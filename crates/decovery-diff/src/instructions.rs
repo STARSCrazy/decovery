@@ -29,6 +29,8 @@ struct Insn {
     raw: Vec<u8>,
     table: bool,
     target: Option<Target>,
+    /// Branch target relative to the start of the function (signed), for a branch without relocated field.
+    rel: Option<i64>,
     /// Relocated byte positions inside the instruction.
     gaps: BTreeSet<u32>,
     /// Rebuild: named data references per field role (name, addend).
@@ -110,6 +112,10 @@ fn insn(code: &[u8], base: u64, gaps: &BTreeSet<u32>, naming: &Naming<'_>, d: De
             Target::External((naming.target_name)(t))
         }
     });
+    let rel = d
+        .near_branch
+        .filter(|_| inner.is_empty())
+        .map(|t| t as i64 - base as i64);
     let mut refs = Vec::new();
     let mut addresses = Vec::new();
     if target.is_none() {
@@ -139,6 +145,7 @@ fn insn(code: &[u8], base: u64, gaps: &BTreeSet<u32>, naming: &Naming<'_>, d: De
         table: matches!(d.kind, DecodedKind::JumpTable { .. }),
         d,
         target,
+        rel,
         gaps: inner,
         refs,
         addresses,
@@ -210,6 +217,9 @@ fn judge(
             (Some(Target::External(a)), Some(Target::External(b))) => {
                 a.is_none() || b.is_none() || a == b
             }
+            // inside the function on one side, outside on the other (one side's length is cut, the analysis
+            // split the function): the same bytes jump the same distance from the same start
+            (Some(_), Some(_)) => nb.rel.is_some() && nb.rel == og.rel && bytes_equal(nb, og),
             _ => false,
         };
         if !ok {
@@ -434,6 +444,56 @@ pub(crate) fn pairs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn side<'a>(
+        code: &'a [u8],
+        base: u64,
+        gaps: &'a BTreeSet<u32>,
+        naming: Naming<'a>,
+    ) -> Side<'a> {
+        Side {
+            code,
+            base,
+            gaps,
+            naming,
+        }
+    }
+
+    #[test]
+    fn branch_inside_on_one_side_outside_on_the_other_is_equal_with_same_bytes() {
+        // jg +1 to offset 3; the original's span ends before the target (the analysis split the function)
+        let rebuild_code = [0x7F, 0x01, 0x90, 0xC3];
+        let original_code = [0x7F, 0x01, 0x90];
+        let names = BTreeMap::new();
+        let addends = BTreeMap::new();
+        let gaps = BTreeSet::new();
+        let none = |_: u64| -> Option<String> { None };
+        let split = |_: u64| -> Option<String> { Some("split_0243".to_string()) };
+        let rebuild = side(
+            &rebuild_code,
+            0x40,
+            &gaps,
+            Naming {
+                names: &names,
+                addends: &addends,
+                target_name: &none,
+                data_names: None,
+            },
+        );
+        let original = side(
+            &original_code,
+            0x240,
+            &gaps,
+            Naming {
+                names: &names,
+                addends: &addends,
+                target_name: &split,
+                data_names: None,
+            },
+        );
+        let (_, pairs) = pairs(&rebuild, &original, 16, false, &|_| None, Keep::Always);
+        assert_eq!(pairs[0].kind, PairKind::Equal, "{pairs:?}");
+    }
 
     #[test]
     fn addend_is_signed_in_field_width() {

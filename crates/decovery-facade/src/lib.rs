@@ -30,5 +30,5 @@ pub use tools::{
     JobAction, LegacyCall, LegacyOperation, LegacyOptions, Variant, actor, analyze,
     analyze_with_user_plugins, annotate, build, c_line_near, detail, diagnose, diagnose_deep,
     differs_near, find, history, history_archive, job_tool, keep_legacy_plugin, link,
-    program_description, search, set_actor, show, show_with_lines, status, verify,
+    program_description, search, set_actor, show, show_with_asm, show_with_lines, status, verify,
 };

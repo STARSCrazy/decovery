@@ -270,6 +270,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let err = stage_text("toolongname.c", "", dir.path()).unwrap_err();
         assert!(err.to_string().contains("[a-z0-9_-]{1,8}.(c|h|s|asm)"));
+        assert!(err.to_string().contains("8.3 names"), "{err}");
         fs::write(dir.path().join("toolongname.c"), "").unwrap();
         assert!(find_sources(dir.path(), &[]).is_err());
         assert!(stage_text("a.txt", "", dir.path()).is_err());

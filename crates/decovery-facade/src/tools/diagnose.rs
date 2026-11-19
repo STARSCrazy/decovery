@@ -10,7 +10,9 @@ use decovery_objects::{FunctionView, ObjectFormat, ObjectModule, functions, read
 use decovery_toolchain::{Profile, rebuild_profile};
 use serde_json::{Value, json};
 
-use super::build::{OBJECTS_DIR, is_public, original_len, symbol_sizes, toolchain};
+use super::build::{
+    OBJECTS_DIR, is_public, order_hint, original_len, place_name, symbol_sizes, toolchain,
+};
 
 use crate::{
     Budget, FacadeError, KnowledgeView, Response, Session, function_by_name, resolve, store_handle,
@@ -112,12 +114,40 @@ pub fn diagnose_tool(
         .iter()
         .filter(|b| matches!(b.kind.as_str(), "wrong-absolute-ref" | "wrong-relative-ref"))
         .collect();
+    // the instruction holding each wrong field (the original's text: what the field should lead to)
+    let instruction_at = |at: u32| -> Option<String> {
+        pairs
+            .iter()
+            .filter_map(|p| p.original.as_ref())
+            .find(|d| d.offset <= at && at < d.offset + d.len)
+            .map(|d| d.text.clone())
+    };
+    let references_json: Vec<Value> = references
+        .iter()
+        .map(|b| {
+            let mut v = json!(b);
+            if let Some(i) = b.at.and_then(instruction_at) {
+                v["instruction"] = json!(i);
+            }
+            v
+        })
+        .collect();
     if !references.is_empty() {
         let list: Vec<String> = references
             .iter()
-            .map(|b| match b.at {
-                Some(at) => format!("{} at +0x{at:X}", b.kind),
-                None => b.kind.clone(),
+            .map(|b| {
+                let mut s = match b.at {
+                    Some(at) => format!("{} at +0x{at:X}", b.kind),
+                    None => b.kind.clone(),
+                };
+                let instruction = b.at.and_then(instruction_at);
+                match (&instruction, &b.detail) {
+                    (Some(i), Some(d)) => s.push_str(&format!(": {i}; {d}")),
+                    (Some(i), None) => s.push_str(&format!(": {i}")),
+                    (None, Some(d)) => s.push_str(&format!(": {d}")),
+                    (None, None) => {}
+                }
+                s
             })
             .collect();
         let n = references.len();
@@ -126,6 +156,29 @@ pub fn diagnose_tool(
             if n == 1 { "" } else { "s" },
             list.join(", ")
         ));
+    }
+    // the file defines its functions in another order than the original: the cause of shifted references
+    let order: Vec<(String, Address)> = object
+        .modules
+        .iter()
+        .flat_map(functions)
+        .filter(is_public)
+        .filter_map(|f| {
+            let c_name = profile.decoration.undecorate(f.name);
+            // the rebuild record of the file first: it holds where the last build placed the function
+            session
+                .rebuild
+                .iter()
+                .find(|r| r.name == c_name && r.file.as_deref() == Some(file))
+                .map(|r| (c_name, r.address))
+                .or_else(|| place_name(&knowledge, &profile, f.name))
+        })
+        .map(|(n, a)| (n.to_string(), a))
+        .collect();
+    let order: Vec<(&str, Address)> = order.iter().map(|(n, a)| (n.as_str(), *a)).collect();
+    let order = order_hint(file, &order);
+    if let Some(hint) = &order {
+        summary.push_str(&format!("; {hint}"));
     }
     if let Some((kind, n)) = deviation {
         summary.push_str(&format!("; deviation: {} ({n} instructions)", kind.id()));
@@ -164,8 +217,11 @@ pub fn diagnose_tool(
             "pairs_text": shown,
         }),
     );
+    if let Some(hint) = order {
+        response.data["order"] = json!(hint);
+    }
     if !references.is_empty() {
-        response.data["references"] = json!(references);
+        response.data["references"] = json!(references_json);
         if let Some(message) = &record.message {
             response.data["message"] = json!(message);
         }
