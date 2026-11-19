@@ -58,8 +58,9 @@ enum Command {
         /// Rebuilt OMF object file; relative paths that do not exist are taken from the workspace root.
         #[arg(long)]
         object: PathBuf,
-        /// Function name as in the knowledge (undecorated).
-        #[arg(long)]
+        /// Function name as in the knowledge (undecorated), or the symbol name of an Aztec library member
+        /// (`$csav`, `strcmp_`) when `--object` is a library or library object (ADR 0016).
+        #[arg(long, visible_alias = "symbol")]
         function: String,
         /// Length of the original function in bytes; default: the symbol's `size`.
         #[arg(long)]

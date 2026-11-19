@@ -145,6 +145,19 @@ Assembler sources (`.asm`) of an Aztec C86 4.2b workspace are assembled by its A
 directory, called as `AS X.ASM`); a function there runs from a public label to the next one, local labels stay inside
 it (ADR 0015). Without the toolchain, the built-in assembler takes byte-listing sources.
 
+Library code of an Aztec C86 program is compared too when the workspace names the libraries (ADR 0016):
+
+```toml
+[rebuild]
+libraries = ["C.LIB"]                    # in the toolchain's LIB/ directory
+library_objects = ["OVLD.O", "OVBGN.O"]  # single objects outside a library
+```
+
+A full `build` places each member at the knowledge function one of its symbols names (`strcmp_` → `strcmp`), or
+where its code matches a function no source rebuilds, and compares every knowledge function inside it with link gaps
+(`library: 78 of 78 functions identical`; records name `C.LIB(strcmp)`). `decovery compare --object C.LIB --symbol
+'$csav'` compares one member function by its object symbol.
+
 ## Overlays
 
 A program that loads overlay files (Aztec C86 `.OVR`) registers them in the workspace:

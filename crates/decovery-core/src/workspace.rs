@@ -333,6 +333,13 @@ pub struct RebuildConfig {
     /// `false` hides exemplars from `show` and `find similar` (bench runs without exemplars); default true.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exemplars: Option<bool>,
+    /// Libraries whose members `build` compares against the original (ADR 0016): file names in the toolchain's
+    /// `LIB` directory (`C.LIB`), or paths relative to the workspace root.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub libraries: Vec<String>,
+    /// Single library objects outside a library (`OVLD.O`), looked up like `libraries` (ADR 0016).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub library_objects: Vec<String>,
     /// `[[rebuild.module]]`: overlay modules built from several source files (ADR 0013).
     #[serde(default, rename = "module", skip_serializing_if = "Vec::is_empty")]
     pub modules: Vec<ModuleConfig>,

@@ -6,6 +6,17 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Aztec C86 library members: `[rebuild] libraries = ["C.LIB"]` and `library_objects = ["OVLD.O", "OVBGN.O"]` (files
+  in the toolchain's `LIB/`). A full `build` places each member at the knowledge function one of its code symbols
+  names (undecorated, or `<OVERLAY>_<name>`) or where its whole code matches a function no source rebuilds, compares
+  every knowledge function inside it with link gaps and records it with `file = "C.LIB(member)"`. The summary says
+  `library: N of M functions identical` and how many functions neither a source nor a library rebuilds; the data
+  `library` lists the placed members (ADR 0016).
+- `read_aztec_library` lists a library's members (name, offset, length, public symbols, module); a single `.O` reads
+  as a library of one member.
+- `compare --symbol` (alias of `--function`): on an Aztec library or library object, a member function is found by
+  its object symbol (`$csav`, `strcmp_`) or, for a knowledge name the object does not define, by the member placed at
+  its address.
 - Aztec C86 4.2b assembler sources: `aztec-c86-4.2b` names AS as its `[assembler]` (`AS {input}`, same runners
   and preludes as CC), and `build` assembles `.asm` files with it before trying the built-in assembler (now the
   fallback for non-OMF profiles). Each public function is compared against the original with link gaps like a C
