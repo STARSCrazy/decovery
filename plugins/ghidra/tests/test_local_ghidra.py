@@ -318,6 +318,64 @@ class LocalGhidraTests(unittest.TestCase):
             self.assertNotIn("Removing unreachable block", code)
             self.assertIn("switch (AX): 0x1 -> 0019, 0x2 -> 001D; default -> 0021", code)
 
+    def test_aztec_runtime_helpers(self):
+        """`$ldv` takes DX:AX and BX:CX and returns DX:AX; helpers decompile to a stub; no injection notices; an
+        unreachable `ret` after an endless loop belongs to its function."""
+        from test_aztec import CSAV, LONG_DIVIDE, near_call
+
+        image = bytearray(b"\xcc" * 0x400)
+        image[0x000:0x003] = b"\xb8\x00\x00"  # mov ax,0
+        image[0x003:0x006] = near_call(0x003, 0x100)  # call $csav
+        image[0x006:0x012] = bytes.fromhex("8B 46 04 99 8B 4E 06 BB 00 00 90 90")  # ax=[bp+4]; cwd; cx=[bp+6]; bx=0
+        image[0x012:0x015] = near_call(0x012, 0x200)  # call $ldv
+        image[0x015] = 0xC3
+        image[0x020:0x023] = b"\xb8\x00\x00"  # mov ax,0
+        image[0x023:0x026] = near_call(0x023, 0x100)  # call $csav
+        image[0x026:0x029] = near_call(0x026, 0x310)  # loop: call g
+        image[0x029:0x02B] = b"\xeb\xfb"  # jmp loop
+        image[0x02B] = 0xC3  # unreachable ret
+        image[0x100:0x100 + len(CSAV)] = CSAV
+        image[0x200:0x200 + len(LONG_DIVIDE)] = LONG_DIVIDE
+        image[0x21E:0x221] = near_call(0x21E, 0x280)
+        image[0x221:0x223] = b"\x5f\xc3"  # pop di; ret
+        image[0x280:0x283] = b"\x33\xdb\xc3"  # unsigned divider (stand-in): xor bx,bx; ret
+        image[0x310] = 0xC3
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            program = {
+                "format": "mz",
+                "entry_points": ["seg:1000:0000", "seg:1000:0020"],
+                "regions": [{"name": "image", "start": "seg:1000:0000", "size": len(image), "arch": "x86-real-16",
+                             "permissions": "rwx", "blob": inline_blob(bytes(image))}],
+            }
+            symbols = [{"address": "seg:1000:0200", "kind": "function", "name": "ldv", "locals": [],
+                        "line_comments": []},
+                       {"address": "seg:1000:0000", "kind": "function", "name": "ratio",
+                        "signature": "long ratio_old(int a, int b)", "locals": [], "line_comments": []}]
+            out_path = root / "export.json"
+            out = run(
+                build_plugin(),
+                req(2, "analyzer/open", {"program": program, "project_dir": str(root / "ghidra"),
+                                         "program_hash": "f" * 64}),
+                req(3, "analyzer/apply", {"symbols": symbols, "types_h": "", "references": [],
+                                          "calling_convention": "__cdecl"}),
+                req(4, "analyzer/export", {"out_path": str(out_path)}),
+                req(5, "decompiler/decompile", {"addresses": ["seg:1000:0000", "seg:1000:0200", "seg:1000:0100"],
+                                                "out_dir": str(root / "c")}),
+                req(6, "shutdown"),
+            )
+            self.assertIn("result", by_id(out, 3), by_id(out, 3))
+            data = json.loads(out_path.read_text(encoding="utf-8"))
+            ends = {f["start"]: f["end"] for f in data["functions"]}
+            self.assertEqual(ends.get("seg:1000:0020"), "seg:1000:002B")
+            caller, helper, csav = (Path(r["path"]).read_text(encoding="utf-8") for r in by_id(out, 5)["result"])
+            self.assertIn("ratio(int a,int b)", caller)
+            self.assertNotIn("replaced with injection", caller)
+            self.assertRegex(caller, r"ldv\([^)]")
+            self.assertIn("Aztec C86 run-time helper: $ldv", helper)
+            self.assertIn("long ldv(long a, long b);", helper)
+            self.assertIn("Aztec C86 run-time helper: $csav", csav)
+
     def test_aztec_dense_switch_in_an_overlay(self):
         """`cmp ax,n; jae; xchg ax,bx; shl bx,1; jmp cs:[bx+table]` with the table in front, in an overlay at
         offsets above 0x8000: a switch on the values, not code, and no negative address labels."""

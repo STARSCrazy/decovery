@@ -166,7 +166,8 @@ _UNREACHABLE = re.compile(r"Removing unreachable block \([^,]*,0x([0-9a-fA-F]+)\
 def expected_warnings(lines: list[str], switch_calls: set[int]) -> set[int]:
     """Indices of decompiler warning lines to leave out in a function with Aztec switch calls (`switch_calls`:
     address offsets of the calls): the override notice and the unreachable call block are what the switch model
-    does; a `WARNING (jumptable)` repeats the same warning from the jump-table pass; exact repeats go too."""
+    does; the notice that a helper call is replaced by its fixup is how the helpers are modelled; a
+    `WARNING (jumptable)` repeats the same warning from the jump-table pass; exact repeats go too."""
     drop, seen = set(), set()
     plain = {m.group(2) for line in lines if (m := _WARNING.fullmatch(line.strip())) and not m.group(1)}
     for index, line in enumerate(lines):
@@ -176,7 +177,8 @@ def expected_warnings(lines: list[str], switch_calls: set[int]) -> set[int]:
         message = match.group(2)
         unreachable = _UNREACHABLE.fullmatch(message)
         if (
-            (switch_calls and message == "Switch is manually overridden")
+            _INJECTION.fullmatch(message)
+            or (switch_calls and message == "Switch is manually overridden")
             or (unreachable and int(unreachable.group(1), 16) in switch_calls)
             or (match.group(1) and message in plain)
             or line.strip() in seen
@@ -184,3 +186,59 @@ def expected_warnings(lines: list[str], switch_calls: set[int]) -> set[int]:
             drop.add(index)
         seen.add(line.strip())
     return drop
+
+
+# Long arithmetic helpers: operands in DX:AX and BX:CX, result in DX:AX. `$ldv` (signed divide) and the signed
+# remainder fix the signs and call the unsigned divider, which leaves the quotient in DX:AX and the remainder in
+# BX:CX; the unsigned remainder entry calls it and moves BX:CX to DX:AX.
+# push di; sub di,di; test dx,dx; jns; neg dx; neg ax; sbb dx,0; inc di; test bx,bx; jns; neg bx; neg cx; sbb bx,0;
+# xor di,1; call
+LONG_DIVIDE_PREFIX = bytes.fromhex("57 2B FF 85 D2 79 08 F7 DA F7 D8 83 DA 00 47 85 DB 79 0B F7 DB F7 D9 83 DB 00 81"
+                                   " F7 01 00 E8")
+# push di; mov di,0; the same sign fixes without the xor; call
+LONG_REMAINDER_PREFIX = bytes.fromhex("57 BF 00 00 85 D2 79 08 F7 DA F7 D8 83 DA 00 47 85 DB 79 07 F7 DB F7 D9 83 DB"
+                                      " 00 E8")
+# call +5 (the unsigned divider); mov ax,cx; mov dx,bx; ret
+UNSIGNED_REMAINDER = bytes.fromhex("E8 05 00 8B C1 8B D3 C3")
+
+
+@dataclass(frozen=True)
+class Helper:
+    offset: int  # segment offset of the entry
+    kind: str  # "csav" | "switch" | "long"
+    role: str  # what it does, for the comment in place of its pseudo-C
+
+
+def _call_target(data: bytes, base: int, at: int) -> int:
+    return (base + at + 3 + struct.unpack_from("<H", data, at + 1)[0]) & 0xFFFF
+
+
+def find_helpers(data: bytes, base: int) -> list[Helper]:
+    """The run-time helpers this module models, in `data` at segment offset `base`, by entry offset."""
+    found = [Helper(base + i, "csav", "$csav: function prologue (frame, SI/DI saved)") for i in find_csav(data)]
+    found += [Helper(base + i, "switch", "$swt/$cswt: switch on AX through the inline table after the call")
+              for i in find_switch_helpers(data)]
+    dividers = set()
+    for prefix, role in ((LONG_DIVIDE_PREFIX, "$ldv: signed long division"),
+                         (LONG_REMAINDER_PREFIX, "signed long remainder")):
+        for at in _find_all(data, prefix):
+            found.append(Helper(base + at, "long", f"{role}, DX:AX by BX:CX into DX:AX"))
+            call = at + len(prefix) - 1
+            if call + 3 <= len(data):
+                dividers.add(_call_target(data, base, call))
+    for at in _find_all(data, UNSIGNED_REMAINDER):
+        if _call_target(data, base, at) in dividers:
+            found.append(Helper(base + at, "long", "unsigned long remainder, DX:AX by BX:CX into DX:AX"))
+    for divider in sorted(dividers):
+        if base <= divider < base + len(data):
+            found.append(Helper(divider, "long", "unsigned long division, DX:AX by BX:CX into DX:AX "
+                                                 "(remainder in BX:CX)"))
+    return sorted(set(found), key=lambda h: h.offset)
+
+
+def stub(role: str, prototype: str) -> str:
+    """Pseudo-C in place of a run-time helper's body: its role and prototype (calls to it are modelled)."""
+    return f"/* Aztec C86 run-time helper: {role} */\n\n{prototype};\n"
+
+
+_INJECTION = re.compile(r"Function: .* replaced with injection: decovery_aztec_\w+")

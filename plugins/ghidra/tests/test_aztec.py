@@ -16,6 +16,12 @@ from decovery_ghidra.mapping import GhidraAddress, MemoryBlockSpec  # noqa: E402
 CSAV = bytes.fromhex("5B 55 8B EC 03 E0 57 56 FF D3 5E 5F 8B E5 5D C3")
 SWITCH = bytes.fromhex("5B 57 06 8C CF 8E C7 8B FB 8B D9 D1 E3 FC F2 AF 26 8B 49 FC 07 5F FF E1")
 
+# The sign handling of `$ldv` and the signed remainder up to their `call` (operand bytes filled by the test).
+LONG_DIVIDE = bytes.fromhex("57 2B FF 85 D2 79 08 F7 DA F7 D8 83 DA 00 47 85 DB 79 0B F7 DB F7 D9 83 DB 00 81 F7 01"
+                            " 00 E8 00 00")
+LONG_REMAINDER = bytes.fromhex("57 BF 00 00 85 D2 79 08 F7 DA F7 D8 83 DA 00 47 85 DB 79 07 F7 DB F7 D9 83 DB 00 E8"
+                               " 00 00")
+
 
 def near_call(at: int, target: int) -> bytes:
     return b"\xe8" + struct.pack("<H", (target - (at + 3)) & 0xFFFF)
@@ -73,8 +79,30 @@ class AztecTests(unittest.TestCase):
             "                    /* WARNING: Switch is manually overridden */",
             "/* WARNING: Bad instruction */",
         ]
-        self.assertEqual(aztec.expected_warnings(lines, {0x1000C}), {1, 2, 3, 6, 7})
-        self.assertEqual(aztec.expected_warnings(lines, set()), {1, 3, 7})
+        self.assertEqual(aztec.expected_warnings(lines, {0x1000C}), {0, 1, 2, 3, 6, 7})
+        self.assertEqual(aztec.expected_warnings(lines, set()), {0, 1, 3, 7})
+        other = ["/* WARNING: Function: f replaced with injection: alloca_probe */"]
+        self.assertEqual(aztec.expected_warnings(other, set()), set())
+
+    def test_finds_long_helpers(self):
+        image = bytearray(b"\x90" * 0x300)
+        image[0x100:0x100 + len(LONG_DIVIDE)] = LONG_DIVIDE
+        image[0x11E:0x121] = near_call(0x11E, 0x200)
+        image[0x140:0x140 + len(LONG_REMAINDER)] = LONG_REMAINDER
+        image[0x15B:0x15E] = near_call(0x15B, 0x200)
+        image[0x1F8:0x200] = near_call(0x1F8, 0x200) + bytes.fromhex("8B C1 8B D3 C3")
+        image[0x200:0x204] = bytes.fromhex("85 DB 75 1E")
+        image[0x280:0x288] = near_call(0x280, 0x290) + bytes.fromhex("8B C1 8B D3 C3")  # calls something else
+        found = aztec.find_helpers(bytes(image), 0x1000)
+        self.assertEqual([(h.offset, h.kind) for h in found],
+                         [(0x1100, "long"), (0x1140, "long"), (0x11F8, "long"), (0x1200, "long")])
+        self.assertTrue(found[0].role.startswith("$ldv"))
+        both = aztec.find_helpers(b"\x90" + CSAV + SWITCH, 0)
+        self.assertEqual([(h.offset, h.kind) for h in both], [(1, "csav"), (1 + len(CSAV), "switch")])
+
+    def test_stub_names_the_role(self):
+        self.assertEqual(aztec.stub("$ldv: x", "long f(long a)"),
+                         "/* Aztec C86 run-time helper: $ldv: x */\n\nlong f(long a);\n")
 
     def test_dense_switch_with_table_in_front(self):
         # table of 3 targets at 0x100, then sub ax,-1; cmp ax,3; jae; xchg; shl; jmp cs:[bx+0x100]
