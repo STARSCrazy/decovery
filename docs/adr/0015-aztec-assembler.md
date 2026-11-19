@@ -21,9 +21,19 @@ symbol: a function was compared only up to its first local label.
    label, or the end of the code section (`public_functions` in `decovery-objects`). Non-public labels and data in
    the code section between them belong to the function. C objects keep the old rule (every named symbol starts a
    function: a `static` function is a function). The end is the next start or the section end in both cases, as
-   before; the analysis' function end is not used. Code before the first public label is not compared.
+   before; the analysis' function end is not used. Code before the first public label is not compared as a
+   function (see 5).
 4. An assembler failure with AS error lines (`ERROR:<file>:<line>: <text>`) is reported as `line <line>: <text>`
    first, as the built-in assembler words its errors, followed by the assembler's output.
+5. The bytes before the first public label of an assembler object's code section (mode bytes, pointer tables: data
+   in the code segment that belongs to no function) are compared as one block. The object start is placed by the
+   first placed public function of that section: its address minus its offset. The block is compared against the
+   original there with its relocated fields as link gaps, like a function. `build` reports it per file
+   (`files[].leading`: `bytes`, `state` = `equal` | `differs` | `unchecked`, `address`, `differing`, `gaps`,
+   `reason`, `first_difference`) and in the summary (`dsasm.asm: 310 bytes before the first public label: equal`).
+   A differing block counts in `counts.leading_differs` and fails the build like a differing function. Without a
+   placed public function (or without the original's bytes there) the block is unchecked with the reason. It is
+   not recorded as a rebuild record.
 
 ## Consequences
 

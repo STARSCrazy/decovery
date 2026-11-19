@@ -226,3 +226,122 @@ fn assembler_errors_carry_their_line() {
         "{hints}"
     );
 }
+
+/// Three data bytes before `key_` (a mode byte and a word holding `key_`'s address, relocated), then the code of
+/// [`asm_object`]; the public names are `key` and `next` (`known`) or names the original lacks.
+fn lead_object(known: bool) -> Vec<u8> {
+    let (key, next) = if known {
+        ("key_", "next_")
+    } else {
+        ("zzz_", "yyy_")
+    };
+    let label = |name: &str, value: u16, public: bool| AztecSymbolSpec {
+        name: name.into(),
+        section: AztecSection::Code,
+        value,
+        public,
+    };
+    let code_ref = |offset: u16, width: u8, relative: bool, target: u16| AztecRefSpec {
+        section: AztecSection::Code,
+        offset,
+        width,
+        relative,
+        target: AztecTarget::Section(AztecSection::Code, target),
+        addend: 0,
+    };
+    write_aztec(&AztecModuleSpec {
+        name: "DSASM".into(),
+        code: vec![
+            0x07, 0x00, 0x00, 0xEB, 0x00, 0xE8, 0x00, 0x00, 0x55, 0xC3, 0xC3,
+        ],
+        named: vec![
+            label(key, 3, true),
+            label("l1", 5, false),
+            label("l2", 8, false),
+            label(next, 10, true),
+        ],
+        refs: vec![
+            code_ref(1, 2, false, 3),
+            code_ref(4, 1, true, 5),
+            code_ref(6, 2, true, 10),
+        ],
+        ..AztecModuleSpec::default()
+    })
+}
+
+/// [`workspace`] with [`lead_object`] served and `lead` linked in front of `key` (at 001D).
+fn lead_workspace(
+    python: &str,
+    lead: [u8; 3],
+    known: bool,
+) -> (tempfile::TempDir, tempfile::TempDir) {
+    let (ws, objects) = workspace(python, "", true);
+    let mut exe = mz();
+    let at = 32 + usize::from(KEY_AT) - 3;
+    exe[at..at + 3].copy_from_slice(&lead);
+    std::fs::write(ws.path().join("t.exe"), exe).unwrap();
+    std::fs::write(objects.path().join("DSASM.OBJ"), lead_object(known)).unwrap();
+    (ws, objects)
+}
+
+#[test]
+fn bytes_before_the_first_public_label_are_compared_with_link_gaps() {
+    let python = python_or_skip!();
+    // the relocated word holds the linked address of key (0020): a link gap
+    let (ws, _objects) = lead_workspace(&python, [0x07, 0x20, 0x00], true);
+    let response = run(ws.path());
+    let leading = &response.data["files"][0]["leading"];
+    assert_eq!(leading["state"], "equal", "{}", response.data);
+    assert_eq!(leading["bytes"], 3);
+    assert_eq!(leading["address"], "seg:0000:001D");
+    assert!(
+        response
+            .summary
+            .contains("dsasm.asm: 3 bytes before the first public label: equal"),
+        "{}",
+        response.summary
+    );
+    assert_eq!(response.data["counts"]["leading_differs"], 0);
+    assert_eq!(function(&response, "key")["verdict"], "identical");
+}
+
+#[test]
+fn differing_bytes_before_the_first_public_label_fail_the_build() {
+    let python = python_or_skip!();
+    let (ws, _objects) = lead_workspace(&python, [0x08, 0x20, 0x00], true);
+    let response = run(ws.path());
+    let leading = &response.data["files"][0]["leading"];
+    assert_eq!(leading["state"], "differs", "{}", response.data);
+    assert_eq!(leading["differing"], 1);
+    assert_eq!(response.data["counts"]["leading_differs"], 1);
+    assert!(
+        response
+            .summary
+            .contains("dsasm.asm: 3 bytes before the first public label: differs"),
+        "{}",
+        response.summary
+    );
+}
+
+#[test]
+fn bytes_before_the_first_public_label_without_a_placed_function_are_unchecked() {
+    let python = python_or_skip!();
+    let (ws, _objects) = lead_workspace(&python, [0x07, 0x20, 0x00], false);
+    let response = run(ws.path());
+    let leading = &response.data["files"][0]["leading"];
+    assert_eq!(leading["state"], "unchecked", "{}", response.data);
+    assert!(
+        leading["reason"]
+            .as_str()
+            .unwrap()
+            .contains("no public function"),
+        "{leading}"
+    );
+    assert!(
+        response
+            .summary
+            .contains("dsasm.asm: 3 bytes before the first public label: unchecked ("),
+        "{}",
+        response.summary
+    );
+}

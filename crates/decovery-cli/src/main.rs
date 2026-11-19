@@ -1777,7 +1777,10 @@ fn build(
     }
     let d = &response.data;
     let counts = &d["counts"];
-    let complete = counts["failed_files"] == 0 && counts["identical"] == counts["functions"];
+    // bytes before the first public label of an assembler object that differ fail the build too (ADR 0015)
+    let complete = counts["failed_files"] == 0
+        && counts["identical"] == counts["functions"]
+        && counts["leading_differs"].as_u64().unwrap_or(0) == 0;
     if json {
         print_json(&response)?;
         return Ok(complete);

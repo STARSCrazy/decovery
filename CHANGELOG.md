@@ -10,6 +10,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
   and preludes as CC), and `build` assembles `.asm` files with it before trying the built-in assembler (now the
   fallback for non-OMF profiles). Each public function is compared against the original with link gaps like a C
   function. AS errors (`ERROR:X.ASM:12: text`) are reported as `line 12: text` (ADR 0015).
+- `build` compares the bytes before the first public label of an assembler object (code-segment data such as a
+  pointer table) as one block at the object's start, placed by its first placed public function, with link gaps.
+  Each file reports `N bytes before the first public label: equal|differs|unchecked` (`files[].leading`,
+  `counts.leading_differs`); a difference fails the build (ADR 0015).
 
 - `setup ghidra --ghidra-dir <dir> --jdk-dir <dir>` registers existing installs without downloading them (only the
   pyghidra venv is created); the README shows a hand-written `[plugins.ghidra]` entry.
