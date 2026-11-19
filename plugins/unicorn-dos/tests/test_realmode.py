@@ -468,6 +468,33 @@ class RealModeTest(unittest.TestCase):
         result, _ = self.run_program(asm.mz_exe(code))
         self.assertEqual(result.exit_code, 7)
 
+    def test_read_over_several_pages_of_executed_code_runs(self):
+        """A read spanning several pages replaces code in its last page that already ran; the program and a second
+        run on the reused machine run the new code (stale translations gave CC's INT 05h on Aztec C86 builds)."""
+        (self.c / "OLD.BIN").write_bytes(bytes(0x2000) + b"\xb0\x01\xc3")  # CS:3000: mov al, 1; ret
+        (self.c / "NEW.BIN").write_bytes(bytes(0x2000) + b"\xb0\x07\xc3")  # CS:3000: mov al, 7; ret
+        code = bytearray(PUSH_CS_POP_DS)
+        calls = []
+        for name in (0x80, 0x88):  # OLD.BIN, then NEW.BIN to CS:1000..3003, then call 3000h
+            code += (
+                mov16("AX", 0x3D00) + mov16("DX", name) + int21()
+                + b"\x89\xc3"  # mov bx, ax
+                + mov_ah(0x3F) + mov16("CX", 0x2003) + mov16("DX", 0x1000) + int21()
+                + mov_ah(0x3E) + int21()
+                + b"\xe8\x00\x00"  # call 3000h (displacement set below)
+            )  # fmt: skip
+            calls.append(len(code))
+            if name == 0x80:
+                code += b"\x89\xc6"  # mov si, ax
+        code += b"\x89\xf2\xb1\x04\xd2\xe2\x08\xd0" + mov_ah(0x4C) + int21()  # mov dx, si; exit: (dl << 4) | al
+        for end in calls:
+            struct.pack_into("<H", code, end - 2, (0x3000 - end) & 0xFFFF)
+        code = bytes(code).ljust(0x80, b"\x90") + b"OLD.BIN\0NEW.BIN\0"
+        program = asm.mz_exe(code)
+        machine = self.realmode.RealModeMachine(program)
+        self.assertEqual(self.emu(program).run(machine).exit_code, 0x17)
+        self.assertEqual(self.emu(program).run(machine).exit_code, 0x17)
+
 
 if __name__ == "__main__":
     unittest.main()

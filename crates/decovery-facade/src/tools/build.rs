@@ -11,7 +11,9 @@ use decovery_core::{
     read_user_config, save_rebuild, today, write_atomic,
 };
 use decovery_diff::{Blocker, Comparison, ModuleOptions, Placement, SymbolView, Verdict};
-use decovery_objects::{FunctionView, ObjectFile, ObjectFormat, functions, read_object};
+use decovery_objects::{
+    FunctionView, ObjectFile, ObjectFormat, functions, public_functions, read_object,
+};
 use decovery_plugin::Progress;
 use decovery_toolchain::{
     AssembleError, BUILTIN_ASSEMBLER, CheatFinding, CompiledFile, JobSpan, Profile, Runner,
@@ -321,9 +323,10 @@ pub(super) fn file_name(path: &Path) -> String {
 /// Compiles the C sources of `src/` (all, or `request.files`) through the runners (object cache first, all misses
 /// in one request), compares every public function of the objects with the original in one module comparison,
 /// downgrades functions with inline assembly, and records the results under the workspace lock: rebuild records,
-/// kept objects and the affected output files. MASM sources (`.asm`) go to the built-in assembler first
-/// ([`assemble_listing`]); one with a line outside its subset is assembled by the profile's assembler when that
-/// toolchain is there, else skipped with the line. Other assembler sources (`.s`) are skipped.
+/// kept objects and the affected output files. MASM sources (`.asm`) of an OMF profile go to the built-in assembler
+/// first ([`assemble_listing`]); one with a line outside its subset is assembled by the profile's assembler when that
+/// toolchain is there, else skipped with the line. A profile with another object format (Aztec C86) uses its own
+/// assembler first and the built-in one as fallback (ADR 0015). Other assembler sources (`.s`) are skipped.
 ///
 /// Cancellation ([`Control::cancel`]) is checked before compiling, passed to the runner request, and checked after
 /// compiling and before recording; a cancelled build records nothing (no rebuild records, kept objects, output or
@@ -391,6 +394,17 @@ pub fn build(
                 Ok((text, hash)) => {
                     source.flags = String::new();
                     source.text = text.replace("\r\n", "\n");
+                    // a profile whose objects are not OMF (Aztec C86) builds with its own assembler when that is
+                    // there: the built-in assembler writes OMF and is only the fallback
+                    if profile.object_format != ObjectFormat::Omf
+                        && let Some((_, assembler)) =
+                            assembler.get_or_insert_with(|| profile_assembler(&ws, &profile))
+                    {
+                        source.compiler = assembler.id.clone();
+                        assembler_jobs.push(sources.len());
+                        sources.push(source);
+                        continue;
+                    }
                     match assemble_listing(&source.dos_name, &text) {
                         Ok(object) => {
                             source.compiler = BUILTIN_ASSEMBLER.to_string();
@@ -478,7 +492,12 @@ pub fn build(
         .count();
     for (&i, file) in staged.iter().zip(compiled) {
         if file.object.is_none() {
-            sources[i].error = Some(failure_text(&file));
+            let text = failure_text(&file);
+            sources[i].error = Some(if is_asm(&sources[i].name) {
+                with_assembler_errors(&text)
+            } else {
+                text
+            });
         }
         sources[i].compiled = Some(file);
     }
@@ -543,7 +562,14 @@ pub fn build(
                 .any(|s| s.kind == decovery_objects::SectionKind::Data && !s.data.is_empty())
         })
         .collect();
+    let asm_objects: Vec<(usize, &ObjectFile)> = objects
+        .iter()
+        .filter(|(i, _)| is_asm(&sources[*i].name))
+        .map(|(i, object)| (*i, object))
+        .collect();
+    let leading: Vec<(usize, Value)>;
     let comparisons: Vec<Comparison> = if placements.is_empty() {
+        leading = leading_blocks(&asm_objects, &placements, None);
         // no function to compare, but a data-only object is still reported
         if !data_modules.is_empty() {
             let program = crate::program::load(&ws)?;
@@ -560,6 +586,7 @@ pub fn build(
         Vec::new()
     } else {
         let program = crate::program::load(&ws)?;
+        leading = leading_blocks(&asm_objects, &placements, Some(&program));
         main_data = main_program_data(
             &ws,
             &profile,
@@ -613,6 +640,7 @@ pub fn build(
         compared
     };
     drop(placements);
+    drop(asm_objects);
 
     // whole overlay modules (Aztec C86): the objects whose functions lie in one overlay, in source order
     let (modules, wrong_fields) = if profile.object_format == ObjectFormat::Aztec {
@@ -813,6 +841,7 @@ pub fn build(
     .map(|mut response| {
         add_modules(&mut response, modules, &functions, &relative_targets);
         add_main_data(&mut response, main_data);
+        add_leading(&mut response, leading);
         response
     })
 }
@@ -965,6 +994,124 @@ fn add_main_data(response: &mut Response, report: Option<MainDataReport>) {
             response.summary.push_str(&format!(" ({m}: {f})"));
         }
     }
+}
+
+/// The bytes before the first public label of each assembler object (ADR 0015): code-segment data that belongs
+/// to no function, compared as one block against the original with its relocated fields as link gaps. The block
+/// is placed by the first placed public function of its section (its address minus its offset); without one, or
+/// without the original's bytes there, it is unchecked with the reason. One entry per object with such bytes
+/// (source index, JSON with `bytes`, `state` equal|differs|unchecked, `address`, `differing`, `reason`).
+fn leading_blocks(
+    objects: &[(usize, &ObjectFile)],
+    placements: &[Placement<'_>],
+    program: Option<&Program>,
+) -> Vec<(usize, Value)> {
+    let mut out = Vec::new();
+    for &(source, object) in objects {
+        for module in &object.modules {
+            for (si, section) in module.sections.iter().enumerate() {
+                if section.kind != decovery_objects::SectionKind::Code || section.data.is_empty() {
+                    continue;
+                }
+                let Some(first) = module
+                    .symbols
+                    .iter()
+                    .filter(|s| s.public && s.section as usize == si)
+                    .map(|s| s.offset)
+                    .min()
+                    .filter(|&o| o > 0)
+                else {
+                    continue;
+                };
+                let block = FunctionView {
+                    name: "",
+                    module,
+                    section: si as u32,
+                    start: 0,
+                    len: first.min(u32::try_from(section.data.len()).unwrap_or(u32::MAX)),
+                };
+                let mut v = json!({ "bytes": block.len });
+                let anchor = placements
+                    .iter()
+                    .filter(|p| {
+                        std::ptr::eq(p.function.module, module) && p.function.section as usize == si
+                    })
+                    .min_by_key(|p| p.function.start);
+                let at = anchor.and_then(|p| p.at.offset_by(-i64::from(p.function.start)).ok());
+                let reason = match (anchor, at, program) {
+                    (None, _, _) => Some("no public function of the object is placed".to_string()),
+                    (Some(p), None, _) => Some(format!(
+                        "{} lies {} bytes into the object, before its address space",
+                        p.at, p.function.start
+                    )),
+                    (_, _, None) => Some("the original is not loaded".to_string()),
+                    (Some(_), Some(at), Some(program)) => {
+                        v["address"] = json!(at.to_string());
+                        match program.read(at, block.len as usize) {
+                            None => {
+                                Some(format!("the original has no {} bytes at {at}", block.len))
+                            }
+                            Some(image) => {
+                                let c = decovery_diff::compare_with_gaps(&block, image, at);
+                                v["differing"] = json!(c.metrics.differing);
+                                v["gaps"] = json!(c.metrics.gaps);
+                                match c.verdict {
+                                    Verdict::Identical => v["state"] = json!("equal"),
+                                    Verdict::Differs => {
+                                        v["state"] = json!("differs");
+                                        if let Some(k) = c.metrics.first_difference {
+                                            v["first_difference"] =
+                                                json!(at.offset_by(i64::from(k)).map_or_else(
+                                                    |_| String::new(),
+                                                    |a| a.to_string()
+                                                ));
+                                        }
+                                    }
+                                    _ => {
+                                        v["state"] = json!("unchecked");
+                                        v["reason"] = json!("the original is unavailable");
+                                    }
+                                }
+                                None
+                            }
+                        }
+                    }
+                };
+                if let Some(reason) = reason {
+                    v["state"] = json!("unchecked");
+                    v["reason"] = json!(reason);
+                }
+                out.push((source, v));
+            }
+        }
+    }
+    out
+}
+
+/// Adds the leading blocks of [`leading_blocks`] to a build response: `leading` on the file, a note per file in the
+/// summary, and `counts.leading_differs` (a differing block fails the build like a differing function).
+fn add_leading(response: &mut Response, leading: Vec<(usize, Value)>) {
+    let mut differs = 0usize;
+    for (source, v) in leading {
+        let state = v["state"].as_str().unwrap_or("unchecked").to_string();
+        if state == "differs" {
+            differs += 1;
+        }
+        let Some(file) = response.data["files"].get_mut(source) else {
+            continue;
+        };
+        let name = file["file"].as_str().unwrap_or("").to_string();
+        let mut note = format!(
+            "; {name}: {} bytes before the first public label: {state}",
+            v["bytes"]
+        );
+        if let Some(reason) = v["reason"].as_str() {
+            note.push_str(&format!(" ({reason})"));
+        }
+        response.summary.push_str(&note);
+        file["leading"] = v;
+    }
+    response.data["counts"]["leading_differs"] = json!(differs);
 }
 
 /// Compares one placed function of an Aztec object with the image, its relocated fields as link gaps (no linker
@@ -1600,8 +1747,14 @@ pub(super) fn place_objects<'o>(
     for &(id, source, object) in objects {
         let overlay = object_overlay(knowledge, profile, object);
         let first = placed.len();
+        // an assembler source's functions run from public label to public label (ADR 0015)
+        let split = if is_asm(source) {
+            public_functions
+        } else {
+            functions
+        };
         for module in &object.modules {
-            for view in functions(module).into_iter().filter(|f| is_public(f)) {
+            for view in split(module).into_iter().filter(|f| is_public(f)) {
                 let raw = view.name;
                 let found = overlay
                     .and_then(|o| place_in_overlay(knowledge, profile, raw, o))
@@ -1889,6 +2042,27 @@ pub(super) fn runner_names(ws: &Workspace, profile: &Profile) -> Vec<String> {
     match ws.config.rebuild.as_ref() {
         Some(r) if !r.runners.is_empty() => r.runners.clone(),
         _ => profile.runners.clone(),
+    }
+}
+
+/// An assembler failure with the assembler's error lines (`ERROR:<file>:<line>: <text>`, Aztec C86 AS) put in front
+/// in decovery's form, `line <line>: <text>` (as the built-in assembler words them); the assembler's own output
+/// follows. Text without such lines is returned as it is.
+pub(super) fn with_assembler_errors(text: &str) -> String {
+    let errors: Vec<String> = text
+        .lines()
+        .filter_map(|line| {
+            let rest = line.trim().strip_prefix("ERROR:")?;
+            let (_, rest) = rest.split_once(':')?;
+            let (number, message) = rest.split_once(':')?;
+            let number: usize = number.trim().parse().ok()?;
+            Some(format!("line {number}: {}", message.trim()))
+        })
+        .collect();
+    if errors.is_empty() {
+        text.to_string()
+    } else {
+        format!("{}\n{text}", errors.join("\n"))
     }
 }
 

@@ -545,7 +545,11 @@ mod tests {
             let p = profile(id).unwrap();
             assert_eq!((p.family.as_str(), p.bits), ("aztec-c86", 16), "{id}");
             assert_eq!(p.object_format, ObjectFormat::Aztec);
-            assert!(p.linker.is_none() && p.assembler.is_none(), "{id}");
+            assert!(p.linker.is_none(), "{id}");
+            // only 4.2b's AS invocation is verified on the real tool
+            let assembler = assembler_profile(&p).unwrap().map(|a| a.command);
+            let expected = (id == "aztec-c86-4.2b").then(|| "AS {input}".to_string());
+            assert_eq!(assembler, expected, "{id}");
             assert!(p.prologue.is_empty());
             assert_eq!(p.fingerprint, ["BIN/CC.EXE"]);
             assert_eq!(p.runners, ["unicorn-dos", "dosbox-lab"]);

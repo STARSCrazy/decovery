@@ -247,10 +247,10 @@ pub(super) fn function_pairs(
 ) -> Vec<Pair> {
     let patched = (profile.object_format == ObjectFormat::Aztec)
         .then(|| with_original_fields(view, start, program, knowledge));
-    let patched_view = patched.as_ref().and_then(|module| {
-        functions(module)
-            .into_iter()
-            .find(|f| f.section == view.section && f.start == view.start)
+    // the same extent over the patched module (an assembler function spans its local labels)
+    let patched_view = patched.as_ref().map(|module| FunctionView {
+        module,
+        ..view.clone()
     });
     instruction_pairs(
         patched_view.as_ref().unwrap_or(view),

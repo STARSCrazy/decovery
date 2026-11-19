@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use decovery_core::RelocKind;
 
-use crate::model::{ObjReloc, ObjectModule, RefTarget, SectionKind};
+use crate::model::{ObjReloc, ObjSymbol, ObjectModule, RefTarget, SectionKind};
 
 /// A function-sized slice of a code section: from a symbol to the next symbol offset (or the section end).
 #[derive(Debug, Clone)]
@@ -21,6 +21,17 @@ pub struct FunctionView<'a> {
 /// All functions of a module: sections in order, within a section by (offset, name). Sections without
 /// initialised bytes yield none. Symbols at the same offset share the same extent.
 pub fn functions(module: &ObjectModule) -> Vec<FunctionView<'_>> {
+    split(module, |_| true)
+}
+
+/// The functions of an assembler module (ADR 0015): only public symbols start a function, so a function runs from
+/// a public label to the next public label (or the section end). Non-public labels (local jump targets, which the
+/// Aztec assembler writes as named symbols) and data in the code section between them stay inside the function.
+pub fn public_functions(module: &ObjectModule) -> Vec<FunctionView<'_>> {
+    split(module, |s| s.public)
+}
+
+fn split(module: &ObjectModule, starts_function: fn(&ObjSymbol) -> bool) -> Vec<FunctionView<'_>> {
     let mut out = Vec::new();
     for (si, section) in module.sections.iter().enumerate() {
         if section.kind != SectionKind::Code || section.data.is_empty() {
@@ -29,7 +40,7 @@ pub fn functions(module: &ObjectModule) -> Vec<FunctionView<'_>> {
         let mut starts: Vec<(u32, &str)> = module
             .symbols
             .iter()
-            .filter(|s| s.section as usize == si)
+            .filter(|s| s.section as usize == si && starts_function(s))
             .map(|s| (s.offset, s.name.as_str()))
             .collect();
         starts.sort_unstable();

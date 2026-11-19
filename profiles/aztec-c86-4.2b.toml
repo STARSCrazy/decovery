@@ -33,3 +33,8 @@ data = "{name}_"
 # option search: one choice from each set
 [search]
 flag_sets = [["", "+b"], ["+h", "-z"]]
+
+# AS (Aztec 8086 Assembler 4.10d) writes X.O next to X.ASM in CC's object format; it takes no switches here (CC's
+# -I only finds lmacros.h). Errors read `ERROR:X.ASM:<line>: <text>`, exit code 4 without input.
+[assembler]
+command = "AS {input}"

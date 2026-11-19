@@ -17,6 +17,9 @@ copied into the C mount as the program `NB.LNK` names (exit 0); without it the j
 
 With FAKE_OBJ_EXT set (`O` for Aztec C86), the served object is written as `X.<ext>` instead of `X.OBJ`.
 
+With FAKE_AS_ERROR=<line>:<text> a job for an `.ASM` source prints `ERROR:<X.ASM>:<line>: <text>` (the Aztec C86
+assembler's error form) and exits 4 without an object.
+
 With FAKE_OMF_BLOCK=1 a call appends its job count to `block.log` and waits (up to 60 s) for `$/cancel`; when
 cancelled it appends `cancelled` to `cancel.log` and answers -32002.
 
@@ -97,6 +100,9 @@ def run_job(job, c_root):
     staged = os.path.join(c_root, cd or "", source)
     if os.path.isfile(staged):
         shutil.copyfile(staged, os.path.join(copy_dir, source))
+    if os.environ.get("FAKE_AS_ERROR") and source.upper().endswith(".ASM"):
+        line, text = os.environ["FAKE_AS_ERROR"].split(":", 1)
+        return {"status": "done", "exit_code": 4, "stdout": f"ERROR:{source}:{line}: {text}\r\n"}
     # a job in a directory (a variant) is served the object named like the directory: V001.OBJ
     obj = os.path.join(OBJECTS, (cd or stem) + ".OBJ")
     if os.environ.get("FAKE_OMF_REQUIRED_TEXT") and os.path.isfile(staged):
