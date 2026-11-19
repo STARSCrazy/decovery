@@ -831,6 +831,9 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(
             apply_mod.signature_for_ghidra("struct foo *__watcall g(void)"), ("foo * g(void)", "__watcall")
         )
+        self.assertEqual(apply_mod.signature_for_ghidra("unsigned long read_rec(int r)", "read_record"),
+                         ("unsigned long read_record(int r)", None))
+        self.assertEqual(apply_mod.signature_for_ghidra("char *f(void)", "g"), ("char * g(void)", None))
 
     def test_clean_c_and_declarations(self):
         text = "#include <x.h>\n/* c */ typedef int far score; // trailing\nstruct s { int a; /* +0x0 */ };\n"
