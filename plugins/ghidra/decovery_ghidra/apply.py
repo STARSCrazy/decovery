@@ -402,7 +402,9 @@ class GhidraApplier:
                     continue
                 s = active.get(a)
                 default = mapping.default_name(a)
-                if not (s and s.name) and str(f.getName()) != default:
+                library = f.getSymbol().getSource() == SourceType.ANALYSIS and any(
+                    str(t.getName()) == "LIBRARY" for t in f.getTags())  # named by its bytes (aztec.py)
+                if not (s and s.name) and str(f.getName()) != default and not library:
                     try:
                         f.setName(default, SourceType.ANALYSIS)
                     except Exception as exc:

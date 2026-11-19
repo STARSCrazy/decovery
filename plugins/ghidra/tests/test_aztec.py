@@ -96,6 +96,10 @@ class AztecTests(unittest.TestCase):
         other = ["/* WARNING: Function: f replaced with injection: alloca_probe */"]
         self.assertEqual(aztec.expected_warnings(other, set()), set())
 
+    def test_finds_swapmem(self):
+        image = bytes(0x20) + aztec.SWAPMEM + bytes(4)
+        self.assertEqual(aztec.find_helpers(image, 0x100), [aztec.Helper(0x120, "library", "swapmem")])
+
     def test_finds_long_helpers(self):
         image = bytearray(b"\x90" * 0x300)
         image[0x100:0x100 + len(LONG_DIVIDE)] = LONG_DIVIDE

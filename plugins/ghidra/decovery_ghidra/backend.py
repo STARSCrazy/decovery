@@ -448,8 +448,14 @@ class GhidraBackend(Backend):
             function = functions.getFunctionAt(address)
             if function is None:
                 continue
-            roles.add(address, found.role)
             function.addTag(LIBRARY_TAG)
+            if found.kind == "library":  # knowledge applied later may rename it
+                try:
+                    function.setName(found.role, SourceType.ANALYSIS)
+                except Exception:  # noqa: BLE001 - a name already taken keeps Ghidra's
+                    pass
+                continue
+            roles.add(address, found.role)
             if found.kind == "long":
                 self._long_signature(program, function)
             else:

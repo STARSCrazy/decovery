@@ -369,6 +369,8 @@ class LocalGhidraTests(unittest.TestCase):
         unreachable `ret` after an endless loop belongs to its function."""
         from test_aztec import CSAV, LONG_DIVIDE, near_call
 
+        from decovery_ghidra import aztec
+
         image = bytearray(b"\xcc" * 0x400)
         image[0x000:0x003] = b"\xb8\x00\x00"  # mov ax,0
         image[0x003:0x006] = near_call(0x003, 0x100)  # call $csav
@@ -386,6 +388,7 @@ class LocalGhidraTests(unittest.TestCase):
         image[0x221:0x223] = b"\x5f\xc3"  # pop di; ret
         image[0x280:0x283] = b"\x33\xdb\xc3"  # unsigned divider (stand-in): xor bx,bx; ret
         image[0x310] = 0xC3
+        image[0x340:0x340 + len(aztec.SWAPMEM)] = aztec.SWAPMEM
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             program = {
@@ -414,6 +417,8 @@ class LocalGhidraTests(unittest.TestCase):
             data = json.loads(out_path.read_text(encoding="utf-8"))
             ends = {f["start"]: f["end"] for f in data["functions"]}
             self.assertEqual(ends.get("seg:1000:0020"), "seg:1000:002B")
+            names = {f["start"]: f["name"] for f in data["functions"]}
+            self.assertEqual(names.get("seg:1000:0340"), "swapmem", names)
             caller, helper, csav = (Path(r["path"]).read_text(encoding="utf-8") for r in by_id(out, 5)["result"])
             self.assertIn("ratio(int a,int b)", caller)
             self.assertNotIn("replaced with injection", caller)

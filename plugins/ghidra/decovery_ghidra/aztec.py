@@ -222,8 +222,14 @@ UNSIGNED_REMAINDER = bytes.fromhex("E8 05 00 8B C1 8B D3 C3")
 @dataclass(frozen=True)
 class Helper:
     offset: int  # segment offset of the entry
-    kind: str  # "csav" | "switch" | "long"
-    role: str  # what it does, for the comment in place of its pseudo-C
+    kind: str  # "csav" | "switch" | "long" | "library" (an ordinary C.LIB function: named, tagged, decompiled)
+    role: str  # what it does, for the comment in place of its pseudo-C; for "library" its name
+
+
+# swapmem(a, b, n): push bp; mov bp,sp; push si; push di; mov di,ds; mov es,di; si=[bp+4]; di=[bp+6]; cx=[bp+8];
+# jcxz; cmp di,si; je; loop: mov al,es:[di]; xchg [si],al; stosb; inc si; loop; pop di; pop si; pop bp; ret
+SWAPMEM = bytes.fromhex("55 8B EC 56 57 8C DF 8E C7 8B 76 04 8B 7E 06 8B 4E 08 E3 0D 3B FE 74 09 26 8A 05 86 04 AA 46"
+                        " E2 F7 5F 5E 5D C3")
 
 
 def _call_target(data: bytes, base: int, at: int) -> int:
@@ -250,6 +256,7 @@ def find_helpers(data: bytes, base: int) -> list[Helper]:
         if base <= divider < base + len(data):
             found.append(Helper(divider, "long", "unsigned long division, DX:AX by BX:CX into DX:AX "
                                                  "(remainder in BX:CX)"))
+    found += [Helper(base + at, "library", "swapmem") for at in _find_all(data, SWAPMEM)]
     return sorted(set(found), key=lambda h: h.offset)
 
 
