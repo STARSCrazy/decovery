@@ -6,6 +6,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `build` and `diagnose` say when a source file defines its functions in another order than the original
+  (`a.c: the functions are not in the original's address order: f (…) comes after g (…)`): the cause of shifted
+  references that otherwise read as `wrong-relative-ref` or "no known cause". `diagnose` gives it as `order`.
 - `diagnose` shows each wrong reference `build` found with its instruction and what the field leads to against what the
   rebuild gives (`wrong-absolute-ref at +0x7: mov ax,[91B8h]; word_91b8: original 91B8, rebuilt 91AA`); the build
   record keeps that text as the blocker's `detail`, the module verdict's blockers carry it too.

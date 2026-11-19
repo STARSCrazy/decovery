@@ -297,3 +297,29 @@ at = 7
         r.summary
     );
 }
+
+#[test]
+fn functions_out_of_address_order_are_named_by_diagnose() {
+    // the knowledge places pre_ behind g: the file defines them in another order than the original
+    let dir = workspace(false);
+    add_overlay_c(dir.path());
+    let path = dir.path().join("knowledge/symbols.toml");
+    let mut symbols = std::fs::read_to_string(&path).unwrap();
+    symbols.push_str(
+        "[[symbol]]
+address = \"ovl:C:0000:500E\"
+kind = \"function\"
+name = \"pre\"
+size = 1
+source = \"human\"
+confidence = \"confirmed\"
+
+",
+    );
+    std::fs::write(&path, symbols).unwrap();
+    let session = Session::open(dir.path()).unwrap();
+    let r = decovery_facade::diagnose(&session, "ovl:C:0000:5004", Budget::default()).unwrap();
+    let hint = r.data["order"].as_str().unwrap_or_default();
+    assert!(hint.contains("g (ovl:C:0000:5004) comes after pre"), "{}", r.data);
+    assert!(r.summary.contains(hint), "{}", r.summary);
+}
