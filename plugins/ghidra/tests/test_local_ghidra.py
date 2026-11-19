@@ -232,7 +232,14 @@ class LocalGhidraTests(unittest.TestCase):
                                          "program_hash": "d" * 64}),
                 req(3, "analyzer/export", {"out_path": str(out_path)}),
                 req(4, "decompiler/decompile", {"addresses": ["ovl:OVA:0000:0100"], "out_dir": str(root / "c")}),
-                req(5, "shutdown"),
+                req(5, "analyzer/apply", {"symbols": [
+                    {"address": "seg:0050:0300", "kind": "global", "name": "word_0300", "locals": [],
+                     "line_comments": []},
+                    {"address": "ovl:OVA:0050:0020", "kind": "global", "name": "ova_word", "locals": [],
+                     "line_comments": []},
+                ], "types_h": "", "references": []}),
+                req(6, "decompiler/decompile", {"addresses": ["ovl:OVA:0000:0100"], "out_dir": str(root / "c2")}),
+                req(7, "shutdown"),
             )
             data = json.loads(out_path.read_text(encoding="utf-8"))
             self.assertIn({"function": "ovl:OVA:0000:0100", "address": "ovl:OVA:0050:0020", "kind": "read"},
@@ -242,6 +249,10 @@ class LocalGhidraTests(unittest.TestCase):
             code = Path(decompiled["path"]).read_text(encoding="utf-8")
             self.assertIn("DAT_OVA_0050_0020", code)
             self.assertIn("DAT_0050_0300", code)  # outside the overlay's data: the main program's DS
+            self.assertIn("result", by_id(out, 5), by_id(out, 5))
+            named = Path(by_id(out, 6)["result"][0]["path"]).read_text(encoding="utf-8")
+            self.assertIn("word_0300", named)
+            self.assertIn("ova_word", named)
 
     def test_aztec_csav_frame_and_inline_switch_table(self):
         """`mov ax,-4; call $csav` gives BP; `mov cx,3; call $swt` with an inline table becomes a switch."""
