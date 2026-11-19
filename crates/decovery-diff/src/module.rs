@@ -45,6 +45,9 @@ pub struct ModuleVerdict {
     /// References whose binding disagrees with an earlier use of the same external name.
     pub ambiguous: Vec<String>,
     pub identical: bool,
+    /// Plain-language findings for a module that is not identical, most telling first: a code size that differs
+    /// from the original (a partial module, or a shift whose later differences are likely consequences).
+    pub findings: Vec<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -166,6 +169,8 @@ pub fn compare_overlay_module(objects: &[&ObjectFile], overlay: &Overlay) -> Mod
     let mut ambiguous = Vec::new();
     let mut gaps_code = BTreeSet::new();
     let mut gaps_data = BTreeSet::new();
+    // every relocated code field: judged as a reference, never as differing bytes
+    let mut fields_code = BTreeSet::new();
     for (mi, m) in modules.iter().enumerate() {
         for (si, s) in m.sections.iter().enumerate() {
             let Some(Some((Some(part), base))) = bases[mi].get(si).copied() else {
@@ -193,6 +198,9 @@ pub fn compare_overlay_module(objects: &[&ObjectFile], overlay: &Overlay) -> Mod
                     }
                     gaps.extend(at..at + width);
                 };
+                if part == Part::Code {
+                    fields_code.extend(at..at + width);
+                }
                 let gaps = match part {
                     Part::Code => &mut gaps_code,
                     Part::Data => &mut gaps_data,
@@ -303,6 +311,7 @@ pub fn compare_overlay_module(objects: &[&ObjectFile], overlay: &Overlay) -> Mod
     for (k, &b) in code.iter().enumerate() {
         match overlay.code.get(k) {
             _ if gaps_code.contains(&k) => {}
+            _ if fields_code.contains(&k) => metrics.equal += 1,
             Some(&o) if o == b => metrics.equal += 1,
             _ => {
                 metrics.differing += 1;
@@ -311,6 +320,9 @@ pub fn compare_overlay_module(objects: &[&ObjectFile], overlay: &Overlay) -> Mod
         }
     }
     if metrics.differing > 0 {
+        let compared = code.len().min(overlay.code.len());
+        metrics.instructions_differing =
+            crate::gaps::differing_instructions(&code[..compared], &overlay.code[..compared], 16);
         blockers.insert(
             0,
             Blocker::BytesDiffer {
@@ -340,6 +352,7 @@ pub fn compare_overlay_module(objects: &[&ObjectFile], overlay: &Overlay) -> Mod
     let data_equal = data_diffs.is_empty();
     let bss = (h.bss, u16::try_from(bss).unwrap_or(u16::MAX));
     let identical = code_ok && data_equal && bss.0 == bss.1 && ambiguous.is_empty();
+    let findings = size_findings(code_size, comparison.metrics.first_difference);
     ModuleVerdict {
         code: comparison,
         code_size,
@@ -353,5 +366,31 @@ pub fn compare_overlay_module(objects: &[&ObjectFile], overlay: &Overlay) -> Mod
         externals,
         ambiguous,
         identical,
+        findings,
     }
+}
+
+/// Findings from the code size (original, rebuilt) and the first real byte difference.
+fn size_findings((original, rebuilt): (u32, u32), first_difference: Option<u32>) -> Vec<String> {
+    let mut out = Vec::new();
+    if original == rebuilt {
+        return out;
+    }
+    let by = original.abs_diff(rebuilt);
+    let unit = if by == 1 { "byte" } else { "bytes" };
+    if rebuilt < original {
+        out.push(format!(
+            "module covers only 0x0000..0x{rebuilt:04X} of 0x0000..0x{original:04X}              (code {by} {unit} shorter: rebuilt {rebuilt}, original {original}); a partial module, or code missing"
+        ));
+    } else {
+        out.push(format!(
+            "module code is {by} {unit} longer than the original (rebuilt {rebuilt}, original {original})"
+        ));
+    }
+    if let Some(x) = first_difference {
+        out.push(format!(
+            "first real difference at offset 0x{x:04X}; differences after offset 0x{x:04X} are likely consequences              of the size change"
+        ));
+    }
+    out
 }

@@ -78,6 +78,15 @@ pub fn compare_with_gaps(object: &FunctionView, image: &[u8], image_base: Addres
         }
     }
     if metrics.differing > 0 {
+        // gap bytes taken from the image: only real differences change an instruction
+        let mut filled = code.to_vec();
+        for &k in gaps.iter() {
+            if let (Some(b), Some(&o)) = (filled.get_mut(k as usize), image.get(k as usize)) {
+                *b = o;
+            }
+        }
+        metrics.instructions_differing =
+            differing_instructions(&filled, &image[..code.len()], bits.min(32));
         blockers.push(Blocker::BytesDiffer {
             count: metrics.differing,
         });
@@ -124,4 +133,27 @@ pub fn compare_with_gaps(object: &FunctionView, image: &[u8], image_base: Addres
         metrics,
         diagnoses: Vec::new(),
     }
+}
+
+/// Number of differing instructions between `rebuilt` and `original` after aligning the two decoded streams: the
+/// size of the larger side of every non-equal run. Near branches compare by mnemonic only (their targets move
+/// with any shift); everything else by its text.
+pub(crate) fn differing_instructions(rebuilt: &[u8], original: &[u8], bits: u32) -> u32 {
+    let key = |i: decovery_x86::Instruction| match i.near_branch {
+        Some(_) => i.text.split_whitespace().next().unwrap_or("").to_string(),
+        None => i.text,
+    };
+    let a: Vec<String> = decovery_x86::decode(rebuilt, bits, 0)
+        .into_iter()
+        .map(key)
+        .collect();
+    let b: Vec<String> = decovery_x86::decode(original, bits, 0)
+        .into_iter()
+        .map(key)
+        .collect();
+    crate::sequence::opcodes(&a, &b)
+        .into_iter()
+        .filter(|op| op.0 != crate::sequence::Op::Equal)
+        .map(|(_, i1, i2, j1, j2)| u32::try_from((i2 - i1).max(j2 - j1)).unwrap_or(u32::MAX))
+        .fold(0u32, u32::saturating_add)
 }

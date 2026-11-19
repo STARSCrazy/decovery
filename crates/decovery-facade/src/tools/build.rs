@@ -779,6 +779,11 @@ fn add_modules(response: &mut Response, modules: Vec<Value>) {
         "; overlay modules: {same} of {} identical",
         modules.len()
     ));
+    for m in &modules {
+        if let (Some(overlay), Some(first)) = (m["overlay"].as_str(), m["findings"][0].as_str()) {
+            response.summary.push_str(&format!(" ({overlay}: {first})"));
+        }
+    }
     response.data["modules"] = json!(modules);
 }
 
@@ -813,6 +818,7 @@ pub(super) fn overlay_modules(
                 "bytes": v.code_size.1,
                 "original_bytes": v.code_size.0,
                 "differing": m.differing,
+                "instructions_differing": m.instructions_differing,
                 "first_difference": m.first_difference,
                 "refs_ok": m.refs_ok,
                 "refs_wrong": m.refs_wrong,
@@ -832,6 +838,7 @@ pub(super) fn overlay_modules(
             "bss": { "original": v.bss.0, "rebuilt": v.bss.1 },
             "externals": v.externals.len(),
             "ambiguous": v.ambiguous,
+            "findings": v.findings,
         }));
     }
     out
@@ -1632,6 +1639,37 @@ size = 21
             assert_eq!(modules[0]["bss"]["original"], bss);
             assert_eq!(modules[0]["data"]["equal"], true);
         }
+    }
+
+    #[test]
+    fn partial_overlay_module_names_the_covered_range() {
+        // the rebuilt object covers 4 of the overlay's code bytes: the original is extended by two bytes
+        let dir = workspace(2);
+        let path = dir.path().join("A.OVR");
+        let mut file = std::fs::read(&path).unwrap();
+        // header words: magic, corg, csize, dorg, dsize, bss, entry; code follows the 14-byte header
+        let csize = u16::from_le_bytes([file[4], file[5]]);
+        let entry = u16::from_le_bytes([file[12], file[13]]);
+        file[4..6].copy_from_slice(&(csize + 2).to_le_bytes());
+        file[12..14].copy_from_slice(&(entry + 2).to_le_bytes());
+        file.splice(14 + 4..14 + 4, [0x90, 0x90]);
+        std::fs::write(&path, file).unwrap();
+        let ws = Workspace::open(dir.path()).unwrap();
+        let object = object();
+        let mut warnings = Vec::new();
+        let modules = overlay_modules(
+            &ws,
+            &[(OverlayName::new("A").unwrap(), &object)],
+            &mut warnings,
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let first = modules[0]["findings"][0].as_str().unwrap_or_default();
+        assert!(
+            first.contains("covers only 0x0000..0x0004 of 0x0000..0x0006"),
+            "{}",
+            modules[0]
+        );
+        assert_eq!(modules[0]["code"]["instructions_differing"], 0);
     }
 
     #[test]

@@ -43,6 +43,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
   identical with WLINK 10.6 in DOSBox (`dosbox-lab`).
 
 ### Fixed
+- Overlay module comparison: relocated code fields are judged only as references, so `first_difference` is the first
+  real byte difference; `instructions_differing` is computed for modules and link-gap comparisons (it stayed 0); a
+  new `findings` list names a code size that differs from the original (a partial module with its covered range, or
+  a longer module whose later differences are likely consequences), and the build summary shows the first one.
 - `diagnose` and `compare --function` on overlay functions: the original bytes are read from the overlay, `compare`
   finds overlay functions by address, knowledge name or default name (Aztec objects compared as `build` does), an
   exact name wins over overlay-qualified ones and an ambiguous name lists its candidates; `diagnose --deep` refuses

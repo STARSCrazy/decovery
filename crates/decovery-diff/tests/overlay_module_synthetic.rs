@@ -190,3 +190,38 @@ fn code_that_does_not_end_at_the_entry_is_not_identical() {
     assert!(!v.identical);
     assert_eq!(v.code.verdict, Verdict::Differs);
 }
+
+#[test]
+fn partial_module_names_the_covered_range() {
+    let ovl = read_overlay(&overlay(6), "T").expect("overlay");
+    let v = compare_overlay_module(&[&object(&a())], &ovl);
+    assert!(
+        v.findings
+            .iter()
+            .any(|f| f.contains("module covers only 0x0000..0x000A of 0x0000..0x000E")),
+        "{:?}",
+        v.findings
+    );
+}
+
+#[test]
+fn shifted_code_reports_size_and_first_real_difference() {
+    // one extra `nop` before A's `ret`: the module is one byte longer, B and every reference behind it shift
+    let mut spec = a();
+    spec.code.insert(9, 0x90);
+    let ovl = read_overlay(&overlay(6), "T").expect("overlay");
+    let v = compare_overlay_module(&[&object(&spec), &object(&b())], &ovl);
+    assert!(!v.identical);
+    assert_eq!(v.code_size, (14, 15));
+    // the call field at 1 is a relocated field (wrong reference, not a byte difference)
+    assert_eq!(v.code.metrics.first_difference, Some(9), "{v:#?}");
+    assert!(v.code.metrics.instructions_differing > 0, "{v:#?}");
+    assert!(v.findings[0].contains("1 byte longer"), "{:?}", v.findings);
+    assert!(
+        v.findings
+            .iter()
+            .any(|f| f.contains("after offset 0x0009 are likely consequences")),
+        "{:?}",
+        v.findings
+    );
+}
