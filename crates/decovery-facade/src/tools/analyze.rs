@@ -100,7 +100,7 @@ pub fn analyze_with_user_plugins(
         ));
     }
     let workspace = Workspace::open(&root)?;
-    let config = plugin_config(&workspace, user, name).ok_or_else(|| no_config(name))?;
+    let config = plugin_config(&workspace, user, name).ok_or_else(|| no_config(name, &root))?;
     if config.command.is_empty() {
         return Err(FacadeError::Plugin(format!(
             "{name}: [plugins.{name}] command is empty"
@@ -797,12 +797,24 @@ fn stage(message: &str) -> Progress {
     Progress::new(0, None, Some(message.to_string()))
 }
 
-fn no_config(name: &str) -> FacadeError {
+/// No `[plugins.<name>]` entry with a command: says which files were searched (the workspace's `decovery.toml`, the
+/// user config) and what is missing. A Python path (`PYTHONPATH`) alone does not configure an analyzer.
+fn no_config(name: &str, root: &Path) -> FacadeError {
+    let user = decovery_core::user_config_path().map_or_else(
+        || "the user config (no APPDATA/HOME set)".to_string(),
+        |p| format!("the user config {}", p.display()),
+    );
+    let searched = format!(
+        "searched {} and {user} for [plugins.{name}] with a command; PYTHONPATH alone does not configure it",
+        root.join("decovery.toml").display()
+    );
     if name == "ghidra" {
-        FacadeError::Plugin(NO_ANALYZER.into())
+        FacadeError::Plugin(format!(
+            "{NO_ANALYZER} (or `decovery setup ghidra --ghidra-dir <dir> --jdk-dir <dir>` for existing installs); {searched}"
+        ))
     } else {
         FacadeError::Plugin(format!(
-            "no analyzer configured for plugin {name}; add [plugins.{name}] command = [...] to decovery.toml"
+            "no analyzer configured for plugin {name}; add [plugins.{name}] command = [...] to decovery.toml; {searched}"
         ))
     }
 }

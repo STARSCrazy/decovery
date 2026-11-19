@@ -416,6 +416,13 @@ enum SetupCommand {
         /// Pre-downloaded JDK archive (offline); its sha256 must match the pinned one.
         #[arg(long)]
         jdk_zip: Option<PathBuf>,
+        /// An existing Ghidra install to register instead of downloading one (the directory holding
+        /// `support/` and `ghidraRun`).
+        #[arg(long, value_name = "DIR", conflicts_with = "ghidra_zip")]
+        ghidra_dir: Option<PathBuf>,
+        /// An existing JDK (21 or newer) to register instead of downloading one (the directory holding `bin/`).
+        #[arg(long, value_name = "DIR", conflicts_with = "jdk_zip")]
+        jdk_dir: Option<PathBuf>,
         /// Directory with `decovery-plugin-sdk` and `ghidra`; default: `plugins/` of the repository.
         #[arg(long, value_name = "DIR")]
         plugins_dir: Option<PathBuf>,
@@ -1040,12 +1047,14 @@ fn run(cli: Cli) -> ExitCode {
                     extern_dir,
                     ghidra_zip,
                     jdk_zip,
+                    ghidra_dir,
+                    jdk_dir,
                     plugins_dir,
                 },
         } => finish(setup_ghidra(
             extern_dir,
-            ghidra_zip,
-            jdk_zip,
+            (ghidra_zip, jdk_zip),
+            (ghidra_dir, jdk_dir),
             plugins_dir,
             cli.json,
         )),
@@ -1319,8 +1328,8 @@ fn migrate_attempts(root: &Path, from: Option<&Path>, json: bool) -> Result<(), 
 
 fn setup_ghidra(
     extern_dir: Option<PathBuf>,
-    ghidra_zip: Option<PathBuf>,
-    jdk_zip: Option<PathBuf>,
+    (ghidra_zip, jdk_zip): (Option<PathBuf>, Option<PathBuf>),
+    (ghidra_dir, jdk_dir): (Option<PathBuf>, Option<PathBuf>),
     plugins_dir: Option<PathBuf>,
     json: bool,
 ) -> Result<(), FacadeError> {
@@ -1340,6 +1349,8 @@ fn setup_ghidra(
         extern_dir: absolute(extern_dir),
         ghidra_archive: ghidra_zip.map(absolute),
         jdk_archive: jdk_zip.map(absolute),
+        ghidra_dir: ghidra_dir.map(absolute),
+        jdk_dir: jdk_dir.map(absolute),
         plugins_dir: absolute(plugins_dir),
         python: std::env::var("DECOVERY_PYTHON")
             .ok()

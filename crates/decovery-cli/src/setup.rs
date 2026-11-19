@@ -169,6 +169,10 @@ pub struct SetupOptions {
     pub ghidra_archive: Option<PathBuf>,
     /// Pre-downloaded JDK archive (offline).
     pub jdk_archive: Option<PathBuf>,
+    /// An existing Ghidra install to register instead of downloading one (holds `support/` and `ghidraRun`).
+    pub ghidra_dir: Option<PathBuf>,
+    /// An existing JDK to register instead of downloading one (holds `bin/java`).
+    pub jdk_dir: Option<PathBuf>,
     /// Directory holding `decovery-plugin-sdk` and `ghidra`.
     pub plugins_dir: PathBuf,
     /// Python used to create the venv.
@@ -198,24 +202,30 @@ pub fn run_setup(
     std::fs::create_dir_all(extern_dir).map_err(|e| io_err("cannot create", extern_dir, e))?;
     let mut marker = read_marker(extern_dir);
 
-    let (ghidra_dir, ghidra_kept) = install_component(
-        "ghidra",
-        &pins.ghidra,
-        opts.ghidra_archive.as_deref(),
-        extern_dir,
-        &mut marker,
-        runner,
-        log,
-    )?;
-    let (jdk_dir, jdk_kept) = install_component(
-        "jdk",
-        &pins.jdk,
-        opts.jdk_archive.as_deref(),
-        extern_dir,
-        &mut marker,
-        runner,
-        log,
-    )?;
+    let (ghidra_dir, ghidra_kept) = match &opts.ghidra_dir {
+        Some(dir) => existing_install("ghidra", dir, &["support"], log)?,
+        None => install_component(
+            "ghidra",
+            &pins.ghidra,
+            opts.ghidra_archive.as_deref(),
+            extern_dir,
+            &mut marker,
+            runner,
+            log,
+        )?,
+    };
+    let (jdk_dir, jdk_kept) = match &opts.jdk_dir {
+        Some(dir) => existing_install("jdk", dir, &["bin/java", "bin/java.exe"], log)?,
+        None => install_component(
+            "jdk",
+            &pins.jdk,
+            opts.jdk_archive.as_deref(),
+            extern_dir,
+            &mut marker,
+            runner,
+            log,
+        )?,
+    };
 
     let venv = extern_dir.join("ghidra-venv");
     let venv_python = venv_python(&venv, opts.platform);
@@ -689,6 +699,25 @@ fn run(runner: &dyn Runner, program: &OsStr, args: &[OsString]) -> Result<(), Se
 }
 
 /// Download (or take the given archive), verify, unpack. Returns the install dir and whether it was kept.
+/// An install the user points at (`--ghidra-dir`, `--jdk-dir`): used as it is, nothing downloaded; it must hold
+/// one of `expect` (relative paths).
+fn existing_install(
+    key: &str,
+    dir: &Path,
+    expect: &[&str],
+    log: &mut dyn FnMut(&str),
+) -> Result<(PathBuf, bool), SetupError> {
+    if !expect.iter().any(|e| dir.join(e).exists()) {
+        return fail(format!(
+            "{} is no {key} install (it holds none of {})",
+            dir.display(),
+            expect.join(", ")
+        ));
+    }
+    log(&format!("step: using the existing {key} at {}", dir.display()));
+    Ok((dir.to_path_buf(), true))
+}
+
 fn install_component(
     key: &str,
     pin: &Pin,
@@ -1086,6 +1115,8 @@ mod tests {
             extern_dir: root.join("extern dir"),
             ghidra_archive: None,
             jdk_archive: None,
+            ghidra_dir: None,
+            jdk_dir: None,
             plugins_dir: plugins,
             python: "py".into(),
             config_path: root.join("cfg").join("config.toml"),
@@ -1140,6 +1171,34 @@ mod tests {
         assert!(text.contains(&sha256_hex(GHIDRA_BYTES)), "{text}");
         assert!(runner.calls.borrow().is_empty());
         assert!(!opts.config_path.exists());
+    }
+
+    #[test]
+    fn existing_installs_are_registered_without_download() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut opts = options(dir.path());
+        let ghidra = dir.path().join("ghidra_12");
+        let jdk = dir.path().join("jdk-21");
+        std::fs::create_dir_all(ghidra.join("support")).unwrap();
+        std::fs::create_dir_all(jdk.join("bin")).unwrap();
+        std::fs::write(jdk.join("bin").join("java"), "").unwrap();
+        opts.ghidra_dir = Some(ghidra.clone());
+        opts.jdk_dir = Some(jdk.clone());
+        let runner = FakeRunner::default();
+        let report = run_setup(&opts, &test_pins(), &runner, &mut |_| {}).unwrap();
+        assert_eq!(report.ghidra_dir, ghidra);
+        assert_eq!(report.jdk_dir, jdk);
+        let programs = runner.programs();
+        assert!(!programs.contains(&"curl".to_string()), "{programs:?}");
+        assert!(!programs.contains(&"tar".to_string()), "{programs:?}");
+        let config = std::fs::read_to_string(&opts.config_path).unwrap();
+        assert!(config.contains("GHIDRA_INSTALL_DIR"), "{config}");
+
+        // a directory that is no install is refused
+        opts.ghidra_dir = Some(dir.path().join("empty"));
+        std::fs::create_dir_all(dir.path().join("empty")).unwrap();
+        let err = run_setup(&opts, &test_pins(), &FakeRunner::default(), &mut |_| {}).unwrap_err();
+        assert!(err.to_string().contains("is no ghidra install"), "{err}");
     }
 
     #[test]

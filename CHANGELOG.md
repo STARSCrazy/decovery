@@ -6,6 +6,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `setup ghidra --ghidra-dir <dir> --jdk-dir <dir>` registers existing installs without downloading them (only the
+  pyghidra venv is created); the README shows a hand-written `[plugins.ghidra]` entry.
+- `analyze` without an analyzer entry names the files it searched (the workspace's `decovery.toml`, the user config
+  path) and what is missing (`[plugins.<name>]` with a `command`; `PYTHONPATH` alone does not configure it).
 - `show --asm` (MCP `show` with `asm`): the original's disassembly of the function after the pseudo-C (address, bytes,
   instruction, the known name of a branch target), decoded as `diagnose` does; in the data as `asm`.
 - The module verdict lists the commons its BSS layout places (`commons`: name, size, address, declaring files); when
