@@ -15,7 +15,9 @@ pub enum ToolchainError {
     ToolDirMissing { profile: String, path: PathBuf },
     #[error("the workspace has no [rebuild] compiler")]
     NoRebuildConfig,
-    #[error("{name}: source names must match [a-z0-9_-]{{1,8}}.(c|h|s|asm)")]
+    #[error(
+        "{name}: source names must match [a-z0-9_-]{{1,8}}.(c|h|s|asm): the DOS compilers take 8.3 names          (at most 8 characters before the extension); rename the file"
+    )]
     InvalidSourceName { name: String },
     #[error("{file}:{line}: character U+{ch:04X} does not exist in code page 437")]
     NotCp437 { file: String, line: u32, ch: u32 },

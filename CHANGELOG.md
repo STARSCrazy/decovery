@@ -74,6 +74,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
   `watcom-10.6` profile uses it, so its LE links carry the preload flag like the original. The first target now links
   identical with WLINK 10.6 in DOSBox (`dosbox-lab`).
 
+### Changed
+- The refusal of a source name longer than DOS 8.3 says why (the DOS compilers take at most eight characters before
+  the extension); README and ADR 0013 document the rule for split module files.
+
 ### Fixed
 - `diagnose` no longer marks an equal branch as differing in main-program functions: the rebuild is
   decoded at the original's address (both columns show the same targets), and a short branch whose target lies inside

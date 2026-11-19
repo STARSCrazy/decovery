@@ -26,7 +26,8 @@ files = ["npc.c", "npc_b.c"]   # link order
 
 - The key is singular, as `[[target.segment]]` and `[[overlay]]`: each table is one module. `overlay` names a
   configured `[[overlay]]`; `files` are source file names in `src/` (compared case-insensitively, as DOS does), in
-  link order.
+  link order. They are DOS 8.3 names like every source file (at most eight characters before the extension: the
+  Aztec compiler runs under DOS and gets the name as it is); the build refuses longer names with that reason.
 - The address ranges are not configured: they follow from the functions of each file. The build warns when the code
   of one file does not end where the first placed function of the next file begins (gap or overlap, with the byte
   count), and when a listed file has no object in the build.
