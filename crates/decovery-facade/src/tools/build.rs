@@ -570,7 +570,7 @@ pub fn build(
     drop(placements);
 
     // whole overlay modules (Aztec C86): the objects whose functions lie in one overlay, in source order
-    let modules = if profile.object_format == ObjectFormat::Aztec {
+    let (modules, wrong_fields) = if profile.object_format == ObjectFormat::Aztec {
         let mut of_source: BTreeMap<usize, OverlayName> = BTreeMap::new();
         for b in &placed {
             if let Some(name) = b.address.overlay() {
@@ -581,9 +581,9 @@ pub fn build(
             .iter()
             .filter_map(|(i, object)| of_source.get(i).map(|&name| (name, object)))
             .collect();
-        overlay_modules(&ws, &assigned, &mut warnings)
+        overlay_modules_with_fields(&ws, &assigned, &mut warnings)
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
     let functions: Vec<(Address, String)> = placed
         .iter()
@@ -620,6 +620,9 @@ pub fn build(
     for (built, comparison) in placed.iter().zip(&comparisons) {
         let source = &sources[built.source];
         let mut r = record(built, comparison, source, &date);
+        if profile.object_format == ObjectFormat::Aztec {
+            judge_fields(&mut r, built.address, comparison, &wrong_fields);
+        }
         // a code pragma or a finding outside any function blocks every function of the file
         let findings: Vec<&CheatFinding> = cheats[built.source]
             .iter()
@@ -902,12 +905,67 @@ fn add_modules(response: &mut Response, mut modules: Vec<Value>, functions: &[(A
     response.data["modules"] = json!(modules);
 }
 
+/// A relocated code field the overlay module comparison found wrong: its address and whether it is self-relative.
+type WrongField = (Address, bool);
+
+/// The function-level verdict of an Aztec function (link gaps) leaves its relocated fields unchecked: a field the
+/// module comparison found wrong makes an identical function differ (blocker, message), and an identical function
+/// whose fields no module comparison checked (outside an overlay) says so in its message.
+fn judge_fields(r: &mut RebuildRecord, start: Address, c: &Comparison, wrong: &[WrongField]) {
+    if r.result != RebuildResult::Identical {
+        return;
+    }
+    let inside: Vec<(u32, bool)> = wrong
+        .iter()
+        .filter_map(|&(at, relative)| {
+            let offset = u32::try_from(at.bytes_from(start)?).ok()?;
+            (offset < c.metrics.bytes).then_some((offset, relative))
+        })
+        .collect();
+    if !inside.is_empty() {
+        for &(at, relative) in &inside {
+            r.blockers.push(blocker_record(&if relative {
+                Blocker::WrongRelativeRef { at }
+            } else {
+                Blocker::WrongAbsoluteRef { at }
+            }));
+        }
+        r.refs_wrong += inside.len() as u32;
+        r.result = RebuildResult::Differs;
+        r.verdict = Some(VerdictId::Differs);
+        let n = inside.len();
+        r.message = Some(format!(
+            "{n} relocated field{} wrong in the overlay module comparison (first at +0x{:X}); see the module verdict",
+            if n == 1 { "" } else { "s" },
+            inside[0].0
+        ));
+    } else if start.overlay().is_none() && c.metrics.gaps > 0 {
+        let n = c.metrics.gaps;
+        r.message = Some(format!(
+            "{n} byte{} of relocated fields not checked at function level (no module comparison)",
+            if n == 1 { "" } else { "s" }
+        ));
+    }
+}
+
 /// Module verdicts of the overlays that `assigned` objects (in source order) belong to.
-pub(super) fn overlay_modules(
+#[cfg(test)]
+fn overlay_modules(
     ws: &Workspace,
     assigned: &[(OverlayName, &ObjectFile)],
     warnings: &mut Vec<String>,
 ) -> Vec<Value> {
+    overlay_modules_with_fields(ws, assigned, warnings).0
+}
+
+/// [`overlay_modules`] and the relocated code fields the module comparisons found wrong, of the modules whose
+/// code size equals the original's (after a size change the later fields are consequences of the shift).
+fn overlay_modules_with_fields(
+    ws: &Workspace,
+    assigned: &[(OverlayName, &ObjectFile)],
+    warnings: &mut Vec<String>,
+) -> (Vec<Value>, Vec<WrongField>) {
+    let mut wrong = Vec::new();
     let mut groups: BTreeMap<OverlayName, Vec<&ObjectFile>> = BTreeMap::new();
     for &(name, object) in assigned {
         groups.entry(name).or_default().push(object);
@@ -926,6 +984,23 @@ pub(super) fn overlay_modules(
         };
         let v = decovery_diff::compare_overlay_module(&objects, &overlay);
         let m = &v.code.metrics;
+        if v.code_size.0 == v.code_size.1 {
+            for b in &v.code.blockers {
+                let (at, relative) = match *b {
+                    Blocker::WrongRelativeRef { at } => (at, true),
+                    Blocker::WrongAbsoluteRef { at } => (at, false),
+                    _ => continue,
+                };
+                if let Ok(off) = u16::try_from(u32::from(overlay.header.corg) + at) {
+                    let address = Address::Ovl {
+                        overlay: name,
+                        seg: 0,
+                        off,
+                    };
+                    wrong.push((address, relative));
+                }
+            }
+        }
         // data whose every byte is a link gap was not compared: it is unchecked, not equal
         let data_state = if v.data_size.1 > 0 && v.data_gaps >= v.data_size.1 {
             "unchecked"
@@ -986,7 +1061,7 @@ pub(super) fn overlay_modules(
         }
         out.push(entry);
     }
-    out
+    (out, wrong)
 }
 
 /// `ambiguous` (the references whose binding disagrees) and `ambiguous_count`. After a size change nearly every

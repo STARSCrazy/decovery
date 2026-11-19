@@ -46,6 +46,11 @@ and the project uses [Semantic Versioning](https://semver.org/).
   identical with WLINK 10.6 in DOSBox (`dosbox-lab`).
 
 ### Fixed
+- `build` on Aztec C86 overlays: a function whose relocated field the overlay module comparison finds wrong (a
+  struct field at `+0x10` instead of `+0x14`) is no longer `identical` at function level; it differs with a
+  `wrong-absolute-ref`/`wrong-relative-ref` blocker at the field and a message pointing to the module verdict (when
+  the module's code size equals the original's). An identical Aztec function outside any overlay says how many bytes
+  of relocated fields were not checked.
 - `build --function <f> --function-source` on an Aztec C86 overlay function judges the variant like `build` (against
   the image, relocated fields as link gaps) instead of reporting "the original bytes … are not in the program"; the
   function may be given by its knowledge name (`VPCVW_ovmain`) when its rebuild record holds the C name. `find

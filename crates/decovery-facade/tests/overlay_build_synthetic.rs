@@ -154,3 +154,70 @@ fn comparison_of_a_differing_function_lists_its_differing_region() {
         "{text}"
     );
 }
+
+/// An overlay file with the module's code at 5000, then the entry (`ret`), and data at 9000.
+fn overlay_with_data(code: &[u8], data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let entry = 0x5000 + code.len() as u16;
+    let size = code.len() as u16 + 1;
+    for w in [0xF2u16, 0x5000, size, 0x9000, data.len() as u16, 0, entry] {
+        out.extend(w.to_le_bytes());
+    }
+    out.extend(code);
+    out.push(0xC3);
+    out.extend(data);
+    out
+}
+
+/// `amain_` = `mov ax, [field]; ret`, the field relocated against the data position `field` (the data is 4
+/// bytes; the field holds 0, as the assembler leaves it).
+fn loading_object(field: u16) -> Vec<u8> {
+    use decovery_objects::{AztecModuleSpec, AztecRefSpec, AztecSection, AztecSymbolSpec, AztecTarget};
+    decovery_objects::write_aztec(&AztecModuleSpec {
+        name: "M".into(),
+        code: vec![0xA1, 0, 0, 0xC3],
+        data: vec![0; 4],
+        named: vec![AztecSymbolSpec {
+            name: "amain_".into(),
+            section: AztecSection::Code,
+            value: 0,
+            public: true,
+        }],
+        refs: vec![AztecRefSpec {
+            section: AztecSection::Code,
+            offset: 1,
+            width: 2,
+            relative: false,
+            target: AztecTarget::Section(AztecSection::Data, field),
+            addend: 0,
+        }],
+        ..AztecModuleSpec::default()
+    })
+}
+
+#[test]
+fn wrong_relocated_field_found_by_the_module_makes_the_function_differ() {
+    let python = python_or_skip!();
+    let (ws, objects) = buildable(&python);
+    // the original loads the field at x + 4 (9004)
+    std::fs::write(
+        ws.path().join("A.OVR"),
+        overlay_with_data(&[0xA1, 0x04, 0x90, 0xC3], &[0; 8]),
+    )
+    .unwrap();
+    let mut request = BuildRequest::default();
+    request.files = vec!["a.c".into()];
+
+    std::fs::write(objects.path().join("A.OBJ"), loading_object(4)).unwrap();
+    let right = run(ws.path(), &request);
+    assert_eq!(right.data["functions"][0]["verdict"], "identical", "{}", right.data);
+
+    // the rebuild loads x + 0: the function's bytes outside the field are equal, the module finds the field
+    std::fs::write(objects.path().join("A.OBJ"), loading_object(0)).unwrap();
+    std::fs::write(ws.path().join("src/a.c"), "int amain()\n{\n    return 6;\n}\n").unwrap();
+    let wrong = run(ws.path(), &request);
+    let f = &wrong.data["functions"][0];
+    assert_eq!(f["verdict"], "differs", "{}", wrong.data);
+    assert_eq!(f["blockers"][0]["kind"], "wrong-absolute-ref", "{f}");
+    assert_eq!(f["blockers"][0]["at"], 1, "{f}");
+}
