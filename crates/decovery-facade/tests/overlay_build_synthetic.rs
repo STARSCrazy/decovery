@@ -241,6 +241,9 @@ fn wrong_relocated_field_found_by_the_module_makes_the_function_differ() {
     assert_eq!(f["verdict"], "differs", "{}", wrong.data);
     assert_eq!(f["blockers"][0]["kind"], "wrong-absolute-ref", "{f}");
     assert_eq!(f["blockers"][0]["at"], 1, "{f}");
+    // the record says what the field leads to and what the rebuild gives
+    let detail = f["blockers"][0]["detail"].as_str().unwrap_or_default();
+    assert!(detail.ends_with(": original 9004, rebuilt 9000"), "{f}");
 }
 
 #[test]

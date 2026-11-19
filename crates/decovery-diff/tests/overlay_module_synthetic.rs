@@ -181,6 +181,9 @@ fn wrong_internal_reference_is_reported() {
             .blockers
             .contains(&Blocker::WrongAbsoluteRef { at: 7 })
     );
+    let texts: Vec<String> = v.wrong_refs.iter().map(|w| w.text()).collect();
+    assert_eq!(texts, ["A DATA: original 2001, rebuilt 2000"], "{v:#?}");
+    assert_eq!(v.wrong_refs[0].place, 0x1007);
 }
 
 #[test]
@@ -380,6 +383,8 @@ fn disagreeing_extern_use_names_its_addend_and_field() {
     // the majority of the uses binds the name: the one disagreeing use is the wrong reference
     assert_eq!(v.code.blockers, [Blocker::WrongAbsoluteRef { at: 1 }]);
     assert_eq!(v.externals.get("tbl_"), Some(&0x84AA));
+    let texts: Vec<String> = v.wrong_refs.iter().map(|w| w.text()).collect();
+    assert_eq!(texts, ["tbl_-2: original 84AA, rebuilt 84A8"]);
 }
 
 #[test]

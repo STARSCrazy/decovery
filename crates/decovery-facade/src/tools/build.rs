@@ -1001,8 +1001,9 @@ fn wrong_relative_targets(p: &Placement<'_>, c: &Comparison) -> Vec<Address> {
         .collect()
 }
 
-/// A relocated code field the overlay module comparison found wrong: its address and whether it is self-relative.
-type WrongField = (Address, bool);
+/// A relocated code field the overlay module comparison found wrong: its address, whether it is self-relative and
+/// what the field leads to against what the rebuild gives (`symbol: original A, rebuilt B`).
+type WrongField = (Address, bool, Option<String>);
 
 /// The function-level verdict of an Aztec function (link gaps) leaves its relocated fields unchecked: a field the
 /// module comparison found wrong makes an identical function differ (blocker, message), and an identical function
@@ -1011,20 +1012,23 @@ fn judge_fields(r: &mut RebuildRecord, start: Address, c: &Comparison, wrong: &[
     if r.result != RebuildResult::Identical {
         return;
     }
-    let inside: Vec<(u32, bool)> = wrong
+    let inside: Vec<(u32, bool, Option<String>)> = wrong
         .iter()
-        .filter_map(|&(at, relative)| {
+        .filter_map(|(at, relative, detail)| {
             let offset = u32::try_from(at.bytes_from(start)?).ok()?;
-            (offset < c.metrics.bytes).then_some((offset, relative))
+            (offset < c.metrics.bytes).then(|| (offset, *relative, detail.clone()))
         })
         .collect();
     if !inside.is_empty() {
-        for &(at, relative) in &inside {
-            r.blockers.push(blocker_record(&if relative {
+        for (at, relative, detail) in &inside {
+            let at = *at;
+            let mut b = blocker_record(&if *relative {
                 Blocker::WrongRelativeRef { at }
             } else {
                 Blocker::WrongAbsoluteRef { at }
-            }));
+            });
+            b.detail = detail.clone();
+            r.blockers.push(b);
         }
         r.refs_wrong += inside.len() as u32;
         r.result = RebuildResult::Differs;
@@ -1208,7 +1212,8 @@ fn overlay_modules_with_fields(
                         seg: 0,
                         off,
                     };
-                    wrong.push((address, relative));
+                    let detail = v.wrong_refs.iter().find(|w| w.at == at).map(|w| w.text());
+                    wrong.push((address, relative, detail));
                 }
             }
         }
@@ -1234,7 +1239,11 @@ fn overlay_modules_with_fields(
                 "refs_unchecked": m.refs_unchecked,
                 "gaps": m.gaps,
                 "blockers": v.code.blockers.iter().take(16).map(|b| {
-                    json!({"kind": b.kind(), "at": b.at(), "count": b.count()})
+                    let detail = b.at().and_then(|at| v.wrong_refs.iter().find(|w| w.at == at));
+                    match detail {
+                        Some(w) => json!({"kind": b.kind(), "at": b.at(), "count": b.count(), "detail": w.text()}),
+                        None => json!({"kind": b.kind(), "at": b.at(), "count": b.count()}),
+                    }
                 }).collect::<Vec<_>>(),
             },
             "data": {
@@ -1658,6 +1667,9 @@ pub(super) fn blocker_json(b: &BlockerRecord) -> Value {
     }
     if let Some(count) = b.count {
         v["count"] = json!(count);
+    }
+    if let Some(detail) = &b.detail {
+        v["detail"] = json!(detail);
     }
     v
 }

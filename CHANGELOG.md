@@ -6,6 +6,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `diagnose` shows each wrong reference `build` found with its instruction and what the field leads to against what the
+  rebuild gives (`wrong-absolute-ref at +0x7: mov ax,[91B8h]; word_91b8: original 91B8, rebuilt 91AA`); the build
+  record keeps that text as the blocker's `detail`, the module verdict's blockers carry it too.
 - `-j` is the short form of the global `--jobs` (e.g. `decovery build -j 2`).
 - Per-file compiler flags in the source: a header comment `/* decovery: flags = +b +c */` (first ten lines) as an
   alternative to `[rebuild.file_flags]` (ADR 0014). The comment wins over a differing table entry, with a warning;

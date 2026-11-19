@@ -50,9 +50,47 @@ pub struct ModuleVerdict {
     /// References whose binding disagrees with an earlier use of the same external name.
     pub ambiguous: Vec<String>,
     pub identical: bool,
+    /// The wrong code references (one per wrong-reference blocker, same order): what the original's field leads
+    /// to and what the rebuild's symbol and addend give.
+    pub wrong_refs: Vec<WrongRef>,
     /// Plain-language findings for a module that is not identical, most telling first: a code size that differs
     /// from the original (a partial module, or a shift whose later differences are likely consequences).
     pub findings: Vec<String>,
+}
+
+/// A relocated code field of the module whose value differs from the original's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct WrongRef {
+    /// Offset of the field from the code origin.
+    pub at: u32,
+    /// Address of the field.
+    pub place: i64,
+    /// The symbol the rebuild references (an unnamed section target: `<module> <section>`).
+    pub symbol: String,
+    /// The addend the rebuild adds to it.
+    pub addend: i64,
+    /// The address the original's field leads to (for a self-relative field: its target).
+    pub original: i64,
+    /// The address the rebuild's symbol plus addend gives.
+    pub rebuilt: i64,
+    pub relative: bool,
+}
+
+impl WrongRef {
+    /// `symbol+addend: original A, rebuilt B`.
+    pub fn text(&self) -> String {
+        let expr = match self.addend {
+            0 => self.symbol.clone(),
+            k if k > 0 => format!("{}+{k}", self.symbol),
+            k => format!("{}{k}", self.symbol),
+        };
+        format!(
+            "{expr}: original {:04X}, rebuilt {:04X}",
+            self.original & 0xFFFF,
+            self.rebuilt & 0xFFFF
+        )
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -222,6 +260,7 @@ pub fn compare_overlay_module(objects: &[&ObjectFile], overlay: &Overlay) -> Mod
     let mut blockers = Vec::new();
     let mut externals: BTreeMap<String, u16> = BTreeMap::new();
     let mut ambiguous = Vec::new();
+    let mut wrong_refs: Vec<WrongRef> = Vec::new();
     // the uses of external names, judged once every use is known
     let mut uses: Vec<ExternUse> = Vec::new();
     let mut gaps_code = BTreeSet::new();
@@ -268,6 +307,29 @@ pub fn compare_overlay_module(objects: &[&ObjectFile], overlay: &Overlay) -> Mod
                 }
                 let relative = r.kind == RelocKind::Relative;
                 // the address the reference names inside the module, or the external name
+                // what the rebuild names: the symbol and its addend
+                let (symbol, addend) = match &r.target {
+                    RefTarget::Symbol(n) => (n.clone(), sign(stored, width)),
+                    RefTarget::Section { index, offset } => {
+                        let at = i64::from(*offset) + if relative { 0 } else { stored };
+                        match m
+                            .symbols
+                            .iter()
+                            .find(|x| x.section == *index && i64::from(x.offset) == at)
+                        {
+                            Some(x) => (x.name.clone(), 0),
+                            None => (
+                                format!(
+                                    "{} {}",
+                                    m.name,
+                                    m.sections.get(*index as usize).map_or("?", |x| x.name.as_str())
+                                ),
+                                at,
+                            ),
+                        }
+                    }
+                    _ => (String::new(), 0),
+                };
                 let (internal, name): (Option<i64>, Option<&str>) = match &r.target {
                     RefTarget::Section { index, offset } => {
                         match bases[mi].get(*index as usize).copied().flatten() {
@@ -306,8 +368,17 @@ pub fn compare_overlay_module(objects: &[&ObjectFile], overlay: &Overlay) -> Mod
                     metrics.refs_unchecked += 1;
                     continue;
                 };
-                let wrong = |blockers: &mut Vec<Blocker>| {
+                let wrong = |blockers: &mut Vec<Blocker>, wrong_refs: &mut Vec<WrongRef>, t: i64| {
                     let at = (place - corg).max(0) as u32;
+                    wrong_refs.push(WrongRef {
+                        at,
+                        place,
+                        symbol: symbol.clone(),
+                        addend,
+                        original: if relative { end + sign(orig, width) } else { orig },
+                        rebuilt: t,
+                        relative,
+                    });
                     blockers.push(if relative {
                         Blocker::WrongRelativeRef { at }
                     } else {
@@ -323,7 +394,7 @@ pub fn compare_overlay_module(objects: &[&ObjectFile], overlay: &Overlay) -> Mod
                         } else {
                             metrics.refs_wrong += 1;
                             if part == Part::Code {
-                                wrong(&mut blockers);
+                                wrong(&mut blockers, &mut wrong_refs, t);
                             }
                         }
                     }
@@ -387,6 +458,15 @@ pub fn compare_overlay_module(objects: &[&ObjectFile], overlay: &Overlay) -> Mod
             u.place, u.orig, u.bound
         ));
         if u.code {
+            wrong_refs.push(WrongRef {
+                at: u.at,
+                place: u.place,
+                symbol: n.to_string(),
+                addend: u.number,
+                original: u.bound + u.number,
+                rebuilt: b + u.number,
+                relative: u.relative,
+            });
             blockers.push(if u.relative {
                 Blocker::WrongRelativeRef { at: u.at }
             } else {
@@ -394,6 +474,7 @@ pub fn compare_overlay_module(objects: &[&ObjectFile], overlay: &Overlay) -> Mod
             });
         }
     }
+    wrong_refs.sort_by_key(|w| w.at);
     blockers.sort_by_key(|b| match *b {
         Blocker::WrongRelativeRef { at } | Blocker::WrongAbsoluteRef { at } => at,
         _ => 0,
@@ -466,6 +547,7 @@ pub fn compare_overlay_module(objects: &[&ObjectFile], overlay: &Overlay) -> Mod
         bss,
         externals,
         ambiguous,
+        wrong_refs,
         identical,
         findings,
         data_gaps: u32::try_from(gaps_data.len()).unwrap_or(u32::MAX),

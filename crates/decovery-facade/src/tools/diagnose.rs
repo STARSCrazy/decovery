@@ -112,12 +112,40 @@ pub fn diagnose_tool(
         .iter()
         .filter(|b| matches!(b.kind.as_str(), "wrong-absolute-ref" | "wrong-relative-ref"))
         .collect();
+    // the instruction holding each wrong field (the original's text: what the field should lead to)
+    let instruction_at = |at: u32| -> Option<String> {
+        pairs
+            .iter()
+            .filter_map(|p| p.original.as_ref())
+            .find(|d| d.offset <= at && at < d.offset + d.len)
+            .map(|d| d.text.clone())
+    };
+    let references_json: Vec<Value> = references
+        .iter()
+        .map(|b| {
+            let mut v = json!(b);
+            if let Some(i) = b.at.and_then(instruction_at) {
+                v["instruction"] = json!(i);
+            }
+            v
+        })
+        .collect();
     if !references.is_empty() {
         let list: Vec<String> = references
             .iter()
-            .map(|b| match b.at {
-                Some(at) => format!("{} at +0x{at:X}", b.kind),
-                None => b.kind.clone(),
+            .map(|b| {
+                let mut s = match b.at {
+                    Some(at) => format!("{} at +0x{at:X}", b.kind),
+                    None => b.kind.clone(),
+                };
+                let instruction = b.at.and_then(instruction_at);
+                match (&instruction, &b.detail) {
+                    (Some(i), Some(d)) => s.push_str(&format!(": {i}; {d}")),
+                    (Some(i), None) => s.push_str(&format!(": {i}")),
+                    (None, Some(d)) => s.push_str(&format!(": {d}")),
+                    (None, None) => {}
+                }
+                s
             })
             .collect();
         let n = references.len();
@@ -165,7 +193,7 @@ pub fn diagnose_tool(
         }),
     );
     if !references.is_empty() {
-        response.data["references"] = json!(references);
+        response.data["references"] = json!(references_json);
         if let Some(message) = &record.message {
             response.data["message"] = json!(message);
         }

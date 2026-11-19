@@ -240,13 +240,13 @@ fn reference_blockers_of_the_build_are_shown() {
     assert_eq!(r.data["function"]["instructions_differing"], 0);
     assert_eq!(
         r.summary,
-        "fun_C_0000_5004: no differing instructions, but build found 2 wrong references (wrong-absolute-ref at +0x7, \
-         wrong-relative-ref at +0xB); see the module verdict of `build`"
+        "fun_C_0000_5004: no differing instructions, but build found 2 wrong references (wrong-absolute-ref at +0x7: \
+         call 5000h, wrong-relative-ref at +0xB); see the module verdict of `build`"
     );
     assert_eq!(
         r.data["references"],
         serde_json::json!([
-            { "kind": "wrong-absolute-ref", "at": 7 },
+            { "kind": "wrong-absolute-ref", "at": 7, "instruction": "call 5000h" },
             { "kind": "wrong-relative-ref", "at": 11 },
         ])
     );
@@ -257,5 +257,43 @@ fn reference_blockers_of_the_build_are_shown() {
             .contains("2 relocated fields wrong"),
         "{}",
         r.data
+    );
+}
+
+#[test]
+fn reference_blocker_shows_its_instruction_and_the_addresses() {
+    let dir = workspace(false);
+    add_overlay_c(dir.path());
+    let path = dir.path().join("knowledge/rebuild.toml");
+    let records = std::fs::read_to_string(&path).unwrap().replace(
+        "address = \"ovl:C:0000:5004\"
+name = \"g\"
+file = \"c.c\"
+result = \"identical\"
+",
+        "address = \"ovl:C:0000:5004\"
+name = \"g\"
+file = \"c.c\"
+result = \"differs\"
+         
+[[function.blockers]]
+kind = \"wrong-relative-ref\"
+at = 7
+         detail = \"pre_: original 5000, rebuilt 5002\"
+",
+    );
+    std::fs::write(&path, records).unwrap();
+    let session = Session::open(dir.path()).unwrap();
+    let r = decovery_facade::diagnose(&session, "ovl:C:0000:5004", Budget::default()).unwrap();
+    let reference = &r.data["references"][0];
+    assert_eq!(reference["detail"], "pre_: original 5000, rebuilt 5002");
+    let instruction = reference["instruction"].as_str().unwrap();
+    assert!(instruction.starts_with("call"), "{instruction}");
+    assert!(
+        r.summary.contains(&format!(
+            "wrong-relative-ref at +0x7: {instruction}; pre_: original 5000, rebuilt 5002"
+        )),
+        "{}",
+        r.summary
     );
 }
