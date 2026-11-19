@@ -330,6 +330,33 @@ pub struct RebuildConfig {
     /// Frame (stack segment) bases by name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub frames: BTreeMap<String, Address>,
+    /// `[[rebuild.module]]`: overlay modules built from several source files (ADR 0013).
+    #[serde(default, rename = "module", skip_serializing_if = "Vec::is_empty")]
+    pub modules: Vec<ModuleConfig>,
+}
+
+impl RebuildConfig {
+    /// The module a source file belongs to (file names compare case-insensitively, as DOS does).
+    pub fn module_of(&self, file: &str) -> Option<&ModuleConfig> {
+        self.modules
+            .iter()
+            .find(|m| m.files.iter().any(|f| f.eq_ignore_ascii_case(file)))
+    }
+}
+
+/// `[[rebuild.module]]`: the source files whose objects, in link order, form one overlay module (ADR 0013).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ModuleConfig {
+    pub overlay: OverlayName,
+    /// Source file names in `src/`, in link order.
+    pub files: Vec<String>,
+}
+
+impl ModuleConfig {
+    pub fn new(overlay: OverlayName, files: Vec<String>) -> Self {
+        ModuleConfig { overlay, files }
+    }
 }
 
 /// Linker settings of a rebuild.
@@ -427,6 +454,25 @@ processor = \"x86\"
         let config: WorkspaceConfig = toml::from_str(BASE).unwrap();
         assert!(config.plugins.is_empty());
         assert!(!toml::to_string(&config).unwrap().contains("plugins"));
+    }
+
+    #[test]
+    fn rebuild_modules_round_trip() {
+        let text = format!(
+            "{BASE}
+[[rebuild.module]]
+overlay = \"vmnpc\"
+files = [\"vmnpc.c\", \"vmnpc_b.c\"]
+"
+        );
+        let config: WorkspaceConfig = toml::from_str(&text).unwrap();
+        let rebuild = config.rebuild.as_ref().unwrap();
+        let m = rebuild.module_of("VMNPC_B.C").unwrap();
+        assert_eq!(m.overlay.as_str(), "VMNPC");
+        assert_eq!(m.files, ["vmnpc.c", "vmnpc_b.c"]);
+        assert!(rebuild.module_of("other.c").is_none());
+        let back: WorkspaceConfig = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(back, config);
     }
 
     #[test]

@@ -6,9 +6,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use decovery_core::{
-    Address, Analysis, BlockerRecord, OverlayName, Program, RebuildRecord, RebuildResult,
-    TargetFormat, VerdictId, Workspace, merge_rebuild, read_rebuild, read_user_config,
-    save_rebuild, today, write_atomic,
+    Address, Analysis, BlockerRecord, ModuleConfig, OverlayName, Program, RebuildRecord,
+    RebuildResult, TargetFormat, VerdictId, Workspace, merge_rebuild, read_rebuild,
+    read_user_config, save_rebuild, today, write_atomic,
 };
 use decovery_diff::{Blocker, Comparison, ModuleOptions, Placement, SymbolView, Verdict};
 use decovery_objects::{FunctionView, ObjectFile, ObjectFormat, functions, read_object};
@@ -349,6 +349,7 @@ pub fn build(
         (Some(function), true) => vec![file_of_function(root, function)?],
         _ => request.files.clone(),
     };
+    let files = with_module_files(&rebuild.modules, files);
     let set = find_sources(&root.join(SOURCE_DIR), &files).map_err(toolchain)?;
     let existing_files: Vec<String> = set.sources.iter().map(|p| file_name(p)).collect();
 
@@ -576,16 +577,12 @@ pub fn build(
 
     // whole overlay modules (Aztec C86): the objects whose functions lie in one overlay, in source order
     let (modules, wrong_fields) = if profile.object_format == ObjectFormat::Aztec {
-        let mut of_source: BTreeMap<usize, OverlayName> = BTreeMap::new();
-        for b in &placed {
-            if let Some(name) = b.address.overlay() {
-                of_source.entry(b.source).or_insert(name);
-            }
-        }
-        let assigned: Vec<(OverlayName, &ObjectFile)> = objects
+        let starts: Vec<(usize, Address)> = placed.iter().map(|b| (b.source, b.address)).collect();
+        let named: Vec<(usize, &str, &ObjectFile)> = objects
             .iter()
-            .filter_map(|(i, object)| of_source.get(i).map(|&name| (name, object)))
+            .map(|(i, object)| (*i, sources[*i].name.as_str(), object))
             .collect();
+        let assigned = assign_overlay_objects(&rebuild.modules, &named, &starts, &mut warnings);
         overlay_modules_with_fields(&ws, &assigned, &mut warnings)
     } else {
         (Vec::new(), Vec::new())
@@ -1038,6 +1035,113 @@ fn judge_fields(r: &mut RebuildRecord, start: Address, c: &Comparison, wrong: &[
             if n == 1 { "" } else { "s" }
         ));
     }
+}
+
+/// `files` plus the other files of every `[[rebuild.module]]` one of them belongs to: a module is compared whole
+/// (ADR 0013), so building one of its files builds the others too (their objects usually come from the cache).
+fn with_module_files(modules: &[ModuleConfig], mut files: Vec<String>) -> Vec<String> {
+    let mut k = 0;
+    while k < files.len() {
+        let name = file_name(Path::new(&files[k]));
+        for m in modules
+            .iter()
+            .filter(|m| m.files.iter().any(|f| f.eq_ignore_ascii_case(&name)))
+        {
+            for f in &m.files {
+                if !files
+                    .iter()
+                    .any(|x| file_name(Path::new(x)).eq_ignore_ascii_case(f))
+                {
+                    files.push(f.clone());
+                }
+            }
+        }
+        k += 1;
+    }
+    files
+}
+
+/// The objects of each overlay module in link order (ADR 0013): the files of a `[[rebuild.module]]` in its order,
+/// then the other objects whose functions lie in an overlay, in source order. `objects` are (source index, file
+/// name, object); `starts` the placed functions (source index, address). Warns when a configured file has no
+/// object, or when the code of one file does not end where the functions of the next begin (gap or overlap).
+fn assign_overlay_objects<'a>(
+    modules: &[ModuleConfig],
+    objects: &[(usize, &str, &'a ObjectFile)],
+    starts: &[(usize, Address)],
+    warnings: &mut Vec<String>,
+) -> Vec<(OverlayName, &'a ObjectFile)> {
+    let mut out = Vec::new();
+    let mut taken = BTreeSet::new();
+    for m in modules {
+        // (file, first function address, code size) of the files present, in link order
+        let mut ranges: Vec<(&str, Option<u16>, u32)> = Vec::new();
+        for file in &m.files {
+            let Some(&(i, name, object)) = objects
+                .iter()
+                .find(|(_, name, _)| name.eq_ignore_ascii_case(file))
+            else {
+                warnings.push(format!(
+                    "module {}: {file} has no object in this build; the module is compared without it",
+                    m.overlay.as_str()
+                ));
+                continue;
+            };
+            taken.insert(i);
+            out.push((m.overlay, object));
+            let first = starts
+                .iter()
+                .filter(|(s, a)| *s == i && a.overlay() == Some(m.overlay))
+                .filter_map(|(_, a)| match a {
+                    Address::Ovl { off, .. } => Some(*off),
+                    _ => None,
+                })
+                .min();
+            let size: u32 = object
+                .modules
+                .iter()
+                .flat_map(|o| &o.sections)
+                .filter(|s| s.kind == decovery_objects::SectionKind::Code)
+                .map(|s| s.size)
+                .sum();
+            ranges.push((name, first, size));
+        }
+        for pair in ranges.windows(2) {
+            let ((a, Some(start), size), (b, Some(next), _)) = (pair[0], pair[1]) else {
+                continue;
+            };
+            let end = u32::from(start) + size;
+            let next = u32::from(next);
+            if end < next {
+                warnings.push(format!(
+                    "module {}: gap of {} bytes between {a} (ends at {end:04X}) and {b} (starts at {next:04X})",
+                    m.overlay.as_str(),
+                    next - end
+                ));
+            } else if end > next {
+                warnings.push(format!(
+                    "module {}: {a} (ends at {end:04X}) overlaps {b} (starts at {next:04X}) by {} bytes",
+                    m.overlay.as_str(),
+                    end - next
+                ));
+            }
+        }
+    }
+    let mut of_source: BTreeMap<usize, OverlayName> = BTreeMap::new();
+    for &(i, address) in starts {
+        if let Some(name) = address.overlay() {
+            of_source.entry(i).or_insert(name);
+        }
+    }
+    for &(i, _, object) in objects {
+        if taken.contains(&i) {
+            continue;
+        }
+        if let Some(&name) = of_source.get(&i) {
+            out.push((name, object));
+        }
+    }
+    out
 }
 
 /// Module verdicts of the overlays that `assigned` objects (in source order) belong to.
@@ -1969,6 +2073,78 @@ size = 21
             ..AztecModuleSpec::default()
         };
         read_aztec(&write_aztec(&spec), "A.O").unwrap()
+    }
+
+    #[test]
+    fn module_files_are_added_to_the_requested_files() {
+        let m = ModuleConfig::new(
+            OverlayName::new("V").unwrap(),
+            vec!["v.c".into(), "v_b.c".into()],
+        );
+        assert_eq!(
+            with_module_files(std::slice::from_ref(&m), vec!["V_B.C".into()]),
+            ["V_B.C", "v.c"]
+        );
+        assert_eq!(with_module_files(&[m], vec!["x.c".into()]), ["x.c"]);
+    }
+
+    fn code_object(name: &str, code: Vec<u8>) -> ObjectFile {
+        let spec = AztecModuleSpec {
+            name: name.into(),
+            code,
+            named: vec![AztecSymbolSpec {
+                name: format!("{name}_"),
+                section: AztecSection::Code,
+                value: 0,
+                public: true,
+            }],
+            ..AztecModuleSpec::default()
+        };
+        read_aztec(&write_aztec(&spec), name).unwrap()
+    }
+
+    #[test]
+    fn module_files_are_assigned_in_link_order_and_gaps_are_warned() {
+        let v = OverlayName::new("V").unwrap();
+        let at = |off| Address::Ovl {
+            overlay: v,
+            seg: 0,
+            off,
+        };
+        let (a, b) = (
+            code_object("a", vec![0xC3; 4]),
+            code_object("b", vec![0xC3; 2]),
+        );
+        let m = ModuleConfig::new(v, vec!["a.c".into(), "b.c".into()]);
+        // sources in another order than the module's: b first
+        let objects = [(0, "b.c", &b), (1, "a.c", &a)];
+        let mut warnings = Vec::new();
+        let out = assign_overlay_objects(
+            std::slice::from_ref(&m),
+            &objects,
+            &[(1, at(0x5000)), (0, at(0x5004))],
+            &mut warnings,
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(out.len(), 2);
+        assert!(std::ptr::eq(out[0].1, &a) && std::ptr::eq(out[1].1, &b));
+        // b's functions start two bytes late: a gap
+        assign_overlay_objects(
+            std::slice::from_ref(&m),
+            &objects,
+            &[(1, at(0x5000)), (0, at(0x5006))],
+            &mut warnings,
+        );
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("gap of 2 bytes"), "{warnings:?}");
+        warnings.clear();
+        assign_overlay_objects(
+            &[m],
+            &objects,
+            &[(1, at(0x5000)), (0, at(0x5003))],
+            &mut warnings,
+        );
+        assert!(warnings[0].contains("overlaps"), "{warnings:?}");
     }
 
     #[test]
