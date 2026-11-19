@@ -54,6 +54,11 @@ def project_location(
     return base / "decovery" / "ghidra" / digest
 
 
+# Version of what the import sets up before and after analysis; projects built by another version are rebuilt.
+# 2: data segment, Aztec C86 `$csav` and switch helpers (aztec.py).
+IMPORT_SETUP = 2
+
+
 def project_key(program_hash: str, ghidra_version: str, calling_convention: str | None) -> dict:
     """What a saved project was built from; the calling convention is installed at import time."""
     return {
@@ -61,6 +66,7 @@ def project_key(program_hash: str, ghidra_version: str, calling_convention: str 
         "program_hash": program_hash,
         "ghidra_version": ghidra_version,
         "calling_convention": calling_convention,
+        "import_setup": IMPORT_SETUP,
     }
 
 

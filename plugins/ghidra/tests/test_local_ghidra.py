@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import os
+import struct
 import sys
 import tempfile
 import unittest
@@ -204,6 +205,97 @@ class LocalGhidraTests(unittest.TestCase):
             decompiled = by_id(out, 5)["result"][0]
             self.assertIn("path", decompiled, decompiled)
             self.assertIn("b_helper", Path(decompiled["path"]).read_text(encoding="utf-8"))
+
+    def test_aztec_overlay_reads_its_data_segment(self):
+        """Overlay data blocks give DS: `mov ax,[0x0020]` reads OVA.data, and the label shows the DS offset."""
+
+        def region(name, start, data, permissions):
+            return {"name": name, "start": start, "size": len(data), "arch": "x86-real-16",
+                    "permissions": permissions, "blob": inline_blob(data)}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            program = {
+                "format": "mz",
+                "entry_points": ["ovl:OVA:0000:0100"],
+                "regions": [
+                    region("image", "seg:1000:0000", b"\xc3" + b"\x90" * 15, "rwx"),
+                    # mov ax,[0x0020]; add ax,[0x0300]; ret
+                    region("OVA.code", "ovl:OVA:0000:0100", b"\xa1\x20\x00\x03\x06\x00\x03\xc3", "r-x"),
+                    region("OVA.data", "ovl:OVA:0050:0000", b"\x07" * 0x40, "rw-"),
+                ],
+            }
+            out_path = root / "export.json"
+            out = run(
+                build_plugin(),
+                req(2, "analyzer/open", {"program": program, "project_dir": str(root / "ghidra"),
+                                         "program_hash": "d" * 64}),
+                req(3, "analyzer/export", {"out_path": str(out_path)}),
+                req(4, "decompiler/decompile", {"addresses": ["ovl:OVA:0000:0100"], "out_dir": str(root / "c")}),
+                req(5, "shutdown"),
+            )
+            data = json.loads(out_path.read_text(encoding="utf-8"))
+            self.assertIn({"function": "ovl:OVA:0000:0100", "address": "ovl:OVA:0050:0020", "kind": "read"},
+                          data["data_accesses"])
+            decompiled = by_id(out, 4)["result"][0]
+            self.assertIn("path", decompiled, decompiled)
+            code = Path(decompiled["path"]).read_text(encoding="utf-8")
+            self.assertIn("DAT_OVA_0050_0020", code)
+            self.assertIn("DAT_0050_0300", code)  # outside the overlay's data: the main program's DS
+
+    def test_aztec_csav_frame_and_inline_switch_table(self):
+        """`mov ax,-4; call $csav` gives BP; `mov cx,3; call $swt` with an inline table becomes a switch."""
+        from test_aztec import CSAV, SWITCH, near_call
+
+        image = bytearray(b"\xcc" * 0x400)
+        image[0x000:0x003] = b"\xb8\xfc\xff"  # mov ax,-4
+        image[0x003:0x006] = near_call(0x003, 0x100)  # call $csav
+        image[0x006:0x009] = b"\x8b\x46\x04"  # mov ax,[bp+4]
+        image[0x009:0x00C] = b"\xb9\x03\x00"  # mov cx,3
+        image[0x00C:0x00F] = near_call(0x00C, 0x200)  # call $swt
+        image[0x00F:0x019] = struct.pack("<5H", 1, 2, 0x19, 0x1D, 0x21)
+        image[0x019:0x01C] = near_call(0x019, 0x300)  # case 1: call g1
+        image[0x01C] = 0xC3
+        image[0x01D:0x020] = near_call(0x01D, 0x310)  # case 2: call g2
+        image[0x020] = 0xC3
+        image[0x021:0x025] = b"\xb8\x00\x00\xc3"  # default: return 0
+        image[0x100:0x100 + len(CSAV)] = CSAV
+        image[0x200:0x200 + len(SWITCH)] = SWITCH
+        image[0x300] = image[0x310] = 0xC3
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            program = {
+                "format": "mz",
+                "entry_points": ["seg:1000:0000"],
+                "regions": [{"name": "image", "start": "seg:1000:0000", "size": len(image), "arch": "x86-real-16",
+                             "permissions": "rwx", "blob": inline_blob(bytes(image))}],
+            }
+            symbols = [{"address": a, "kind": "function", "name": n, "locals": [], "line_comments": []}
+                       for a, n in (("seg:1000:0300", "g1"), ("seg:1000:0310", "g2"))]
+            out_path = root / "export.json"
+            out = run(
+                build_plugin(),
+                req(2, "analyzer/open", {"program": program, "project_dir": str(root / "ghidra"),
+                                         "program_hash": "c" * 64}),
+                req(3, "analyzer/apply", {"symbols": symbols, "types_h": "", "references": []}),
+                req(4, "analyzer/export", {"out_path": str(out_path)}),
+                req(5, "decompiler/decompile", {"addresses": ["seg:1000:0000"], "out_dir": str(root / "c")}),
+                req(6, "shutdown"),
+            )
+            self.assertIn("result", by_id(out, 2), by_id(out, 2))
+            data = json.loads(out_path.read_text(encoding="utf-8"))
+            calls = {(c["caller"], c["callee"]) for c in data["calls"]}
+            self.assertIn(("seg:1000:0000", "seg:1000:0300"), calls)
+            self.assertIn(("seg:1000:0000", "seg:1000:0310"), calls)
+            self.assertNotIn("seg:1000:000F", [f["start"] for f in data["functions"]])
+            decompiled = by_id(out, 5)["result"][0]
+            self.assertIn("path", decompiled, decompiled)
+            code = Path(decompiled["path"]).read_text(encoding="utf-8")
+            self.assertIn("g1", code)
+            self.assertIn("g2", code)
+            self.assertNotIn("unaff_BP", code)
+            self.assertIn("param_1", code)
+            self.assertIn("switch (AX): 0x1 -> 0019, 0x2 -> 001D; default -> 0021", code)
 
 
 if __name__ == "__main__":

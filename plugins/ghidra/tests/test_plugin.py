@@ -207,7 +207,12 @@ class PluginTests(unittest.TestCase):
             self.assertEqual(language_id, language)
             self.assertEqual(Path(location), (self.root / arch).resolve())
             self.assertEqual(
-                options, {"calling_convention": None, "aggressive_instruction_finder": arch == "x86-flat-32"}
+                options,
+                {
+                    "calling_convention": None,
+                    "aggressive_instruction_finder": arch == "x86-flat-32",
+                    "decompiler_parameter_id": arch == "x86-real-16",
+                },
             )
             self.assertEqual(len(blocks), 1)
             self.assertEqual(blocks[0].name, "code")
@@ -255,6 +260,7 @@ class PluginTests(unittest.TestCase):
                 "program_hash": "a" * 64,
                 "ghidra_version": EXPECTED_GHIDRA_VERSION,
                 "calling_convention": None,
+                "import_setup": 2,
             },
         )
         before = (self.root / "proj" / "project.json").read_bytes()
@@ -482,6 +488,7 @@ class PluginTests(unittest.TestCase):
             backend = FakeBackend()
             run(self.plugin_for(backend), self.open_msg(arch=arch, project_dir=self.root / arch))
             self.assertIs(backend.opened[4]["aggressive_instruction_finder"], expected, arch)
+            self.assertIs(backend.opened[4]["decompiler_parameter_id"], not expected, arch)
 
     def test_io_errors_are_32012(self):
         blocker = self.root / "blocker"

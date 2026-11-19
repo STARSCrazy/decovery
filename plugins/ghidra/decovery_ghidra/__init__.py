@@ -114,6 +114,9 @@ def build_plugin(backend_factory: Callable[[], Backend] = GhidraBackend) -> Plug
                         "calling_convention": calling_convention,
                         # Decomp enabled it for flat 32-bit formats only, never for real mode
                         "aggressive_instruction_finder": arch == "x86-flat-32",
+                        # real mode: the decompiler infers call arguments from the callee's committed prototype
+                        # instead of guessing from the pushes at each site
+                        "decompiler_parameter_id": arch == "x86-real-16",
                     },
                     reuse,
                     ctx.progress,
