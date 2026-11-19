@@ -823,6 +823,28 @@ fn add_modules(response: &mut Response, mut modules: Vec<Value>, functions: &[(A
             m["code"]["first_difference_function_offset"] = json!(offset);
         }
     }
+    // after a size change, the differing functions behind the first real difference are its likely consequences
+    for m in &modules {
+        let shifted = m["code"]["bytes"] != m["code"]["original_bytes"];
+        let Some(at) = m["code"]["first_difference_address"]
+            .as_str()
+            .and_then(|a| a.parse::<Address>().ok())
+            .filter(|_| shifted)
+        else {
+            continue;
+        };
+        if let Some(list) = response.data["functions"].as_array_mut() {
+            for f in list {
+                let after = f["address"]
+                    .as_str()
+                    .and_then(|a| a.parse::<Address>().ok())
+                    .is_some_and(|a| a.overlay() == at.overlay() && a > at);
+                if after && f["verdict"] != "identical" {
+                    f["consequence"] = json!(true);
+                }
+            }
+        }
+    }
     let same = modules
         .iter()
         .filter(|m| m["identical"] == json!(true))
@@ -1546,6 +1568,14 @@ fn function_json(root: &Path, r: &RebuildRecord) -> Value {
         "differing": r.differing,
         "instructions_differing": r.instructions_differing,
     });
+    if !r.blockers.is_empty() {
+        // a shifted function lists one blocker per wrong field: the counts per kind read better
+        let mut counts: BTreeMap<&str, u64> = BTreeMap::new();
+        for b in &r.blockers {
+            *counts.entry(b.kind.as_str()).or_default() += b.count.map_or(1, u64::from);
+        }
+        v["blocker_counts"] = json!(counts);
+    }
     if !r.diagnoses.is_empty() {
         v["diagnoses"] = json!(r.diagnoses);
     }
@@ -1940,6 +1970,64 @@ size = 21
         assert_eq!(code["first_difference"], 0x2E6, "the offset stays");
         assert_eq!(code["first_difference_function"], "show_message");
         assert_eq!(code["first_difference_function_offset"], 0x2D);
+    }
+
+    #[test]
+    fn functions_behind_the_first_difference_of_a_shift_are_consequences() {
+        let functions = json!([
+            {"address": "ovl:A:0000:5317", "verdict": "differs"},
+            {"address": "ovl:A:0000:5400", "verdict": "differs"},
+            {"address": "ovl:A:0000:5500", "verdict": "identical"},
+            {"address": "ovl:B:0000:5400", "verdict": "differs"},
+        ]);
+        let module = |bytes: u32| {
+            json!({
+                "overlay": "A",
+                "identical": false,
+                "code": {"bytes": bytes, "original_bytes": 100,
+                         "first_difference": 0x2E6, "first_difference_address": "ovl:A:0000:5344"},
+                "findings": [],
+            })
+        };
+        let mut shifted = Response::new("", json!({ "functions": functions }));
+        add_modules(&mut shifted, vec![module(101)], &[]);
+        let marked: Vec<bool> = shifted.data["functions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["consequence"] == true)
+            .collect();
+        assert_eq!(marked, [false, true, false, false]);
+        let mut same_size = Response::new("", json!({ "functions": functions }));
+        add_modules(&mut same_size, vec![module(100)], &[]);
+        assert!(
+            same_size.data["functions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|f| f.get("consequence").is_none())
+        );
+    }
+
+    #[test]
+    fn blockers_are_counted_per_kind() {
+        let mut r = RebuildRecord::new(
+            "ovl:A:0000:5000".parse().unwrap(),
+            "f",
+            RebuildResult::Differs,
+        );
+        for at in 0..20 {
+            r.blockers
+                .push(blocker_record(&Blocker::WrongRelativeRef { at }));
+        }
+        r.blockers
+            .push(blocker_record(&Blocker::BytesDiffer { count: 3 }));
+        let dir = tempfile::tempdir().unwrap();
+        let v = function_json(dir.path(), &r);
+        assert_eq!(
+            v["blocker_counts"],
+            json!({"wrong-relative-ref": 20, "bytes-differ": 3})
+        );
     }
 
     #[test]

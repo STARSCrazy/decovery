@@ -1736,19 +1736,7 @@ fn build(
     }
     for f in d["functions"].as_array().into_iter().flatten() {
         if f["verdict"] != "identical" {
-            let blockers: Vec<&str> = f["blockers"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|b| b["kind"].as_str())
-                .collect();
-            println!(
-                "{}\t{}\t{}\t{}",
-                f["address"].as_str().unwrap_or(""),
-                f["name"].as_str().unwrap_or(""),
-                f["verdict"].as_str().unwrap_or(""),
-                blockers.join(" ")
-            );
+            println!("{}", function_line(f));
             if let Some(near) = f["near"].as_str() {
                 println!("  {near}");
             }
@@ -1760,6 +1748,37 @@ fn build(
         }
     }
     Ok(complete)
+}
+
+/// One differing function of a build: address, name, verdict, its blockers counted per kind (`kind ×n`), and
+/// `(follow-on)` for a function behind the first real difference of a shifted overlay module.
+fn function_line(f: &serde_json::Value) -> String {
+    let blockers: Vec<String> = match f["blocker_counts"].as_object() {
+        Some(counts) => counts
+            .iter()
+            .map(|(kind, n)| match n.as_u64() {
+                Some(n) if n > 1 => format!("{kind} ×{n}"),
+                _ => kind.clone(),
+            })
+            .collect(),
+        None => f["blockers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|b| b["kind"].as_str().map(str::to_string))
+            .collect(),
+    };
+    let mut line = format!(
+        "{}\t{}\t{}\t{}",
+        f["address"].as_str().unwrap_or(""),
+        f["name"].as_str().unwrap_or(""),
+        f["verdict"].as_str().unwrap_or(""),
+        blockers.join(", ")
+    );
+    if f["consequence"] == true {
+        line.push_str("\t(follow-on)");
+    }
+    line
 }
 
 /// Links and prints the result; the exit code follows the result (0 identical, 1 differs, 2 error).
@@ -2043,4 +2062,23 @@ fn find(workspace: &Path, query: &FindQuery, json: bool) -> Result<(), FacadeErr
         println!("{}", cells(item, keys));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::function_line;
+    use serde_json::json;
+
+    #[test]
+    fn a_function_line_counts_blockers_and_marks_consequences() {
+        let f = json!({
+            "address": "ovl:A:0000:5400", "name": "later", "verdict": "differs",
+            "blocker_counts": {"bytes-differ": 3, "data-layout": 1, "wrong-relative-ref": 20},
+            "consequence": true,
+        });
+        assert_eq!(
+            function_line(&f),
+            "ovl:A:0000:5400\tlater\tdiffers\tbytes-differ ×3, data-layout, wrong-relative-ref ×20\t(follow-on)"
+        );
+    }
 }

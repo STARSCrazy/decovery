@@ -43,6 +43,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
   identical with WLINK 10.6 in DOSBox (`dosbox-lab`).
 
 ### Fixed
+- `build` per function: blockers are counted per kind (`blocker_counts` in JSON, `wrong-relative-ref ×20` in the
+  text, kinds separated by `, `), and after a code size change of an overlay module the differing functions behind
+  its first real difference carry `consequence: true` and `(follow-on)` in the text.
 - The build summary names an overlay module's first real difference as address, function and offset
   (`first real difference at ovl:VPCVW:0000:5344 in cvw_show_message +0x2D`), not only the size finding; the module
   JSON adds `code.first_difference_address`, `code.first_difference_function` and
