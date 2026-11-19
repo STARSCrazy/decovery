@@ -220,3 +220,42 @@ fn stale_analysis_is_one_warning_of_diagnose() {
     );
     assert!(!r.summary.contains("older than"), "{}", r.summary);
 }
+
+#[test]
+fn reference_blockers_of_the_build_are_shown() {
+    // `build` found two relocated fields of g wrong in the module comparison; its instructions are all equal
+    let dir = workspace(false);
+    add_overlay_c(dir.path());
+    let path = dir.path().join("knowledge/rebuild.toml");
+    let records = std::fs::read_to_string(&path).unwrap().replace(
+        "address = \"ovl:C:0000:5004\"\nname = \"g\"\nfile = \"c.c\"\nresult = \"identical\"\n",
+        "address = \"ovl:C:0000:5004\"\nname = \"g\"\nfile = \"c.c\"\nresult = \"differs\"\n\
+         message = \"2 relocated fields wrong in the overlay module comparison (first at +0x7); see the module verdict\"\n\
+         \n[[function.blockers]]\nkind = \"wrong-absolute-ref\"\nat = 7\n\
+         \n[[function.blockers]]\nkind = \"wrong-relative-ref\"\nat = 11\n",
+    );
+    std::fs::write(&path, records).unwrap();
+    let session = Session::open(dir.path()).unwrap();
+    let r = decovery_facade::diagnose(&session, "ovl:C:0000:5004", Budget::default()).unwrap();
+    assert_eq!(r.data["function"]["instructions_differing"], 0);
+    assert_eq!(
+        r.summary,
+        "fun_C_0000_5004: no differing instructions, but build found 2 wrong references (wrong-absolute-ref at +0x7, \
+         wrong-relative-ref at +0xB); see the module verdict of `build`"
+    );
+    assert_eq!(
+        r.data["references"],
+        serde_json::json!([
+            { "kind": "wrong-absolute-ref", "at": 7 },
+            { "kind": "wrong-relative-ref", "at": 11 },
+        ])
+    );
+    assert!(
+        r.data["message"]
+            .as_str()
+            .unwrap()
+            .contains("2 relocated fields wrong"),
+        "{}",
+        r.data
+    );
+}

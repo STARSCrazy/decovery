@@ -63,6 +63,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Overlay module comparison: an external name is bound to the address most of its uses agree on (before: its first
   use), and each disagreeing use names its expression, the field's content and the address it implies (e.g.
   `t_: bound at 84AA by its other uses; the field at E751 (t_) holds 84AC, as if t_ were at 84AC`).
+- `diagnose` of a function whose instructions are all equal but whose relocated fields `build` found wrong (module
+  comparison) no longer says only "no differing instructions": the summary lists the wrong references, and the
+  data carries them (`references`) with the build's message.
 - The header of an archived `comparison.txt` counted other instructions than its listing (2 against 1 for one
   inserted instruction): both now give the listing's counts, changed, inserted and removed instructions separately.
 - `find similar` and `show` named exemplars by the rebuild record's name (`fun_…`) instead of the knowledge's name.

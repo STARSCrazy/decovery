@@ -106,6 +106,27 @@ pub fn diagnose_tool(
     } else {
         format!("{name}: no differing instructions")
     };
+    // references the module comparison of `build` found wrong: the instructions alone do not show them
+    let references: Vec<&decovery_core::BlockerRecord> = record
+        .blockers
+        .iter()
+        .filter(|b| matches!(b.kind.as_str(), "wrong-absolute-ref" | "wrong-relative-ref"))
+        .collect();
+    if !references.is_empty() {
+        let list: Vec<String> = references
+            .iter()
+            .map(|b| match b.at {
+                Some(at) => format!("{} at +0x{at:X}", b.kind),
+                None => b.kind.clone(),
+            })
+            .collect();
+        let n = references.len();
+        summary.push_str(&format!(
+            ", but build found {n} wrong reference{} ({}); see the module verdict of `build`",
+            if n == 1 { "" } else { "s" },
+            list.join(", ")
+        ));
+    }
     if let Some((kind, n)) = deviation {
         summary.push_str(&format!("; deviation: {} ({n} instructions)", kind.id()));
     }
@@ -143,6 +164,12 @@ pub fn diagnose_tool(
             "pairs_text": shown,
         }),
     );
+    if !references.is_empty() {
+        response.data["references"] = json!(references);
+        if let Some(message) = &record.message {
+            response.data["message"] = json!(message);
+        }
+    }
     // the names and lengths come from the analysis: say once when it is older than the knowledge
     if crate::output::analysis_stale(session)? {
         response.data["warnings"] = json!([crate::output::STALE_ANALYSIS]);
