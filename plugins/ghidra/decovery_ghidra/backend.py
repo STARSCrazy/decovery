@@ -432,7 +432,8 @@ class GhidraBackend(Backend):
             csav += [at(spec, spec.start.offset + i) for i in aztec.find_csav(spec.data)]
             switch.setdefault((spec.start.space, spec.start.segment), []).extend(
                 spec.start.offset + i for i in aztec.find_switch_helpers(spec.data))
-        if not csav and not any(switch.values()):
+        dense = {id(spec): aztec.dense_switch_sites(spec.data, spec.start.offset) for spec in code}
+        if not csav and not any(switch.values()) and not any(dense.values()):
             return []
         self._install_fixups(program)
         functions = program.getFunctionManager()
@@ -454,7 +455,7 @@ class GhidraBackend(Backend):
             shared = switch.get((None, spec.start.segment), []) if spec.start.space else []
             for offset in own:
                 helper(at(spec, offset), SWITCH_FIXUP, True)
-            for site in aztec.switch_sites(spec.data, spec.start.offset, own + shared):
+            for site in aztec.switch_sites(spec.data, spec.start.offset, own + shared) + dense[id(spec)]:
                 call = at(spec, site.call)
                 for word in range(0, site.size, 2):
                     listing.createData(at(spec, site.table + word), WordDataType.dataType, 2)
@@ -613,7 +614,10 @@ class GhidraBackend(Backend):
             if site is None:
                 continue
             labels = aztec.case_labels(site["cases"], site["targets"])
-            value = int(token.getValue())
+            try:  # getValue() is the magnitude of a negative label; the text carries the sign
+                value = int(str(token.getText()), 0)
+            except ValueError:
+                value = int(token.getValue())
             label = labels.get(value) or next(
                 (labels[t] for t in labels if (t & 0xFFFF) == (value & 0xFFFF)), None)
             if label is None:

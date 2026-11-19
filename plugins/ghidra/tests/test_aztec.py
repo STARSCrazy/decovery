@@ -21,6 +21,10 @@ def near_call(at: int, target: int) -> bytes:
     return b"\xe8" + struct.pack("<H", (target - (at + 3)) & 0xFFFF)
 
 
+def DENSE(table: int) -> bytes:
+    return bytes.fromhex("73 08 93 D1 E3 2E FF A7") + struct.pack("<H", table)
+
+
 def switch_image() -> bytes:
     """`mov cx,3; call switch; dw 1, 2, 0x19, 0x1D, 0x21` at 0x009, helper at 0x200."""
     image = bytearray(b"\x90" * 0x220)
@@ -71,6 +75,16 @@ class AztecTests(unittest.TestCase):
         ]
         self.assertEqual(aztec.expected_warnings(lines, {0x1000C}), {1, 2, 3, 6, 7})
         self.assertEqual(aztec.expected_warnings(lines, set()), {1, 3, 7})
+
+    def test_dense_switch_with_table_in_front(self):
+        # table of 3 targets at 0x100, then sub ax,-1; cmp ax,3; jae; xchg; shl; jmp cs:[bx+0x100]
+        image = bytearray(b"\x90" * 0x100) + struct.pack("<3H", 0x130, 0x134, 0x138)
+        image += b"\x2d\xff\xff\x3d\x03\x00" + DENSE(0x100) + b"\xc3"
+        sites = aztec.dense_switch_sites(bytes(image), 0)
+        self.assertEqual(sites, [aztec.SwitchSite(call=0x111, table=0x100, size=6, cases=[0xFFFF, 0, 1],
+                                                  targets=[0x130, 0x134, 0x138, 0x116])])
+        self.assertEqual(aztec.case_labels(sites[0].cases, sites[0].targets)[0x130], "-0x1")
+        self.assertEqual(aztec.dense_switch_sites(bytes(image[0x106:]), 0x106), [])  # table not in front
 
     def test_switch_sites_respect_the_block_offset(self):
         image = switch_image()

@@ -318,6 +318,53 @@ class LocalGhidraTests(unittest.TestCase):
             self.assertNotIn("Removing unreachable block", code)
             self.assertIn("switch (AX): 0x1 -> 0019, 0x2 -> 001D; default -> 0021", code)
 
+    def test_aztec_dense_switch_in_an_overlay(self):
+        """`cmp ax,n; jae; xchg ax,bx; shl bx,1; jmp cs:[bx+table]` with the table in front, in an overlay at
+        offsets above 0x8000: a switch on the values, not code, and no negative address labels."""
+        from test_aztec import near_call
+
+        code = bytearray(b"\xcc" * 0x40)
+        code[0x00:0x03] = b"\xa1\x10\x00"  # mov ax,[0x0010]
+        code[0x03:0x05] = b"\xeb\x06"  # jmp 0x800B
+        code[0x05:0x0B] = struct.pack("<3H", 0x8020, 0x8024, 0x8028)
+        code[0x0B:0x0E] = b"\x3d\x03\x00"  # cmp ax,3
+        code[0x0E:0x18] = bytes.fromhex("73 08 93 D1 E3 2E FF A7 05 80")
+        code[0x18:0x1C] = b"\xb8\x00\x00\xc3"  # default: return 0
+        code[0x20:0x23] = near_call(0x8020, 0x8030)  # case 0: call g1
+        code[0x23] = 0xC3
+        code[0x24:0x27] = near_call(0x8024, 0x8034)  # case 1: call g2
+        code[0x27] = 0xC3
+        code[0x28:0x2C] = b"\xb8\x07\x00\xc3"  # case 2: return 7
+        code[0x30] = code[0x34] = 0xC3
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            program = {
+                "format": "mz",
+                "entry_points": ["ovl:OVA:0000:8000"],
+                "regions": [
+                    {"name": "image", "start": "seg:1000:0000", "size": 16, "arch": "x86-real-16",
+                     "permissions": "rwx", "blob": inline_blob(b"\xc3" + b"\x90" * 15)},
+                    {"name": "OVA.code", "start": "ovl:OVA:0000:8000", "size": len(code), "arch": "x86-real-16",
+                     "permissions": "r-x", "blob": inline_blob(bytes(code))},
+                ],
+            }
+            symbols = [{"address": a, "kind": "function", "name": n, "locals": [], "line_comments": []}
+                       for a, n in (("ovl:OVA:0000:8030", "g1"), ("ovl:OVA:0000:8034", "g2"))]
+            out = run(
+                build_plugin(),
+                req(2, "analyzer/open", {"program": program, "project_dir": str(root / "ghidra"),
+                                         "program_hash": "e" * 64}),
+                req(3, "analyzer/apply", {"symbols": symbols, "types_h": "", "references": []}),
+                req(4, "decompiler/decompile", {"addresses": ["ovl:OVA:0000:8000"], "out_dir": str(root / "c")}),
+                req(5, "shutdown"),
+            )
+            decompiled = by_id(out, 4)["result"][0]
+            self.assertIn("path", decompiled, decompiled)
+            text = Path(decompiled["path"]).read_text(encoding="utf-8")
+            for wanted in ("g1", "g2", "case 0x0:", "case 0x1:", "case 0x2:", "return 7;"):
+                self.assertIn(wanted, text)
+            self.assertNotIn("case -0x", text)
+
 
 if __name__ == "__main__":
     unittest.main()

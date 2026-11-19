@@ -38,6 +38,11 @@ class SwitchSite:
         return f"switch (AX): {pairs}; default -> {self.targets[-1]:04X}"
 
 
+def _case_value(value: int) -> str:
+    """16-bit case value, negative ones signed as the decompiler prints them."""
+    return f"-{0x10000 - value:#x}" if value >= 0x8000 else f"{value:#x}"
+
+
 def case_labels(cases: list[int], targets: list[int]) -> dict[int, str]:
     """Label text for each switch target (`targets` in table order, the default last), in the form the decompiler
     prints after `case `: `0x52`, `0x52: case 0x53`, `default`, `0x7: default`. The decompiler only knows the
@@ -45,7 +50,7 @@ def case_labels(cases: list[int], targets: list[int]) -> dict[int, str]:
     values: dict[int, list[int]] = {}
     for case, target in zip(cases, targets):
         values.setdefault(target, []).append(case)
-    labels = {target: ": case ".join(f"{v:#x}" for v in found) for target, found in values.items()}
+    labels = {target: ": case ".join(_case_value(v) for v in found) for target, found in values.items()}
     default = targets[-1]
     labels[default] = f"{labels[default]}: default" if default in labels else "default"
     return labels
@@ -89,6 +94,33 @@ def switch_sites(data: bytes, base: int, helpers: list[int]) -> list[SwitchSite]
             continue
         words = struct.unpack_from(f"<{2 * count - 1}H", data, start)
         sites.append(SwitchSite(call, table, size, list(words[:count - 1]), list(words[count - 1:])))
+    return sites
+
+
+# cmp ax,n; jae +8; xchg ax,bx; shl bx,1; jmp cs:[bx+table]  -- the dense switch, table of n targets in front
+DENSE_TAIL = bytes.fromhex("73 08 93 D1 E3 2E FF A7")
+
+
+def dense_switch_sites(data: bytes, base: int) -> list[SwitchSite]:
+    """Dense switches in `data` (at segment offset `base`): `[sub ax,k;] cmp ax,n; jae default; xchg ax,bx;
+    shl bx,1; jmp cs:[bx+table]` with the n-word table right in front of the `sub`/`cmp`. Case i is value i+k;
+    the default is the instruction after the jump. `call` is the jump's offset."""
+    sites = []
+    for tail in _find_all(data, DENSE_TAIL):
+        cmp = tail - 3
+        if cmp < 0 or data[cmp] != 0x3D or tail + 10 > len(data):
+            continue
+        count = struct.unpack_from("<H", data, cmp + 1)[0]
+        bias, start = 0, cmp
+        if cmp >= 3 and data[cmp - 3] == 0x2D:
+            bias, start = struct.unpack_from("<H", data, cmp - 2)[0], cmp - 3
+        table = struct.unpack_from("<H", data, tail + 8)[0]
+        if not 1 <= count <= MAX_CASES or table != base + start - 2 * count or table < base:
+            continue
+        words = struct.unpack_from(f"<{count}H", data, table - base)
+        jump = base + tail + 5
+        cases = [(i + bias) & 0xFFFF for i in range(count)]
+        sites.append(SwitchSite(jump, table, 2 * count, cases, [*words, jump + 5]))
     return sites
 
 

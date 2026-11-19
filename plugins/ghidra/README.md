@@ -94,7 +94,14 @@ For `x86-real-16` the import prepares what Ghidra does not find on its own (`azt
   `mov ax,-frame; call $csav` read their parameters and locals instead of `unaff_BP`.
 - **Switch helper** (`mov cx,n; call $swt` + inline table of n-1 values, n-1 targets, default): the helper does
   not return, the table is word data, the targets belong to the calling function and become a decompiler
-  jump-table override; a comment at the call lists value -> target, since the decompiler labels cases by target.
+  jump-table override; a comment at the call lists value -> target. Ghidra's override carries targets only
+  (no label values, no start value) and the decompiler labels such cases by target address, so the import keeps
+  each table in the program property `decovery.aztec.switch` and decompiling rewrites the case tokens to the
+  table values (`case 0x52: case 0x53:`, `default:`). The override notice and the unreachable call block at
+  these switches are left out of the C text, as is a `WARNING (jumptable)` repeat of a plain warning.
+- **Dense switch** (`[sub ax,k;] cmp ax,n; jae default; xchg ax,bx; shl bx,1; jmp cs:[bx+table]`, the n-word
+  table right in front): Ghidra decodes such tables in overlays as code; they are marked and modelled like the
+  helper switch, case i having value i+k.
 - **Decompiler Parameter ID** runs during analysis, so calls get the callee's argument count.
 
 ## Layout
