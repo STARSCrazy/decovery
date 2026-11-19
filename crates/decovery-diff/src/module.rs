@@ -50,6 +50,9 @@ pub struct ModuleVerdict {
     /// References whose binding disagrees with an earlier use of the same external name.
     pub ambiguous: Vec<String>,
     pub identical: bool,
+    /// Every external name bound inside the original's BSS when the files give less BSS than the original (name,
+    /// address); the BSS finding names only the first of them.
+    pub bss_externals: Vec<(String, u16)>,
     /// The wrong code references (one per wrong-reference blocker, same order): what the original's field leads
     /// to and what the rebuild's symbol and addend give.
     pub wrong_refs: Vec<WrongRef>,
@@ -532,9 +535,18 @@ pub fn compare_overlay_module(objects: &[&ObjectFile], overlay: &Overlay) -> Mod
     let bss = (h.bss, u16::try_from(bss).unwrap_or(u16::MAX));
     let identical = code_ok && data_equal && bss.0 == bss.1 && ambiguous.is_empty();
     let mut findings = size_findings(code_size, comparison.metrics.first_difference);
-    if bss.0 > bss.1 {
+    let bss_externals = if bss.0 > bss.1 {
         findings.push(bss_finding(bss, bss_start, &externals));
-    }
+        let end = bss_start + i64::from(bss.0);
+        externals
+            .iter()
+            .filter(|(_, a)| (bss_start..end).contains(&i64::from(**a)))
+            .map(|(n, a)| (n.clone(), *a))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    findings.extend(externals.iter().filter_map(|(n, &a)| suffix_mismatch(n, a)));
     ModuleVerdict {
         code: comparison,
         code_size,
@@ -548,6 +560,7 @@ pub fn compare_overlay_module(objects: &[&ObjectFile], overlay: &Overlay) -> Mod
         externals,
         ambiguous,
         wrong_refs,
+        bss_externals,
         identical,
         findings,
         data_gaps: u32::try_from(gaps_data.len()).unwrap_or(u32::MAX),
@@ -580,11 +593,36 @@ fn bss_finding(
     } else {
         String::new()
     };
+    let more = if more.is_empty() {
+        more
+    } else {
+        format!("{more} (all with addresses: the module's bss_externals)")
+    };
     format!(
         "{head} {n} external name{} bound inside the original BSS ({range}), defined in none of the files: {}{more}",
         if n == 1 { "" } else { "s" },
         inside[..n.min(SHOWN)].join(", ")
     )
+}
+
+/// An external name that ends in a four-digit hexadecimal address (`word_91b8`, `table_84aa`, `DAT_seg_9202`,
+/// the compiler's trailing `_` aside) other than the one the original binds it to: the name was likely given
+/// for another address, or the extern is used at the wrong one.
+fn suffix_mismatch(name: &str, bound: u16) -> Option<String> {
+    let base = name.strip_suffix('_').unwrap_or(name);
+    let (_, suffix) = base.rsplit_once('_')?;
+    if suffix.len() != 4
+        || !suffix.chars().all(|c| c.is_ascii_hexdigit())
+        || !suffix.chars().any(|c| c.is_ascii_digit())
+    {
+        return None;
+    }
+    let named = u16::from_str_radix(suffix, 16).ok()?;
+    (named != bound).then(|| {
+        format!(
+            "{name}: bound at {bound:04X}, but its name says {named:04X}; check the extern's name or the address its uses give"
+        )
+    })
 }
 
 /// Findings from the code size (original, rebuilt) and the first real byte difference.

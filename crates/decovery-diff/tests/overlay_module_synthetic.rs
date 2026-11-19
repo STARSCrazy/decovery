@@ -424,3 +424,35 @@ fn bss_missing_from_the_files_names_the_externs_bound_inside_it() {
         v.findings
     );
 }
+
+#[test]
+fn extern_whose_name_says_another_address_is_a_finding() {
+    let (mut e, mut f) = extern_with_addends(false);
+    for spec in [&mut e, &mut f] {
+        spec.named[0].name = "word_84a0_".into();
+    }
+    let ovl = read_overlay(&addend_overlay(0x84AA, 0), "T").expect("overlay");
+    let v = compare_overlay_module(&[&object(&e), &object(&f)], &ovl);
+    assert_eq!(v.externals.get("word_84a0_"), Some(&0x84AA), "{v:#?}");
+    assert!(
+        v.findings.iter().any(|x| x.starts_with(
+            "word_84a0_: bound at 84AA, but its name says 84A0"
+        )),
+        "{:?}",
+        v.findings
+    );
+    // a name that says its address is no finding
+    for spec in [&mut e, &mut f] {
+        spec.named[0].name = "word_84aa_".into();
+    }
+    let v = compare_overlay_module(&[&object(&e), &object(&f)], &ovl);
+    assert!(v.findings.is_empty(), "{:?}", v.findings);
+}
+
+#[test]
+fn bss_externals_lists_every_name_with_its_address() {
+    let (e, f) = extern_with_addends(false);
+    let ovl = read_overlay(&addend_overlay(0x2002, 8), "T").expect("overlay");
+    let v = compare_overlay_module(&[&object(&e), &object(&f)], &ovl);
+    assert_eq!(v.bss_externals, [("tbl_".to_string(), 0x2002)]);
+}

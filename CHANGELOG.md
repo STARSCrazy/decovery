@@ -6,6 +6,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- A module verdict whose BSS is smaller than the original's lists every external name bound inside the original BSS
+  with its address (`bss_externals`); the finding names the first eight and points there.
+- A module finding when an external name ends in a four-digit address (`word_91b8`, `table_84aa`, `DAT_…_9202`)
+  other than the one the original binds it to.
 - `build` and `diagnose` say when a source file defines its functions in another order than the original
   (`a.c: the functions are not in the original's address order: f (…) comes after g (…)`): the cause of shifted
   references that otherwise read as `wrong-relative-ref` or "no known cause". `diagnose` gives it as `order`.

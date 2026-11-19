@@ -1264,6 +1264,13 @@ fn overlay_modules_with_fields(
             "externals": v.externals.len(),
             "findings": v.findings,
         });
+        if !v.bss_externals.is_empty() {
+            entry["bss_externals"] = v
+                .bss_externals
+                .iter()
+                .map(|(n, a)| json!({"name": n, "address": format!("{a:04X}")}))
+                .collect();
+        }
         if let Value::Object(e) = &mut entry {
             e.extend(ambiguous_json(&v.ambiguous, v.code_size.0 != v.code_size.1));
         }
