@@ -95,6 +95,8 @@ struct VariantResult {
     shrunk: Option<(bool, String)>,
     /// A shrunk variant judged identical, judged again on its full file: this is the full file's result.
     confirmed_on_full: bool,
+    /// A differing variant: its differing region side by side, for the attempt's `comparison.txt`.
+    listing: Option<String>,
 }
 
 impl VariantResult {
@@ -112,6 +114,7 @@ impl VariantResult {
             message: Some(message),
             shrunk: None,
             confirmed_on_full: false,
+            listing: None,
         }
     }
 
@@ -298,6 +301,18 @@ impl Compare<'_> {
             );
         };
         let m = &comparison.metrics;
+        let listing = (comparison.verdict == decovery_diff::Verdict::Differs).then(|| {
+            let p = &placements[at];
+            let pairs = super::diagnose::function_pairs(
+                &p.function,
+                p.at,
+                self.program,
+                self.knowledge,
+                self.profile,
+                p.original_len,
+            );
+            super::diagnose::listing(&pairs)
+        });
         let mut verdict = verdict_id(&comparison.verdict);
         let checked = verdict != VerdictId::Unchecked;
         let mut blockers: Vec<BlockerRecord> =
@@ -340,6 +355,7 @@ impl Compare<'_> {
                 message,
                 shrunk: None,
                 confirmed_on_full: false,
+                listing,
             },
             warnings,
         )
@@ -1081,6 +1097,7 @@ pub(super) fn build_variants(
                 &a,
                 object.as_ref().map(|(n, b)| (n.as_str(), *b)),
                 compiled_file.map(|c| c.message.as_str()),
+                result.listing.as_deref(),
             );
             tried.push(Tried {
                 record: a,

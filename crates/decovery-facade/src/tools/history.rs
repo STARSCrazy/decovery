@@ -211,6 +211,7 @@ impl<'a> AttemptSource<'a> {
         record: &AttemptRecord,
         object: Option<(&str, &[u8])>,
         message: Option<&str>,
+        listing: Option<&str>,
     ) -> BTreeMap<String, Vec<u8>> {
         let mut files = BTreeMap::new();
         if let Some((start, end)) = self.span(&record.name) {
@@ -233,7 +234,7 @@ impl<'a> AttemptSource<'a> {
         }
         files.insert(
             "comparison.txt".to_string(),
-            comparison_text(record).into_bytes(),
+            comparison_text(record, listing).into_bytes(),
         );
         if let Some(message) = message.filter(|m| !m.trim().is_empty()) {
             files.insert(
@@ -245,8 +246,9 @@ impl<'a> AttemptSource<'a> {
     }
 }
 
-/// The comparison of an attempt as text (content only, no time: equal attempts archive once).
-fn comparison_text(r: &AttemptRecord) -> String {
+/// The comparison of an attempt as text (content only, no time: equal attempts archive once): the counts, then
+/// for a differing function its differing region side by side (`listing`).
+fn comparison_text(r: &AttemptRecord, listing: Option<&str>) -> String {
     let id = |v: Option<String>| v.unwrap_or_else(|| "-".into());
     let mut text = format!(
         "function: {} at {}\nresult: {}\nverdict: {}\ninstructions differing: {}\nbytes differing: {}\n",
@@ -265,6 +267,13 @@ fn comparison_text(r: &AttemptRecord) -> String {
     }
     if let Some(message) = r.extra.get("message").and_then(Value::as_str) {
         text.push_str(&format!("message:\n{message}\n"));
+    }
+    if let Some(listing) = listing {
+        text.push_str("\nrebuild against original (≠ differs, + rebuild only, - original only):\n");
+        text.push_str(listing);
+        if !listing.ends_with('\n') {
+            text.push('\n');
+        }
     }
     text
 }

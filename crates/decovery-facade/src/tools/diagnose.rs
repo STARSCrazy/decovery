@@ -3,11 +3,11 @@
 use decovery_core::Address;
 use decovery_core::Program;
 use decovery_diff::{
-    CompareOptions, PairKind, SymbolView, classify_deviation, diagnose, instruction_pairs,
+    CompareOptions, Pair, PairKind, SymbolView, classify_deviation, diagnose, instruction_pairs,
     pairs_text,
 };
 use decovery_objects::{FunctionView, ObjectFormat, ObjectModule, functions, read_object};
-use decovery_toolchain::rebuild_profile;
+use decovery_toolchain::{Profile, rebuild_profile};
 use serde_json::{Value, json};
 
 use super::build::{OBJECTS_DIR, is_public, original_len, symbol_sizes, toolchain};
@@ -74,27 +74,9 @@ pub fn diagnose_tool(
         .map_or(0, |s| s.bits);
     let program = crate::program::load(ws)?;
     let knowledge = KnowledgeView::new(ws, Some(&session.analysis));
-    // Aztec C86 objects are compared with the image directly (no linker step, `build` uses link gaps): the
-    // relocated fields of the function take the original's bytes, as in `compare_with_gaps`
-    let patched = (profile.object_format == ObjectFormat::Aztec)
-        .then(|| with_original_fields(&view, start, &program, &knowledge));
-    let view = match &patched {
-        Some(module) => functions(module)
-            .into_iter()
-            .find(|f| f.section == view.section && f.start == view.start)
-            .unwrap_or(view),
-        None => view,
-    };
     let index = session.analysis.index();
     let length = original_len(Some(&index), &symbol_sizes(ws), start);
-    let pairs = instruction_pairs(
-        &view,
-        start,
-        &program,
-        &knowledge,
-        &profile.decoration,
-        &CompareOptions::new(profile.padding, length),
-    );
+    let pairs = function_pairs(&view, start, &program, &knowledge, &profile, length);
     let findings = diagnose(&pairs, bits, &profile.family);
     let deviation = classify_deviation(&pairs);
     let text = pairs_text(&pairs);
@@ -163,6 +145,34 @@ pub fn diagnose_tool(
     );
     response.handles = handles;
     Ok(response)
+}
+
+/// The instruction pairs of the rebuilt function `view` placed at `start` against the original, aligned as the
+/// comparison does. Aztec C86 objects are compared with the image directly (no linker step, `build` uses link
+/// gaps): the relocated fields of the function take the original's bytes, as in `compare_with_gaps`.
+pub(super) fn function_pairs(
+    view: &FunctionView,
+    start: Address,
+    program: &Program,
+    knowledge: &KnowledgeView<'_>,
+    profile: &Profile,
+    length: Option<u32>,
+) -> Vec<Pair> {
+    let patched = (profile.object_format == ObjectFormat::Aztec)
+        .then(|| with_original_fields(view, start, program, knowledge));
+    let patched_view = patched.as_ref().and_then(|module| {
+        functions(module)
+            .into_iter()
+            .find(|f| f.section == view.section && f.start == view.start)
+    });
+    instruction_pairs(
+        patched_view.as_ref().unwrap_or(view),
+        start,
+        program,
+        knowledge,
+        &profile.decoration,
+        &CompareOptions::new(profile.padding, length),
+    )
 }
 
 /// A copy of the module of `f` whose relocated fields inside `f` hold the original's bytes at `start` and carry
@@ -234,6 +244,25 @@ pub(super) fn function_start(session: &Session, target: &str) -> Result<Address,
             .map_or(a, |f| f.start)),
         None => Ok(resolve(session, target)?.function),
     }
+}
+
+/// Lines of the side-by-side listing an attempt's `comparison.txt` keeps.
+const LISTING_LINES: usize = 60;
+
+/// The instruction pairs side by side as `diagnose` shows them (differing lines marked, long equal runs
+/// collapsed, the counts at the end), cut after [`LISTING_LINES`] lines.
+pub(super) fn listing(pairs: &[Pair]) -> String {
+    let text = pairs_text(pairs);
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() <= LISTING_LINES {
+        return text;
+    }
+    let mut out = lines[..LISTING_LINES].join("\n");
+    out.push_str(&format!(
+        "\n… {} more lines; the whole listing: decovery diagnose\n",
+        lines.len() - LISTING_LINES
+    ));
+    out
 }
 
 /// The whole lines of `text` that fit into `chars`, then the marker.

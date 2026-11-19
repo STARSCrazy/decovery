@@ -39,11 +39,7 @@ fn function_variant_of_an_overlay_function_reads_the_overlay() {
         overlay_fixture::named_object("amain", &[0xB8, 1, 0, 0xC3]),
     )
     .unwrap();
-    let source = "int amain()
-{
-    return 1;
-}
-";
+    let source = "int amain()\n{\n    return 1;\n}\n";
     let response = run(ws.path(), &function_variant("amain", source));
     let v = &response.data["variants"][0];
     assert_eq!(v["verdict"], "identical", "{v}");
@@ -130,5 +126,31 @@ fn function_source_for_a_function_not_in_the_file_says_what_is_expected() {
         message.contains("a.c: the file does not define amain yet")
             && message.contains("must be in it already"),
         "{message}"
+    );
+}
+
+#[test]
+fn comparison_of_a_differing_function_lists_its_differing_region() {
+    let python = python_or_skip!();
+    let (ws, _objects) = buildable(&python);
+    let mut request = BuildRequest::default();
+    request.files = vec!["a.c".into()];
+    let response = run(ws.path(), &request);
+    assert_eq!(response.data["functions"][0]["verdict"], "differs");
+    let listed = decovery_facade::history(ws.path(), "amain", 5, Budget::default()).unwrap();
+    let id = listed.data["attempts"][0]["archive"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{}", listed.data))
+        .to_string();
+    let archive = decovery_facade::history_archive(ws.path(), "amain", &id, Budget::default()).unwrap();
+    let text = archive.data["comparison"].as_str().unwrap();
+    assert!(text.contains("rebuild against original"), "{text}");
+    let differing = text
+        .lines()
+        .find(|l| l.starts_with('≠'))
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(
+        differing.contains("mov ax,5") && differing.contains("mov ax,1"),
+        "{text}"
     );
 }

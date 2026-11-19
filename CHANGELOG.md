@@ -6,6 +6,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- The archived `comparison.txt` of a differing attempt (`build`, its variants) lists the differing region side by
+  side, as `diagnose` shows it (rebuild against original, differing lines marked, equal runs collapsed), cut after
+  60 lines.
 - Phase-4 acceptance (`docs/parity/phase-4.md`): on the third target (MZ program with 13 overlays, Aztec C86 4.2b)
   `build` on the migrated workspace gives 322 identical functions and 7 identical overlay modules; 1144 of 1144
   verdicts equal Decomp's frozen baseline, no deviations.

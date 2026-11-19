@@ -518,6 +518,7 @@ pub fn build(
     );
     drop(refs);
     let mut originals: HashMap<Address, String> = HashMap::new();
+    let mut listings: HashMap<Address, String> = HashMap::new();
     progress(Progress::new(
         0,
         Some(placements.len() as u64),
@@ -540,7 +541,7 @@ pub fn build(
             .filter(|(i, _)| sources[*i].compiler == profile.id && is_c(&sources[*i].name))
             .map(|(_, object)| object)
             .collect();
-        compare_placed(
+        let compared = compare_placed(
             &ws,
             &profile,
             &rebuild.frames,
@@ -549,7 +550,22 @@ pub fn build(
             &placements,
             &compiled,
             &mut warnings,
-        )
+        );
+        // the differing region of every differing function, side by side, for its attempt's comparison.txt
+        for (p, c) in placements.iter().zip(&compared) {
+            if c.verdict == decovery_diff::Verdict::Differs {
+                let pairs = super::diagnose::function_pairs(
+                    &p.function,
+                    p.at,
+                    &program,
+                    &knowledge,
+                    &profile,
+                    p.original_len,
+                );
+                listings.insert(p.at, super::diagnose::listing(&pairs));
+            }
+        }
+        compared
     };
     drop(placements);
 
@@ -716,6 +732,7 @@ pub fn build(
         &headers,
         &fingerprint,
         &originals,
+        &listings,
         &request.record,
     );
     warnings.extend(record_attempts(root, tried));
@@ -1438,6 +1455,7 @@ fn attempts_of(
     headers: &BTreeMap<String, String>,
     fingerprint: &str,
     originals: &HashMap<Address, String>,
+    listings: &HashMap<Address, String>,
     record_as: &RecordAs,
 ) -> Vec<Tried> {
     let attempt_sources: Vec<AttemptSource> = sources
@@ -1487,8 +1505,12 @@ fn attempts_of(
             .filter(|_| source.error.is_none())
             .map(|bytes| (object_name(&source.dos_name), bytes));
         let message = compiled.map(|c| c.message.as_str());
-        let files =
-            attempt_source.files(&a, object.as_ref().map(|(n, b)| (n.as_str(), *b)), message);
+        let files = attempt_source.files(
+            &a,
+            object.as_ref().map(|(n, b)| (n.as_str(), *b)),
+            message,
+            listings.get(&r.address).map(String::as_str),
+        );
         tried.push(Tried {
             record: a,
             files,
